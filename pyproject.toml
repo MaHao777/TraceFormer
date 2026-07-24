@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "huav"
+version = "0.1.0"
+description = "Multi-scale dual-view event-level tiny-object detector for HUAV"
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+dependencies = ["torch", "numpy", "PyYAML"]
+
+[project.optional-dependencies]
+dev = ["pytest", "ruff"]
+
+[project.scripts]
+huav-inspect = "huav.cli.inspect:main"
+huav-train = "huav.cli.train:main"
+huav-evaluate = "huav.cli.evaluate:main"
+huav-predict = "huav.cli.predict:main"
+huav-package = "huav.cli.package:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"

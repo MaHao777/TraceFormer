@@ -1,0 +1,29 @@
+# External datasets and raw event files
+/data/
+/datasets/
+*.npz
+
+# Checkpoints, generated predictions and Codebench artifacts
+checkpoints/
+weights/
+*.pt
+*.pth
+outputs/
+submissions/
+*.zip
+
+# Runtime and tool caches
+logs/
+runs/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+
+# Build and environment artifacts
+build/
+dist/
+*.egg-info/
+.venv/
+venv/

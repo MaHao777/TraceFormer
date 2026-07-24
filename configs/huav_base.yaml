@@ -1,0 +1,41 @@
+resolution:
+  width: 346
+  height: 260
+model:
+  time_bins: [32, 16, 8]
+  feature_channels: 8
+  attention_heads: 2
+  window_time: 4
+  window_space: 16
+  cross_time_radius: 1
+  dropout: 0.1
+inference:
+  sigmoid_threshold: 0.5
+dataset:
+  root: ../../训练集、验证集
+  duration_ms: 8000
+training:
+  device: cpu
+  epochs: 3
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  seed: 37
+  background_ratio: 10
+  num_threads: 14
+  output_root: ../outputs
+  auxiliary_warmup_epochs: 1
+  auxiliary_ramp_epochs: 2
+  target_sigma: 1.25
+  gradient_clip_norm: 1.0
+  max_train_files:
+  max_val_files:
+loss:
+  view_event_weight: 0.25
+  view_weight: 0.5
+  consistency_weight: 0.1
+  temporal_weight: 0.01
+evaluation:
+  optimize_threshold: true
+  threshold_steps: 19
+  frame_ms: 50
+  object_correct_fraction: 0.0001
