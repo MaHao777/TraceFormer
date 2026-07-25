@@ -26,7 +26,11 @@ from huav.inference import (
 from huav.models import SpatioTemporalConeDetector
 
 from .losses import EventFocalDiceLoss
-from .metrics import EventMetricAccumulator, EVUAVMetricAccumulator
+from .metrics import (
+    EventMetricAccumulator,
+    EVUAVMetricAccumulator,
+    competition_metrics,
+)
 from .sampling import sample_event_indices
 
 
@@ -173,9 +177,9 @@ def evaluate_model(
             steps=config.evaluation.threshold_steps,
             fallback=threshold,
         )
-    event_metrics = EventMetricAccumulator(threshold=threshold)
-    event_metrics.update(logits, labels)
-    official_metrics = EVUAVMetricAccumulator(
+    event_accumulator = EventMetricAccumulator(threshold=threshold)
+    event_accumulator.update(logits, labels)
+    object_accumulator = EVUAVMetricAccumulator(
         width=config.resolution.width,
         height=config.resolution.height,
         frame_ms=config.evaluation.frame_ms,
@@ -183,22 +187,32 @@ def evaluate_model(
         threshold=threshold,
     )
     for sequence_logits, sequence in sequence_results:
-        official_metrics.update(
+        object_accumulator.update(
             sequence_logits,
             sequence.labels,
             sequence.object_ids,
             sequence.timestamps_ms,
             sequence.events[:, :2],
         )
+    event = event_accumulator.compute()
+    object_metrics = object_accumulator.compute()
     return {
         "threshold": float(threshold),
-        "event": event_metrics.compute(),
-        "ev_uav_compatible": official_metrics.compute(),
+        "competition": competition_metrics(
+            event,
+            object_metrics,
+            width=config.resolution.width,
+            height=config.resolution.height,
+        ),
+        "event": event,
+        "ev_uav_compatible": object_metrics,
         "validation_files": len(dataset),
     }
 
 
 def _metrics_markdown(metrics: dict[str, Any]) -> str:
+    competition = metrics["competition"]
+    counts = competition["counts"]
     event = metrics["event"]
     official = metrics["ev_uav_compatible"]
     return "\n".join(
@@ -208,6 +222,29 @@ def _metrics_markdown(metrics: dict[str, Any]) -> str:
             f"- Decision threshold: `{metrics['threshold']:.6f}`",
             f"- Validation files: `{metrics['validation_files']}`",
             f"- Validation events: `{event['event_count']}`",
+            "",
+            "## Official JinSight competition score",
+            "",
+            "| Metric | Value | Definition |",
+            "|---|---:|---|",
+            f"| Score | {competition['score']:.12f} | Official weighted total |",
+            f"| IoU | {competition['iou']:.12f} | Intersection / union |",
+            f"| SegAcc | {competition['seg_acc']:.12f} | TP / GT-positive events |",
+            f"| Pd | {competition['pd']:.12f} | Detected / object-frame instances |",
+            f"| Fa | {competition['fa']:.12e} | False components / frame pixels |",
+            f"| ScoreFa | {competition['score_fa']:.12f} | exp(-10000 * Fa) |",
+            "",
+            "`Score = 0.2 * IoU + 0.1 * SegAcc + 0.4 * Pd + 0.3 * ScoreFa`",
+            "",
+            f"- Counts: intersection=`{counts['intersection']}`, union=`{counts['union']}`, "
+            f"true_positive=`{counts['true_positive']}`, "
+            f"gt_positive=`{counts['gt_positive']}`",
+            f"- Counts: detected_objects=`{counts['detected_objects']}`, "
+            f"objects=`{counts['objects']}`, false_alarms=`{counts['false_alarms']}`, "
+            f"frames=`{counts['frames']}`",
+            "- Official 50 ms framing uses floor(t_ms) and strict open intervals.",
+            "",
+            "## Event-level diagnostics",
             "",
             "| Metric | Value | Definition |",
             "|---|---:|---|",
@@ -341,7 +378,7 @@ def run_training(
     amp_enabled = _amp_is_enabled(config.training.mixed_precision, torch_device)
     scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
     history: list[dict[str, Any]] = []
-    best_iou = -1.0
+    best_score = -1.0
     best_metrics: dict[str, Any] | None = None
 
     print(
@@ -423,16 +460,18 @@ def run_training(
         epoch_record = {"epoch": epoch + 1, "train_loss": totals, "validation": metrics}
         history.append(epoch_record)
         _write_json(run_dir / "history.json", history)
-        iou = float(metrics["event"]["iou"])
+        competition = metrics["competition"]
+        score = float(competition["score"])
         print(
             f"epoch {epoch + 1}/{config.training.epochs}: "
-            f"loss={totals['total']:.6f} Pd={metrics['event']['pd']:.6f} "
-            f"Fa={metrics['event']['fa']:.6f} IoU={iou:.6f} "
-            f"Acc={metrics['event']['acc']:.6f} threshold={metrics['threshold']:.3f}",
+            f"loss={totals['total']:.6f} Score={score:.6f} "
+            f"IoU={competition['iou']:.6f} SegAcc={competition['seg_acc']:.6f} "
+            f"Pd={competition['pd']:.6f} Fa={competition['fa']:.3e} "
+            f"threshold={metrics['threshold']:.3f}",
             flush=True,
         )
-        if iou > best_iou:
-            best_iou = iou
+        if score > best_score:
+            best_score = score
             best_metrics = metrics
             _atomic_torch_save(
                 {
@@ -459,7 +498,8 @@ def run_training(
         "epochs": config.training.epochs,
         "mixed_precision": amp_enabled,
         "parameter_count": sum(parameter.numel() for parameter in model.parameters()),
-        "best_iou": best_iou,
+        "best_score": best_score,
+        "best_iou": float(best_metrics["competition"]["iou"]),
         "metrics": best_metrics,
     }
     _write_json(run_dir / "summary.json", summary)

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import torch
-from scipy.spatial import cKDTree
+from scipy.spatial import cKDTree # type: ignore[import]
 
 from huav.config import ConeHeadConfig
 

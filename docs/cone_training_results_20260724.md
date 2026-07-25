@@ -76,14 +76,24 @@ Epoch 3 reduced mean training loss and slightly increased Pd, but its extra fals
 - TP / FP / FN / TN: 57,205 / 3,332 / 8,301 / 1,355,492
 - Validation events: 1,424,330
 
-## EV-UAV-compatible result
+## Official JinSight competition result
 
-- Object Pd: 0.8650577125
-- Spatial-component Fa: 0.0000072052872
-- Detected / object instances: 4,122 / 4,765
-- False components / equivalent frames: 2,432 / 3,752
+- Score: 0.878893722080
+- IoU: 0.831009035707
+- SegAcc: 0.873278783623
+- Object Pd: 0.864762704746
+- Spatial-component Fa: 0.00000709270455194
+- ScoreFa: 0.931529848925
+- Detected / object instances: 4,118 / 4,762
+- False components / equivalent frames: 2,394 / 3,752
 
-This metric uses 50 ms equivalent frames, object-level detection, and false connected components normalized by frame count and sensor area. It is deliberately reported separately from event-level classification.
+The website score is exactly reproduced by
+`ScoreFa = exp(-10000 * Fa)` and
+`Score = 0.2 * IoU + 0.1 * SegAcc + 0.4 * Pd + 0.3 * ScoreFa`.
+The official evaluator uses 50 ms equivalent frames over the integer timestamp
+coordinate `floor(t_ms)` (`ev_loc[:, 2]`) with strict open frame intervals.
+The earlier local report used floating raw timestamps and therefore over-counted
+3 object instances, 4 detections, and 38 false components.
 
 ## Comparison with the previous dual-view run
 
@@ -97,7 +107,9 @@ The previous recorded result is `outputs/cpu_full_final_20260723/metrics.json` a
 | Acc | 0.988948 | 0.991833 | +0.002885 |
 | Precision | 0.907862 | 0.944959 | +0.037098 |
 
-IoU improved by 6.72% relative, while event-level Fa fell by 40.72%. Under the EV-UAV-compatible protocol, object Pd rose from 0.805247 to 0.865058 and false components fell from 3,773 to 2,432.
+IoU improved by 6.72% relative, while event-level Fa fell by 40.72%. Historical
+object-level comparisons in the original run artifacts used floating timestamps;
+the corrected official-score artifacts use the integer-millisecond website protocol.
 
 ## Independent checkpoint reproduction
 

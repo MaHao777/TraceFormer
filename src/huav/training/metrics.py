@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import math
+from typing import Any, Mapping
+
 import torch
 
 
@@ -111,7 +114,7 @@ class EVUAVMetricAccumulator:
         prediction = torch.sigmoid(logits.detach().cpu()) >= self.threshold
         labels = labels.detach().cpu() > 0.5
         object_ids = object_ids.detach().cpu().long()
-        timestamps_ms = timestamps_ms.detach().cpu().double()
+        timestamps_ms = torch.floor(timestamps_ms.detach().cpu().double())
         coordinates = coordinates.detach().cpu().long()
         if not len(logits):
             return
@@ -138,7 +141,11 @@ class EVUAVMetricAccumulator:
 
             false_mask = frame_mask & ~labels & prediction
             false_coordinates = coordinates[false_mask].tolist()
-            points = {(int(x), int(y)) for x, y in false_coordinates}
+            point_counts: dict[tuple[int, int], int] = {}
+            for x, y in false_coordinates:
+                point = (int(x), int(y))
+                point_counts[point] = (point_counts.get(point, 0) + 1) & 0xFF
+            points = {point for point, count in point_counts.items() if count}
             self.false_components += _connected_component_count(points)
 
     def compute(self) -> dict[str, float | int]:
@@ -159,4 +166,51 @@ class EVUAVMetricAccumulator:
         }
 
 
-__all__ = ["EVUAVMetricAccumulator", "EventMetricAccumulator"]
+def competition_metrics(
+    event: Mapping[str, float | int],
+    object_metrics: Mapping[str, float | int],
+    *,
+    width: int,
+    height: int,
+) -> dict[str, Any]:
+    """Return the exact JinSight competition metrics and weighted score."""
+    intersection = int(event["tp"])
+    union = intersection + int(event["fp"]) + int(event["fn"])
+    gt_positive = intersection + int(event["fn"])
+    detected_objects = int(object_metrics["detected_objects"])
+    objects = int(object_metrics["object_instances"])
+    false_alarms = int(object_metrics["false_components"])
+    frames = int(object_metrics["frame_count"])
+
+    iou = intersection / union if union else 0.0
+    seg_acc = intersection / gt_positive if gt_positive else 0.0
+    pd = detected_objects / objects if objects else 0.0
+    fa_denominator = frames * int(width) * int(height)
+    fa = false_alarms / fa_denominator if fa_denominator else 0.0
+    score_fa = math.exp(-10000.0 * fa)
+    score = 0.2 * iou + 0.1 * seg_acc + 0.4 * pd + 0.3 * score_fa
+    return {
+        "iou": float(iou),
+        "seg_acc": float(seg_acc),
+        "pd": float(pd),
+        "fa": float(fa),
+        "score_fa": float(score_fa),
+        "score": float(score),
+        "counts": {
+            "intersection": intersection,
+            "union": union,
+            "true_positive": intersection,
+            "gt_positive": gt_positive,
+            "detected_objects": detected_objects,
+            "objects": objects,
+            "false_alarms": false_alarms,
+            "frames": frames,
+        },
+    }
+
+
+__all__ = [
+    "EVUAVMetricAccumulator",
+    "EventMetricAccumulator",
+    "competition_metrics",
+]

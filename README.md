@@ -91,7 +91,7 @@ python -m huav.cli.evaluate `
 
 每次训练写入：
 
-- `best.pt`：验证事件 IoU 最优的权重、阈值和模型配置；
+- `best.pt`：比赛官网总分最优的权重、阈值和模型配置；
 - `config.yaml`：完整配置快照；
 - `dataset_manifest.json`：所有训练/验证 NPZ 的大小和 SHA-256；
 - `history.json`：逐 epoch 的 focal、Dice、总损失和验证指标；
@@ -100,24 +100,26 @@ python -m huav.cli.evaluate `
 
 ## 指标口径
 
-`metrics.json` 的 `event` 字段包含：
+`metrics.json` 首先提供 `competition` 字段，严格复现比赛官网口径：
 
-- `Pd = TP / (TP + FN)`；
-- `Fa = FP / (FP + TN)`；
 - `IoU = TP / (TP + FP + FN)`；
-- `Acc = (TP + TN) / All`。
+- `SegAcc = TP / (TP + FN)`，只统计正事件，并非整体二分类准确率；
+- `Pd = detected_objects / objects`；
+- `Fa = false_alarms / (frames × 346 × 260)`；
+- `ScoreFa = exp(-10000 × Fa)`；
+- `Score = 0.2 × IoU + 0.1 × SegAcc + 0.4 × Pd + 0.3 × ScoreFa`。
 
-`ev_uav_compatible` 另按 50 ms 等效帧、目标实例检出比例和背景误报连通分量计算，避免把目标级/空间虚警口径与事件二分类指标混用。验证集阈值只在训练阶段选择并写入 checkpoint；独立复评直接使用保存阈值。
+目标级指标按 50 ms 等效帧计算。官网实际使用 `floor(t_ms)` 后的整数毫秒坐标，并以严格开区间划分帧；这是 NPZ 中 `ev_loc[:, 2]` 的时间口径。`event` 字段继续保留整体准确率、事件级虚警率和 precision 等诊断指标，但训练选择最佳 checkpoint 时以 `competition.score` 为主。验证集阈值只在训练阶段选择并写入 checkpoint；独立复评直接使用保存阈值。
 
 ## 完整训练结果
 
 2026-07-24 在本机 CPU 上完成 99 个训练文件、24 个验证文件、3 个 epoch 的全量训练，耗时 33 分 17 秒。模型共 30,570 个参数，最佳权重来自 epoch 2：
 
-| Pd | Fa | IoU | Acc | Precision |
-|---:|---:|---:|---:|---:|
-| 0.873279 | 0.002452 | 0.831009 | 0.991833 | 0.944959 |
+| 官网总分 | IoU | SegAcc | Pd | Fa | ScoreFa |
+|---:|---:|---:|---:|---:|---:|
+| **0.878893722080** | 0.831009035707 | 0.873278783623 | 0.864762704746 | 7.09270455194e-06 | 0.931529848925 |
 
-最佳阈值为 `0.85`。独立重新加载 checkpoint 后，`reproduced_metrics.json` 与训练期 `metrics.json` 逐字段完全一致。
+该官网提交的原始计数为：`intersection/union=57205/68838`、`detected_objects/objects=4118/4762`、`false_alarms/frames=2394/3752`。最佳阈值为 `0.85`。
 
 相较仓库此前双视图完整验证记录，IoU 从 `0.778678` 提升到 `0.831009`，事件 Fa 从 `0.004137` 降至 `0.002452`。逐 epoch 损失、混淆矩阵、EV-UAV-compatible 指标、运行环境和所有产物路径见 [docs/cone_training_results_20260724.md](docs/cone_training_results_20260724.md)。
 

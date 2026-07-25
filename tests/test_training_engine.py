@@ -142,6 +142,16 @@ def test_cpu_training_writes_reproducible_metrics_and_checkpoint() -> None:
         metrics = json.loads((run_dir / "metrics.json").read_text(encoding="utf-8"))
         assert metrics["event"]["event_count"] == 4
         assert {"pd", "fa", "iou", "acc"}.issubset(metrics["event"])
+        assert {
+            "iou",
+            "seg_acc",
+            "pd",
+            "fa",
+            "score_fa",
+            "score",
+            "counts",
+        }.issubset(metrics["competition"])
+        assert summary["best_score"] == metrics["competition"]["score"]
         checkpoint = __import__("torch").load(
             run_dir / "best.pt", map_location="cpu", weights_only=True
         )

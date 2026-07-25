@@ -8,7 +8,11 @@ from huav.training.losses import (
     binary_dice_loss,
     binary_focal_loss,
 )
-from huav.training.metrics import EventMetricAccumulator, EVUAVMetricAccumulator
+from huav.training.metrics import (
+    EventMetricAccumulator,
+    EVUAVMetricAccumulator,
+    competition_metrics,
+)
 from huav.training.sampling import sample_event_indices
 
 
@@ -108,6 +112,75 @@ def test_ev_uav_compatibility_uses_reference_floor_frame_denominator() -> None:
     # Strict open intervals retain t=49 and t=99: two false components.
     assert metrics["false_components"] == 2
     assert metrics["fa"] == pytest.approx(2 / (2 * 4 * 3))
+
+
+def test_ev_uav_frames_use_official_integer_millisecond_coordinates() -> None:
+    accumulator = EVUAVMetricAccumulator(
+        width=4,
+        height=3,
+        frame_ms=50,
+        object_correct_fraction=0.0001,
+        threshold=0.5,
+    )
+    accumulator.update(
+        torch.full((3,), 5.0),
+        torch.zeros(3),
+        torch.zeros(3, dtype=torch.long),
+        torch.tensor([49.9, 50.1, 99.9], dtype=torch.float64),
+        torch.tensor([[0, 0], [1, 0], [2, 0]]),
+    )
+
+    assert accumulator.compute()["false_components"] == 2
+
+
+def test_ev_uav_false_mask_matches_official_uint8_wraparound() -> None:
+    accumulator = EVUAVMetricAccumulator(
+        width=4,
+        height=3,
+        frame_ms=50,
+        object_correct_fraction=0.0001,
+        threshold=0.5,
+    )
+    accumulator.update(
+        torch.full((256,), 5.0),
+        torch.zeros(256),
+        torch.zeros(256, dtype=torch.long),
+        torch.full((256,), 1.9, dtype=torch.float64),
+        torch.zeros((256, 2), dtype=torch.long),
+    )
+
+    assert accumulator.compute()["false_components"] == 0
+
+
+def test_competition_metrics_reproduce_official_website_score() -> None:
+    competition = competition_metrics(
+        event={"tp": 57205, "fp": 3332, "fn": 8301},
+        object_metrics={
+            "detected_objects": 4118,
+            "object_instances": 4762,
+            "false_components": 2394,
+            "frame_count": 3752,
+        },
+        width=346,
+        height=260,
+    )
+
+    assert competition["iou"] == pytest.approx(0.831009035707)
+    assert competition["seg_acc"] == pytest.approx(0.873278783623)
+    assert competition["pd"] == pytest.approx(0.864762704746)
+    assert competition["fa"] == pytest.approx(7.09270455194e-06)
+    assert competition["score_fa"] == pytest.approx(0.931529848925)
+    assert competition["score"] == pytest.approx(0.87889372208)
+    assert competition["counts"] == {
+        "intersection": 57205,
+        "union": 68838,
+        "true_positive": 57205,
+        "gt_positive": 65506,
+        "detected_objects": 4118,
+        "objects": 4762,
+        "false_alarms": 2394,
+        "frames": 3752,
+    }
 
 
 def test_metrics_reject_nonfinite_logits() -> None:

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from .losses import EventFocalDiceLoss, binary_dice_loss, binary_focal_loss
-from .metrics import EventMetricAccumulator, EVUAVMetricAccumulator
+from .metrics import EventMetricAccumulator, EVUAVMetricAccumulator, competition_metrics
 from .sampling import sample_event_indices
 
 
@@ -41,5 +41,6 @@ __all__ = [
     "Trainer",
     "binary_dice_loss",
     "binary_focal_loss",
+    "competition_metrics",
     "sample_event_indices",
 ]
