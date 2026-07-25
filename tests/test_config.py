@@ -45,11 +45,37 @@ def test_base_yaml_exposes_cone_training_and_loss_configuration() -> None:
     assert config.dataset.duration_ms == 8000
     assert config.training.device == "cpu"
     assert config.training.background_ratio == 10
+    assert config.training.hard_negative_fraction == 0.0
+    assert config.training.dense_sequence_weight == 1.0
+    assert config.training.min_learning_rate_ratio == 1.0
     assert config.training.mixed_precision is False
     assert config.loss.focal_alpha == 0.75
     assert config.loss.focal_gamma == 2.0
     assert config.loss.lambda_dice == 1.0
+    assert config.loss.lambda_object_frame == 0.0
     assert config.evaluation.frame_ms == 50
+
+
+def test_score_optimized_yaml_exposes_dense_domain_training_configuration() -> None:
+    config = load_config(Path("configs/huav_score_optimized.yaml"))
+
+    assert config.model.spatial_block_size_x == 8
+    assert config.model.spatial_block_size_y == 8
+    assert config.model.num_time_blocks == 64
+    assert config.model.token_dim == 48
+    assert config.model.event_embed_dim == 24
+    assert config.model.num_layers == 3
+    assert tuple(config.model.layer_time_scales) == (0.5, 0.75, 1.0)
+    assert config.model.max_neighbors_per_cone == 8
+    assert config.training.epochs == 6
+    assert config.training.hard_negative_fraction == 0.5
+    assert config.training.dense_sequence_event_threshold == 300000
+    assert config.training.dense_sequence_background_polarity_max == 0.65
+    assert config.training.dense_sequence_weight == 3.0
+    assert config.training.min_learning_rate_ratio == 0.1
+    assert config.loss.lambda_dice == 0.75
+    assert config.loss.lambda_object_frame == 0.25
+    assert config.loss.object_frame_logit_margin == 2.0
 
 
 def test_cross_field_config_validation_rejects_inconsistent_values() -> None:
@@ -95,6 +121,27 @@ def test_cross_field_config_validation_rejects_inconsistent_values() -> None:
         lambda: replace(
             valid,
             loss=replace(valid.loss, lambda_dice=0.0),
+        ).validate(),
+    )
+    raises(
+        ValueError,
+        lambda: replace(
+            valid,
+            training=replace(valid.training, hard_negative_fraction=1.1),
+        ).validate(),
+    )
+    raises(
+        ValueError,
+        lambda: replace(
+            valid,
+            training=replace(valid.training, dense_sequence_weight=0.5),
+        ).validate(),
+    )
+    raises(
+        ValueError,
+        lambda: replace(
+            valid,
+            loss=replace(valid.loss, lambda_object_frame=-0.1),
         ).validate(),
     )
 

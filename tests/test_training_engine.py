@@ -17,8 +17,15 @@ from huav.config import (
     ModelConfig,
     TrainingConfig,
 )
+from huav.data import LoadedEventSequence
 from huav.models import SpatioTemporalConeDetector
-from huav.training.engine import _amp_is_enabled, evaluate_checkpoint, run_training
+from huav.training.engine import (
+    _amp_is_enabled,
+    _dense_sequence_loss_weight,
+    _select_competition_threshold,
+    evaluate_checkpoint,
+    run_training,
+)
 from huav.training.losses import EventFocalDiceLoss
 
 
@@ -155,6 +162,7 @@ def test_cpu_training_writes_reproducible_metrics_and_checkpoint() -> None:
         checkpoint = __import__("torch").load(
             run_dir / "best.pt", map_location="cpu", weights_only=True
         )
+        assert checkpoint["schema_version"] == 3
         assert checkpoint["decision_threshold"] == metrics["threshold"]
         changed_config = replace(
             _config(data_root, output_root),
@@ -197,6 +205,83 @@ def test_amp_is_enabled_only_when_requested_on_cuda() -> None:
     assert not _amp_is_enabled(True, torch.device("cpu"))
 
 
+def test_threshold_selection_prefers_official_score_over_event_iou() -> None:
+    high_confidence_count = 100
+    probabilities = torch.tensor(
+        [0.99] * high_confidence_count + [0.60, 0.60],
+        dtype=torch.float32,
+    )
+    labels = torch.tensor(
+        [1.0] * high_confidence_count + [1.0, 0.0],
+        dtype=torch.float32,
+    )
+    sequence = LoadedEventSequence(
+        events=torch.column_stack(
+            (
+                torch.arange(len(labels), dtype=torch.float32),
+                torch.zeros(len(labels)),
+                torch.zeros(len(labels)),
+                torch.ones(len(labels)),
+            )
+        ),
+        labels=labels,
+        object_ids=torch.tensor(
+            [1] * high_confidence_count + [2, 0],
+            dtype=torch.long,
+        ),
+        timestamps_ms=torch.tensor(
+            [1.0] * high_confidence_count + [51.0, 51.0],
+            dtype=torch.float64,
+        ),
+        source_path=Path("synthetic.npz"),
+    )
+    config = replace(
+        HUAVConfig.default(),
+        resolution=replace(
+            HUAVConfig.default().resolution,
+            width=1000,
+            height=1000,
+        ),
+    )
+
+    metrics = _select_competition_threshold(
+        [(torch.logit(probabilities), sequence)],
+        config,
+        steps=2,
+        fallback=0.5,
+    )
+
+    assert metrics["threshold"] == pytest.approx(0.5)
+    assert metrics["competition"]["pd"] == pytest.approx(1.0)
+
+
+def test_dense_balanced_polarity_sequences_receive_configured_loss_weight() -> None:
+    config = replace(
+        HUAVConfig.default(),
+        training=replace(
+            HUAVConfig.default().training,
+            dense_sequence_event_threshold=5,
+            dense_sequence_background_polarity_max=0.6,
+            dense_sequence_weight=3.0,
+        ),
+    )
+    events = torch.tensor(
+        [
+            [0.0, 0.0, 0.0, 1.0],
+            [0.0, 0.0, 0.1, 0.0],
+            [0.0, 0.0, 0.2, 1.0],
+            [0.0, 0.0, 0.3, 0.0],
+            [0.0, 0.0, 0.4, 1.0],
+            [0.0, 0.0, 0.5, 0.0],
+        ]
+    )
+    labels = torch.tensor([1.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+
+    weight = _dense_sequence_loss_weight(events, labels, config)
+
+    assert weight == pytest.approx(3.0)
+
+
 def test_training_forwards_all_events_before_sampling_loss(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -218,9 +303,16 @@ def test_training_forwards_all_events_before_sampling_loss(
         logits: torch.Tensor,
         targets: torch.Tensor,
         batch_indices: torch.Tensor | None = None,
+        **kwargs: object,
     ) -> dict[str, torch.Tensor]:
         loss_event_counts.append(len(logits))
-        return original_loss_forward(self, logits, targets, batch_indices)
+        return original_loss_forward(
+            self,
+            logits,
+            targets,
+            batch_indices,
+            **kwargs,
+        )
 
     monkeypatch.setattr(SpatioTemporalConeDetector, "forward", record_model_forward)
     monkeypatch.setattr(EventFocalDiceLoss, "forward", record_loss_forward)

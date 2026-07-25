@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import torch
-from scipy.spatial import cKDTree # type: ignore[import]
+from scipy.spatial import cKDTree  # type: ignore[import]
 
 from huav.config import ConeHeadConfig
 
@@ -99,7 +99,14 @@ class ConeNeighborBuilder:
                     global_indices = np.full(local_indices.shape, -1, dtype=np.int64)
                     global_indices[valid] = target_indices[local_indices[valid]]
                     scores = np.full(distances.shape, np.inf, dtype=np.float64)
-                    scores[valid] = time_distance * 1_000_000.0 + distances[valid]
+                    rank_priority = np.broadcast_to(
+                        ranks[None, :], distances.shape
+                    )
+                    scores[valid] = (
+                        rank_priority[valid] * 1_000_000.0
+                        + time_distance * 1_000.0
+                        + distances[valid]
+                    )
                     candidate_indices.append(global_indices)
                     candidate_scores.append(scores)
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -68,6 +70,58 @@ def binary_dice_loss(
     return torch.stack(sample_losses).mean()
 
 
+def object_frame_recall_loss(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    object_ids: torch.Tensor,
+    timestamps_ms: torch.Tensor,
+    *,
+    frame_ms: float = 50.0,
+    logit_margin: float = 2.0,
+) -> torch.Tensor:
+    targets = _validate_inputs(logits, targets)
+    if not (
+        object_ids.ndim == timestamps_ms.ndim == 1
+        and len(object_ids) == len(timestamps_ms) == len(logits)
+    ):
+        raise ValueError("object ids and timestamps must align with logits")
+    if frame_ms <= 0 or not math.isfinite(frame_ms):
+        raise ValueError("frame_ms must be positive and finite")
+    if not math.isfinite(logit_margin):
+        raise ValueError("logit_margin must be finite")
+    if len(logits) == 0:
+        return logits.sum() * 0.0
+    integer_time = torch.floor(timestamps_ms.to(dtype=torch.float64))
+    within_frame = torch.remainder(integer_time, frame_ms)
+    positive = (targets > 0.5) & (object_ids > 0) & (within_frame > 0)
+    if not bool(positive.any()):
+        return logits.sum() * 0.0
+    frame_indices = torch.div(
+        integer_time[positive],
+        frame_ms,
+        rounding_mode="floor",
+    ).long()
+    group_coordinates = torch.stack(
+        (object_ids[positive].long(), frame_indices),
+        dim=1,
+    )
+    _, inverse = torch.unique(group_coordinates, dim=0, return_inverse=True)
+    group_maximum = torch.full(
+        (int(inverse.max().item()) + 1,),
+        -torch.inf,
+        dtype=logits.dtype,
+        device=logits.device,
+    )
+    group_maximum.scatter_reduce_(
+        0,
+        inverse,
+        logits[positive],
+        reduce="amax",
+        include_self=True,
+    )
+    return F.softplus(float(logit_margin) - group_maximum).mean()
+
+
 class EventFocalDiceLoss(nn.Module):
     def __init__(
         self,
@@ -75,6 +129,8 @@ class EventFocalDiceLoss(nn.Module):
         focal_alpha: float = 0.75,
         focal_gamma: float = 2.0,
         lambda_dice: float = 1.0,
+        lambda_object_frame: float = 0.0,
+        object_frame_logit_margin: float = 2.0,
     ) -> None:
         super().__init__()
         if not 0 <= focal_alpha <= 1:
@@ -83,15 +139,25 @@ class EventFocalDiceLoss(nn.Module):
             raise ValueError("focal_gamma must be non-negative")
         if lambda_dice <= 0:
             raise ValueError("lambda_dice must be positive")
+        if lambda_object_frame < 0:
+            raise ValueError("lambda_object_frame must be non-negative")
+        if not math.isfinite(object_frame_logit_margin):
+            raise ValueError("object_frame_logit_margin must be finite")
         self.focal_alpha = float(focal_alpha)
         self.focal_gamma = float(focal_gamma)
         self.lambda_dice = float(lambda_dice)
+        self.lambda_object_frame = float(lambda_object_frame)
+        self.object_frame_logit_margin = float(object_frame_logit_margin)
 
     def forward(
         self,
         logits: torch.Tensor,
         targets: torch.Tensor,
         batch_indices: torch.Tensor | None = None,
+        *,
+        object_ids: torch.Tensor | None = None,
+        timestamps_ms: torch.Tensor | None = None,
+        frame_ms: float = 50.0,
     ) -> dict[str, torch.Tensor]:
         focal = binary_focal_loss(
             logits,
@@ -100,10 +166,30 @@ class EventFocalDiceLoss(nn.Module):
             gamma=self.focal_gamma,
         )
         dice = binary_dice_loss(logits, targets, batch_indices)
+        if self.lambda_object_frame:
+            if object_ids is None or timestamps_ms is None:
+                raise ValueError(
+                    "object ids and timestamps are required for object-frame loss"
+                )
+            object_frame = object_frame_recall_loss(
+                logits,
+                targets,
+                object_ids,
+                timestamps_ms,
+                frame_ms=frame_ms,
+                logit_margin=self.object_frame_logit_margin,
+            )
+        else:
+            object_frame = logits.sum() * 0.0
         return {
-            "total": focal + self.lambda_dice * dice,
+            "total": (
+                focal
+                + self.lambda_dice * dice
+                + self.lambda_object_frame * object_frame
+            ),
             "focal": focal,
             "dice": dice,
+            "object_frame": object_frame,
         }
 
 
@@ -111,4 +197,5 @@ __all__ = [
     "EventFocalDiceLoss",
     "binary_dice_loss",
     "binary_focal_loss",
+    "object_frame_recall_loss",
 ]

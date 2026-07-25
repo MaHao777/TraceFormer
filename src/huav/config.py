@@ -70,7 +70,12 @@ class TrainingConfig:
     weight_decay: float = 0.0001
     seed: int = 37
     background_ratio: int = 10
+    hard_negative_fraction: float = 0.0
     max_background_without_positive: int = 4096
+    dense_sequence_event_threshold: int = 300000
+    dense_sequence_background_polarity_max: float = 0.65
+    dense_sequence_weight: float = 1.0
+    min_learning_rate_ratio: float = 1.0
     num_threads: int = 14
     output_root: str | Path = "outputs"
     gradient_clip_norm: float = 1.0
@@ -84,6 +89,8 @@ class LossConfig:
     focal_alpha: float = 0.75
     focal_gamma: float = 2.0
     lambda_dice: float = 1.0
+    lambda_object_frame: float = 0.0
+    object_frame_logit_margin: float = 2.0
 
 
 @dataclass(frozen=True)
@@ -202,10 +209,42 @@ class HUAVConfig:
             or self.training.background_ratio < 0
         ):
             raise ValueError("background_ratio must be a non-negative integer")
+        hard_negative_fraction = _finite_real(
+            self.training.hard_negative_fraction,
+            "hard_negative_fraction",
+        )
+        if not 0 <= hard_negative_fraction <= 1:
+            raise ValueError("hard_negative_fraction must be in [0,1]")
         _positive_integer(
             self.training.max_background_without_positive,
             "max_background_without_positive",
         )
+        _positive_integer(
+            self.training.dense_sequence_event_threshold,
+            "dense_sequence_event_threshold",
+        )
+        polarity_max = _finite_real(
+            self.training.dense_sequence_background_polarity_max,
+            "dense_sequence_background_polarity_max",
+        )
+        if not 0.5 <= polarity_max <= 1:
+            raise ValueError(
+                "dense_sequence_background_polarity_max must be in [0.5,1]"
+            )
+        if (
+            _finite_real(
+                self.training.dense_sequence_weight,
+                "dense_sequence_weight",
+            )
+            < 1
+        ):
+            raise ValueError("dense_sequence_weight must be at least 1")
+        minimum_lr_ratio = _finite_real(
+            self.training.min_learning_rate_ratio,
+            "min_learning_rate_ratio",
+        )
+        if not 0 <= minimum_lr_ratio <= 1:
+            raise ValueError("min_learning_rate_ratio must be in [0,1]")
         _positive_integer(self.training.num_threads, "num_threads")
         _path_value(self.training.output_root, "output_root")
         if _finite_real(self.training.gradient_clip_norm, "gradient_clip_norm") <= 0:
@@ -223,6 +262,12 @@ class HUAVConfig:
             raise ValueError("focal_gamma must be non-negative")
         if _finite_real(self.loss.lambda_dice, "lambda_dice") <= 0:
             raise ValueError("lambda_dice must be positive")
+        if _finite_real(self.loss.lambda_object_frame, "lambda_object_frame") < 0:
+            raise ValueError("lambda_object_frame must be non-negative")
+        _finite_real(
+            self.loss.object_frame_logit_margin,
+            "object_frame_logit_margin",
+        )
         if not isinstance(self.evaluation.optimize_threshold, bool):
             raise ValueError("optimize_threshold must be boolean")
         _positive_integer(self.evaluation.threshold_steps, "threshold_steps")

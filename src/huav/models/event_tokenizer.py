@@ -23,7 +23,8 @@ class TokenizedEvents:
 class EventTokenizer(nn.Module):
     """Map occupied regular spacetime blocks to learned tokens."""
 
-    statistic_dim = 6
+    event_feature_dim = 6
+    statistic_dim = 8
 
     def __init__(
         self,
@@ -59,7 +60,7 @@ class EventTokenizer(nn.Module):
         self.num_y_blocks = math.ceil(self.height / self.spatial_block_size_y)
 
         self.event_encoder = nn.Sequential(
-            nn.Linear(4, self.event_embed_dim),
+            nn.Linear(self.event_feature_dim, self.event_embed_dim),
             nn.GELU(),
             nn.Linear(self.event_embed_dim, self.event_embed_dim),
             nn.GELU(),
@@ -109,7 +110,9 @@ class EventTokenizer(nn.Module):
             token_coords=torch.empty((0, 3), dtype=torch.long, device=device),
             token_batch_indices=torch.empty((0,), dtype=torch.long, device=device),
             event_token_indices=torch.empty((0,), dtype=torch.long, device=device),
-            event_local_features=torch.empty((0, 4), dtype=dtype, device=device),
+            event_local_features=torch.empty(
+                (0, self.event_feature_dim), dtype=dtype, device=device
+            ),
             token_statistics=torch.empty(
                 (0, self.statistic_dim), dtype=dtype, device=device
             ),
@@ -144,6 +147,16 @@ class EventTokenizer(nn.Module):
         )
         scaled_time = normalized_time * self.num_time_blocks
         time_index = torch.clamp(scaled_time.long(), max=self.num_time_blocks - 1)
+        sample_count = int(parsed_batches.max().item()) + 1
+        sample_event_counts = torch.bincount(
+            parsed_batches, minlength=sample_count
+        ).to(events.dtype)
+        sample_polarity_sum = torch.zeros(
+            sample_count, dtype=events.dtype, device=events.device
+        )
+        sample_polarity_sum.scatter_add_(0, parsed_batches, polarity)
+        sample_polarity_mean = sample_polarity_sum / sample_event_counts.clamp_min(1)
+        event_sample_polarity_mean = sample_polarity_mean[parsed_batches]
         local_features = torch.stack(
             (
                 (x - x_index * self.spatial_block_size_x)
@@ -152,6 +165,8 @@ class EventTokenizer(nn.Module):
                 / self.spatial_block_size_y,
                 scaled_time - time_index,
                 polarity,
+                polarity - event_sample_polarity_mean,
+                event_sample_polarity_mean,
             ),
             dim=1,
         )
@@ -171,6 +186,9 @@ class EventTokenizer(nn.Module):
             return_counts=True,
         )
         token_count = len(unique_keys)
+        token_batches = torch.div(
+            unique_keys, cells_per_sample, rounding_mode="floor"
+        )
         encoded_events = self.event_encoder(local_features)
         expanded_inverse = inverse[:, None].expand(-1, self.event_embed_dim)
         mean_pool = torch.zeros(
@@ -202,6 +220,14 @@ class EventTokenizer(nn.Module):
             local_time_square_sum / float_counts - local_time_mean.square()
         ).clamp_min(0)
         density = float_counts / (float_counts + 8.0)
+        token_sample_polarity_mean = sample_polarity_mean[token_batches]
+        polarity_contrast = positive_fraction - token_sample_polarity_mean
+        epsilon = torch.finfo(events.dtype).eps
+        bounded_polarity = positive_fraction.clamp(epsilon, 1.0 - epsilon)
+        polarity_entropy = -(
+            bounded_polarity * torch.log(bounded_polarity)
+            + (1.0 - bounded_polarity) * torch.log(1.0 - bounded_polarity)
+        )
         statistics = torch.stack(
             (
                 torch.log1p(float_counts),
@@ -210,12 +236,10 @@ class EventTokenizer(nn.Module):
                 local_time_mean,
                 local_time_variance,
                 density,
+                polarity_contrast,
+                polarity_entropy,
             ),
             dim=1,
-        )
-
-        token_batches = torch.div(
-            unique_keys, cells_per_sample, rounding_mode="floor"
         )
         token_spatial_keys = unique_keys.remainder(cells_per_sample)
         token_time = torch.div(

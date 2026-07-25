@@ -33,6 +33,8 @@ from .metrics import (
 )
 from .sampling import sample_event_indices
 
+CHECKPOINT_SCHEMA_VERSION = 3
+
 
 def build_model(config: HUAVConfig) -> SpatioTemporalConeDetector:
     return SpatioTemporalConeDetector(
@@ -107,78 +109,12 @@ def _atomic_torch_save(payload: Any, path: Path) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def _select_threshold(
-    logits: torch.Tensor, labels: torch.Tensor, *, steps: int, fallback: float
-) -> float:
-    candidates = torch.linspace(0.05, 0.95, steps=steps)
-    candidates = torch.unique(torch.cat((candidates, torch.tensor([fallback]))))
-    probabilities = torch.sigmoid(logits)
-    target = labels > 0.5
-    best_threshold = float(fallback)
-    best_iou = -1.0
-    for candidate in candidates.tolist():
-        prediction = probabilities >= candidate
-        intersection = int(torch.sum(prediction & target).item())
-        union = int(torch.sum(prediction | target).item())
-        iou = intersection / union if union else 0.0
-        if iou > best_iou or (
-            iou == best_iou
-            and abs(candidate - fallback) < abs(best_threshold - fallback)
-        ):
-            best_iou = iou
-            best_threshold = float(candidate)
-    return best_threshold
-
-
-def _amp_is_enabled(requested: bool, device: torch.device) -> bool:
-    return bool(requested and device.type == "cuda")
-
-
-@torch.no_grad()
-def evaluate_model(
-    model: SpatioTemporalConeDetector,
-    dataset: NPZEventDataset,
+def _metrics_at_threshold(
+    sequence_results: list[tuple[torch.Tensor, LoadedEventSequence]],
     config: HUAVConfig,
-    *,
-    device: torch.device,
-    progress: bool = False,
-    threshold_override: float | None = None,
+    threshold: float,
 ) -> dict[str, Any]:
-    model.eval()
-    sequence_results: list[tuple[torch.Tensor, LoadedEventSequence]] = []
-    all_logits: list[torch.Tensor] = []
-    all_labels: list[torch.Tensor] = []
-    for index in range(len(dataset)):
-        sequence = dataset[index]
-        events = sequence.events.to(device)
-        output = model(events)
-        logits = output["event_logits"].detach().cpu()
-        sequence_results.append((logits, sequence))
-        all_logits.append(logits)
-        all_labels.append(sequence.labels)
-        if progress:
-            print(
-                f"  validation {index + 1:03d}/{len(dataset):03d} "
-                f"{sequence.source_path.name}: {sequence.length:,} events",
-                flush=True,
-            )
-
-    logits = torch.cat(all_logits)
-    labels = torch.cat(all_labels)
-    threshold = (
-        float(threshold_override)
-        if threshold_override is not None
-        else config.inference.sigmoid_threshold
-    )
-    if threshold_override is None and config.evaluation.optimize_threshold:
-        threshold = _select_threshold(
-            logits,
-            labels,
-            steps=config.evaluation.threshold_steps,
-            fallback=threshold,
-        )
     event_accumulator = EventMetricAccumulator(threshold=threshold)
-    event_accumulator.update(logits, labels)
     object_accumulator = EVUAVMetricAccumulator(
         width=config.resolution.width,
         height=config.resolution.height,
@@ -187,6 +123,7 @@ def evaluate_model(
         threshold=threshold,
     )
     for sequence_logits, sequence in sequence_results:
+        event_accumulator.update(sequence_logits, sequence.labels)
         object_accumulator.update(
             sequence_logits,
             sequence.labels,
@@ -206,8 +143,115 @@ def evaluate_model(
         ),
         "event": event,
         "ev_uav_compatible": object_metrics,
-        "validation_files": len(dataset),
+        "validation_files": len(sequence_results),
     }
+
+
+def _select_competition_threshold(
+    sequence_results: list[tuple[torch.Tensor, LoadedEventSequence]],
+    config: HUAVConfig,
+    *,
+    steps: int,
+    fallback: float,
+) -> dict[str, Any]:
+    coarse = torch.linspace(0.05, 0.95, steps=steps)
+    coarse = torch.unique(torch.cat((coarse, torch.tensor([fallback]))))
+    coarse_step = 0.9 / max(1, steps - 1)
+    best_metrics: dict[str, Any] | None = None
+
+    def consider(candidate: float) -> None:
+        nonlocal best_metrics
+        metrics = _metrics_at_threshold(sequence_results, config, candidate)
+        if best_metrics is None:
+            best_metrics = metrics
+            return
+        score = float(metrics["competition"]["score"])
+        best_score = float(best_metrics["competition"]["score"])
+        if score > best_score or (
+            score == best_score
+            and abs(candidate - fallback)
+            < abs(float(best_metrics["threshold"]) - fallback)
+        ):
+            best_metrics = metrics
+
+    for candidate in coarse.tolist():
+        consider(float(candidate))
+    if best_metrics is None:
+        raise RuntimeError("threshold search produced no candidates")
+    center = float(best_metrics["threshold"])
+    lower = max(0.01, center - coarse_step)
+    upper = min(0.99, center + coarse_step)
+    refined = torch.linspace(lower, upper, steps=9)
+    for candidate in refined.tolist():
+        consider(float(candidate))
+    if best_metrics is None:
+        raise RuntimeError("threshold search produced no metrics")
+    return best_metrics
+
+
+def _amp_is_enabled(requested: bool, device: torch.device) -> bool:
+    return bool(requested and device.type == "cuda")
+
+
+def _dense_sequence_loss_weight(
+    events: torch.Tensor,
+    labels: torch.Tensor,
+    config: HUAVConfig,
+) -> float:
+    training = config.training
+    if (
+        len(events) < training.dense_sequence_event_threshold
+        or training.dense_sequence_weight <= 1
+    ):
+        return 1.0
+    background = labels <= 0.5
+    if not bool(background.any()):
+        return 1.0
+    background_polarity = float(events[background, 3].float().mean().item())
+    lower = 1.0 - training.dense_sequence_background_polarity_max
+    upper = training.dense_sequence_background_polarity_max
+    if lower <= background_polarity <= upper:
+        return float(training.dense_sequence_weight)
+    return 1.0
+
+
+@torch.no_grad()
+def evaluate_model(
+    model: SpatioTemporalConeDetector,
+    dataset: NPZEventDataset,
+    config: HUAVConfig,
+    *,
+    device: torch.device,
+    progress: bool = False,
+    threshold_override: float | None = None,
+) -> dict[str, Any]:
+    model.eval()
+    sequence_results: list[tuple[torch.Tensor, LoadedEventSequence]] = []
+    for index in range(len(dataset)):
+        sequence = dataset[index]
+        events = sequence.events.to(device)
+        output = model(events)
+        logits = output["event_logits"].detach().cpu()
+        sequence_results.append((logits, sequence))
+        if progress:
+            print(
+                f"  validation {index + 1:03d}/{len(dataset):03d} "
+                f"{sequence.source_path.name}: {sequence.length:,} events",
+                flush=True,
+            )
+    threshold = (
+        float(threshold_override)
+        if threshold_override is not None
+        else config.inference.sigmoid_threshold
+    )
+    if threshold_override is None and config.evaluation.optimize_threshold:
+        return _select_competition_threshold(
+            sequence_results,
+            config,
+            steps=config.evaluation.threshold_steps,
+            fallback=threshold,
+        )
+    return _metrics_at_threshold(sequence_results, config, threshold)
 
 
 def _metrics_markdown(metrics: dict[str, Any]) -> str:
@@ -365,11 +409,21 @@ def run_training(
         focal_alpha=config.loss.focal_alpha,
         focal_gamma=config.loss.focal_gamma,
         lambda_dice=config.loss.lambda_dice,
+        lambda_object_frame=config.loss.lambda_object_frame,
+        object_frame_logit_margin=config.loss.object_frame_logit_margin,
     )
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=config.training.learning_rate,
         weight_decay=config.training.weight_decay,
+    )
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=max(1, config.training.epochs),
+        eta_min=(
+            config.training.learning_rate
+            * config.training.min_learning_rate_ratio
+        ),
     )
     order_generator = torch.Generator().manual_seed(config.training.seed)
     sampling_generator = torch.Generator(device=torch_device.type).manual_seed(
@@ -392,7 +446,9 @@ def run_training(
             "total": 0.0,
             "focal": 0.0,
             "dice": 0.0,
+            "object_frame": 0.0,
         }
+        learning_rate = float(optimizer.param_groups[0]["lr"])
         order = torch.randperm(
             len(train_dataset), generator=order_generator
         ).tolist()
@@ -400,14 +456,6 @@ def run_training(
             sequence = train_dataset[dataset_index]
             events = sequence.events.to(torch_device)
             labels = sequence.labels.to(torch_device)
-            query_indices = sample_event_indices(
-                labels,
-                background_ratio=config.training.background_ratio,
-                generator=sampling_generator,
-                max_background_without_positive=(
-                    config.training.max_background_without_positive
-                ),
-            )
             batch_indices = torch.zeros(
                 len(events), dtype=torch.long, device=torch_device
             )
@@ -418,11 +466,34 @@ def run_training(
                 enabled=amp_enabled,
             ):
                 output = model(events, batch_indices)
+                query_indices = sample_event_indices(
+                    labels,
+                    logits=output["event_logits"],
+                    background_ratio=config.training.background_ratio,
+                    hard_negative_fraction=(
+                        config.training.hard_negative_fraction
+                    ),
+                    generator=sampling_generator,
+                    max_background_without_positive=(
+                        config.training.max_background_without_positive
+                    ),
+                )
                 losses = criterion(
                     output["event_logits"][query_indices],
                     labels[query_indices],
                     batch_indices[query_indices],
+                    object_ids=sequence.object_ids.to(torch_device)[query_indices],
+                    timestamps_ms=sequence.timestamps_ms.to(torch_device)[
+                        query_indices
+                    ],
+                    frame_ms=config.evaluation.frame_ms,
                 )
+                sequence_weight = _dense_sequence_loss_weight(
+                    events,
+                    labels,
+                    config,
+                )
+                losses["total"] = losses["total"] * sequence_weight
             if amp_enabled:
                 scaler.scale(losses["total"]).backward()
                 scaler.unscale_(optimizer)
@@ -444,6 +515,7 @@ def run_training(
                     f"  epoch {epoch + 1}/{config.training.epochs} "
                     f"train {step + 1:03d}/{len(order):03d} "
                     f"loss={losses['total'].item():.5f} "
+                    f"weight={sequence_weight:.2f} "
                     f"queries={len(query_indices):,}/{sequence.length:,}",
                     flush=True,
                 )
@@ -457,7 +529,12 @@ def run_training(
             device=torch_device,
             progress=progress,
         )
-        epoch_record = {"epoch": epoch + 1, "train_loss": totals, "validation": metrics}
+        epoch_record = {
+            "epoch": epoch + 1,
+            "learning_rate": learning_rate,
+            "train_loss": totals,
+            "validation": metrics,
+        }
         history.append(epoch_record)
         _write_json(run_dir / "history.json", history)
         competition = metrics["competition"]
@@ -475,7 +552,7 @@ def run_training(
             best_metrics = metrics
             _atomic_torch_save(
                 {
-                    "schema_version": 2,
+                    "schema_version": CHECKPOINT_SCHEMA_VERSION,
                     "model_state": model.state_dict(),
                     "epoch": epoch + 1,
                     "decision_threshold": float(metrics["threshold"]),
@@ -489,6 +566,7 @@ def run_training(
             _atomic_write_text(
                 run_dir / "metrics.md", _metrics_markdown(best_metrics)
             )
+        scheduler.step()
 
     if best_metrics is None:
         raise RuntimeError("training completed without validation metrics")
@@ -519,7 +597,7 @@ def evaluate_checkpoint(
     checkpoint = torch.load(
         checkpoint_path, map_location=torch_device, weights_only=True
     )
-    if checkpoint.get("schema_version") != 2:
+    if checkpoint.get("schema_version") != CHECKPOINT_SCHEMA_VERSION:
         raise ValueError("unsupported checkpoint schema version")
     expected_model = _serializable(asdict(config.model))
     expected_resolution = _serializable(asdict(config.resolution))
@@ -588,7 +666,7 @@ def generate_submission_package(
     checkpoint = torch.load(
         checkpoint_path, map_location=torch_device, weights_only=True
     )
-    if checkpoint.get("schema_version") != 2:
+    if checkpoint.get("schema_version") != CHECKPOINT_SCHEMA_VERSION:
         raise ValueError("unsupported checkpoint schema version")
     expected_model = _serializable(asdict(config.model))
     expected_resolution = _serializable(asdict(config.resolution))

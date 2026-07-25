@@ -7,8 +7,12 @@ import huav
 from huav import NPZEventDataset, SpatioTemporalConeDetector
 from huav.data import EventBatch, EventSequence, EventWindow
 from huav.inference import (
-    SubmissionManifest, SubmissionRow, generate_submission_rows,
-    pack_submission_zip, validate_submission_contract, write_prediction_txt,
+    SubmissionManifest,
+    SubmissionRow,
+    generate_submission_rows,
+    pack_submission_zip,
+    validate_submission_contract,
+    write_prediction_txt,
 )
 from huav.models import EventSegmenter, ModelOutput
 from huav.training import EvaluationResult, Evaluator, EventMetricAccumulator, Trainer

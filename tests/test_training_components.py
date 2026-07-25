@@ -7,6 +7,7 @@ from huav.training.losses import (
     EventFocalDiceLoss,
     binary_dice_loss,
     binary_focal_loss,
+    object_frame_recall_loss,
 )
 from huav.training.metrics import (
     EventMetricAccumulator,
@@ -26,6 +27,23 @@ def test_sampler_keeps_all_positives_and_caps_background() -> None:
 
     assert {0, 3}.issubset(set(selected.tolist()))
     assert int((labels[selected] == 0).sum()) == 6
+
+
+def test_sampler_reserves_configured_slots_for_highest_logit_negatives() -> None:
+    labels = torch.tensor([1.0, 0.0, 0.0, 0.0, 0.0])
+    logits = torch.tensor([0.0, -2.0, 4.0, 3.0, -1.0])
+
+    selected = sample_event_indices(
+        labels,
+        logits=logits,
+        background_ratio=2,
+        hard_negative_fraction=0.5,
+        generator=torch.Generator().manual_seed(7),
+    )
+
+    assert 0 in selected.tolist()
+    assert 2 in selected.tolist()
+    assert int((labels[selected] == 0).sum()) == 2
 
 
 def test_focal_and_dice_losses_prefer_correct_logits() -> None:
@@ -58,6 +76,60 @@ def test_total_loss_is_focal_plus_configured_per_sample_dice() -> None:
 def test_event_loss_rejects_disabled_dice_objective() -> None:
     with pytest.raises(ValueError, match="lambda_dice"):
         EventFocalDiceLoss(lambda_dice=0.0)
+
+
+def test_object_frame_loss_requires_one_confident_event_per_object_frame() -> None:
+    labels = torch.ones(4)
+    object_ids = torch.tensor([1, 1, 2, 2])
+    timestamps_ms = torch.tensor([1.0, 2.0, 51.0, 52.0])
+    confident = torch.tensor([3.0, -3.0, 3.0, -3.0])
+    missed = torch.full((4,), -3.0)
+
+    confident_loss = object_frame_recall_loss(
+        confident,
+        labels,
+        object_ids,
+        timestamps_ms,
+        frame_ms=50.0,
+        logit_margin=2.0,
+    )
+    missed_loss = object_frame_recall_loss(
+        missed,
+        labels,
+        object_ids,
+        timestamps_ms,
+        frame_ms=50.0,
+        logit_margin=2.0,
+    )
+
+    assert confident_loss < missed_loss
+
+
+def test_total_loss_adds_configured_object_frame_objective() -> None:
+    logits = torch.tensor([2.0, -1.0, 2.0, -1.0], requires_grad=True)
+    labels = torch.tensor([1.0, 0.0, 1.0, 0.0])
+    object_ids = torch.tensor([1, 0, 2, 0])
+    timestamps_ms = torch.tensor([1.0, 1.0, 51.0, 51.0])
+    criterion = EventFocalDiceLoss(
+        lambda_dice=0.5,
+        lambda_object_frame=0.25,
+        object_frame_logit_margin=2.0,
+    )
+
+    losses = criterion(
+        logits,
+        labels,
+        object_ids=object_ids,
+        timestamps_ms=timestamps_ms,
+        frame_ms=50.0,
+    )
+
+    expected = (
+        losses["focal"]
+        + 0.5 * losses["dice"]
+        + 0.25 * losses["object_frame"]
+    )
+    assert torch.allclose(losses["total"], expected)
 
 
 def test_per_sample_dice_safely_penalizes_false_positives_without_targets() -> None:

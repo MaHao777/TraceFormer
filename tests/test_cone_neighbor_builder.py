@@ -88,6 +88,28 @@ def test_neighbor_cap_keeps_temporally_then_spatially_nearest_tokens() -> None:
     assert neighbors.past_indices[3, 0, 0].item() == 2
 
 
+def test_neighbor_cap_preserves_available_longer_time_lags() -> None:
+    coords = torch.tensor(
+        [
+            [0, 0, 1],
+            [0, 0, 2],
+            [1, 0, 2],
+            [2, 0, 2],
+            [0, 0, 3],
+        ],
+        dtype=torch.long,
+    )
+    batches = torch.zeros(len(coords), dtype=torch.long)
+    builder = ConeNeighborBuilder(
+        cone_heads=(ConeHeadConfig(3.0, 0.0, 2),),
+        max_neighbors_per_cone=2,
+    )
+
+    neighbors = builder(coords, batches)
+
+    assert set(neighbors.past_indices[4, 0].tolist()) == {0, 1}
+
+
 def test_causal_mode_never_constructs_future_neighbors() -> None:
     coords = torch.tensor([[0, 0, 0], [0, 0, 1]], dtype=torch.long)
     batches = torch.zeros(2, dtype=torch.long)

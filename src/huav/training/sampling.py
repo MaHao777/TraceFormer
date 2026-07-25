@@ -8,7 +8,9 @@ import torch
 def sample_event_indices(
     labels: torch.Tensor,
     *,
+    logits: torch.Tensor | None = None,
     background_ratio: int = 10,
+    hard_negative_fraction: float = 0.0,
     generator: torch.Generator | None = None,
     max_background_without_positive: int = 4096,
 ) -> torch.Tensor:
@@ -16,6 +18,12 @@ def sample_event_indices(
         raise ValueError("labels must have shape [N]")
     if background_ratio < 0 or max_background_without_positive <= 0:
         raise ValueError("sampling limits are invalid")
+    if not 0 <= hard_negative_fraction <= 1:
+        raise ValueError("hard_negative_fraction must be in [0,1]")
+    if logits is not None and (logits.ndim != 1 or len(logits) != len(labels)):
+        raise ValueError("logits and labels must have matching shape [N]")
+    if hard_negative_fraction > 0 and logits is None:
+        raise ValueError("logits are required for hard-negative sampling")
     positive = torch.where(labels > 0.5)[0]
     negative = torch.where(labels <= 0.5)[0]
     maximum_negative = (
@@ -24,8 +32,37 @@ def sample_event_indices(
         else min(len(negative), max_background_without_positive)
     )
     if len(negative) > maximum_negative:
-        order = torch.randperm(len(negative), generator=generator, device=negative.device)
-        negative = negative[order[:maximum_negative]]
+        hard_count = min(
+            maximum_negative,
+            int(round(maximum_negative * hard_negative_fraction)),
+        )
+        hard_negative = negative.new_empty((0,))
+        remaining_negative = negative
+        if hard_count:
+            negative_logits = logits.detach()[negative]  # type: ignore[union-attr]
+            hard_local = torch.topk(
+                negative_logits,
+                k=hard_count,
+                largest=True,
+                sorted=False,
+            ).indices
+            hard_negative = negative[hard_local]
+            keep_mask = torch.ones(
+                len(negative), dtype=torch.bool, device=negative.device
+            )
+            keep_mask[hard_local] = False
+            remaining_negative = negative[keep_mask]
+        random_count = maximum_negative - hard_count
+        if random_count:
+            order = torch.randperm(
+                len(remaining_negative),
+                generator=generator,
+                device=negative.device,
+            )
+            random_negative = remaining_negative[order[:random_count]]
+            negative = torch.cat((hard_negative, random_negative))
+        else:
+            negative = hard_negative
     selected = torch.cat((positive, negative))
     if len(selected):
         order = torch.randperm(len(selected), generator=generator, device=selected.device)

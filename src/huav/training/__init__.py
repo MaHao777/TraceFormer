@@ -5,7 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
-from .losses import EventFocalDiceLoss, binary_dice_loss, binary_focal_loss
+from .losses import (
+    EventFocalDiceLoss,
+    binary_dice_loss,
+    binary_focal_loss,
+    object_frame_recall_loss,
+)
 from .metrics import EventMetricAccumulator, EVUAVMetricAccumulator, competition_metrics
 from .sampling import sample_event_indices
 
@@ -42,5 +47,6 @@ __all__ = [
     "binary_dice_loss",
     "binary_focal_loss",
     "competition_metrics",
+    "object_frame_recall_loss",
     "sample_event_indices",
 ]
