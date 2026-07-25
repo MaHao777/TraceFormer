@@ -1,9 +1,9 @@
-"""Validated YAML configuration for the HUAV dual-view model."""
+"""Validated YAML configuration for the HUAV spatiotemporal cone model."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
 import math
+from dataclasses import dataclass, replace
 from numbers import Integral, Real
 from pathlib import Path
 from typing import Any
@@ -18,14 +18,37 @@ class ResolutionConfig:
 
 
 @dataclass(frozen=True)
+class ConeHeadConfig:
+    base_radius: float
+    slope: float
+    max_time_distance: int
+
+
+DEFAULT_CONE_HEADS = (
+    ConeHeadConfig(base_radius=1.0, slope=0.5, max_time_distance=4),
+    ConeHeadConfig(base_radius=1.0, slope=1.0, max_time_distance=4),
+    ConeHeadConfig(base_radius=2.0, slope=1.5, max_time_distance=6),
+    ConeHeadConfig(base_radius=2.0, slope=2.0, max_time_distance=8),
+)
+
+
+@dataclass(frozen=True)
 class ModelConfig:
-    time_bins: tuple[int, ...] = (32, 16, 8)
-    feature_channels: int = 8
-    attention_heads: int = 2
-    window_time: int = 4
-    window_space: int = 16
-    cross_time_radius: int = 1
+    spatial_block_size_x: int = 8
+    spatial_block_size_y: int = 8
+    num_time_blocks: int = 64
+    token_dim: int = 32
+    event_embed_dim: int = 16
+    num_layers: int = 3
+    num_heads: int = 4
+    mlp_ratio: float = 2.0
     dropout: float = 0.1
+    cone_heads: tuple[ConeHeadConfig, ...] = DEFAULT_CONE_HEADS
+    layer_time_scales: tuple[float, ...] = (0.5, 0.75, 1.0)
+    max_neighbors_per_cone: int = 8
+    causal_mode: bool = False
+    direction_dropout: float = 0.0
+    debug_attention_stats: bool = False
 
 
 @dataclass(frozen=True)
@@ -47,22 +70,20 @@ class TrainingConfig:
     weight_decay: float = 0.0001
     seed: int = 37
     background_ratio: int = 10
+    max_background_without_positive: int = 4096
     num_threads: int = 14
     output_root: str | Path = "outputs"
-    auxiliary_warmup_epochs: int = 1
-    auxiliary_ramp_epochs: int = 2
-    target_sigma: float = 1.25
     gradient_clip_norm: float = 1.0
+    mixed_precision: bool = False
     max_train_files: int | None = None
     max_val_files: int | None = None
 
 
 @dataclass(frozen=True)
 class LossConfig:
-    view_event_weight: float = 0.25
-    view_weight: float = 0.5
-    consistency_weight: float = 0.1
-    temporal_weight: float = 0.01
+    focal_alpha: float = 0.75
+    focal_gamma: float = 2.0
+    lambda_dice: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -108,27 +129,58 @@ class HUAVConfig:
     def validate(self) -> "HUAVConfig":
         _positive_integer(self.resolution.width, "resolution width")
         _positive_integer(self.resolution.height, "resolution height")
-        if not isinstance(self.model.time_bins, (tuple, list)) or not self.model.time_bins:
-            raise ValueError("model time_bins must be a non-empty list or tuple")
-        for value in self.model.time_bins:
-            _positive_integer(value, "model time_bins entry")
-        if len(set(self.model.time_bins)) != len(self.model.time_bins):
-            raise ValueError("model time_bins must be unique")
-        _positive_integer(self.model.feature_channels, "feature_channels")
-        _positive_integer(self.model.attention_heads, "attention_heads")
-        _positive_integer(self.model.window_time, "window_time")
-        _positive_integer(self.model.window_space, "window_space")
-        if (
-            isinstance(self.model.cross_time_radius, bool)
-            or not isinstance(self.model.cross_time_radius, Integral)
-            or self.model.cross_time_radius < 0
+        for name in (
+            "spatial_block_size_x",
+            "spatial_block_size_y",
+            "num_time_blocks",
+            "token_dim",
+            "event_embed_dim",
+            "num_layers",
+            "num_heads",
+            "max_neighbors_per_cone",
         ):
-            raise ValueError("cross_time_radius must be a non-negative integer")
-        if self.model.feature_channels % self.model.attention_heads:
-            raise ValueError("feature_channels must be divisible by attention_heads")
+            _positive_integer(getattr(self.model, name), f"model {name}")
+        if self.model.token_dim % self.model.num_heads:
+            raise ValueError("token_dim must be divisible by num_heads")
+        if _finite_real(self.model.mlp_ratio, "mlp_ratio") <= 0:
+            raise ValueError("mlp_ratio must be positive")
         dropout = _finite_real(self.model.dropout, "dropout")
         if not 0 <= dropout < 1:
             raise ValueError("dropout must be in [0,1)")
+        if not isinstance(self.model.cone_heads, (tuple, list)):
+            raise ValueError("cone_heads must be a tuple or list")
+        if len(self.model.cone_heads) != self.model.num_heads:
+            raise ValueError("cone_heads must contain exactly one configuration per head")
+        for index, cone in enumerate(self.model.cone_heads):
+            if not isinstance(cone, ConeHeadConfig):
+                raise ValueError(f"cone_heads[{index}] must be a ConeHeadConfig")
+            if _finite_real(cone.base_radius, "cone base_radius") < 0:
+                raise ValueError("cone base_radius must be non-negative")
+            if _finite_real(cone.slope, "cone slope") < 0:
+                raise ValueError("cone slope must be non-negative")
+            _positive_integer(cone.max_time_distance, "cone max_time_distance")
+        if (
+            not isinstance(self.model.layer_time_scales, (tuple, list))
+            or len(self.model.layer_time_scales) != self.model.num_layers
+        ):
+            raise ValueError("layer_time_scales must contain one value per layer")
+        previous_scale = 0.0
+        for scale in self.model.layer_time_scales:
+            value = _finite_real(scale, "layer_time_scale")
+            if value <= 0 or value > 1:
+                raise ValueError("layer_time_scales must be in (0,1]")
+            if value < previous_scale:
+                raise ValueError("layer_time_scales must be non-decreasing")
+            previous_scale = value
+        if not isinstance(self.model.causal_mode, bool):
+            raise ValueError("causal_mode must be boolean")
+        direction_dropout = _finite_real(
+            self.model.direction_dropout, "direction_dropout"
+        )
+        if not 0 <= direction_dropout <= 1:
+            raise ValueError("direction_dropout must be in [0,1]")
+        if not isinstance(self.model.debug_attention_stats, bool):
+            raise ValueError("debug_attention_stats must be boolean")
         threshold = _finite_real(self.inference.sigmoid_threshold, "sigmoid_threshold")
         if not 0.0 <= threshold <= 1.0:
             raise ValueError("sigmoid_threshold must be in [0, 1]")
@@ -150,31 +202,27 @@ class HUAVConfig:
             or self.training.background_ratio < 0
         ):
             raise ValueError("background_ratio must be a non-negative integer")
+        _positive_integer(
+            self.training.max_background_without_positive,
+            "max_background_without_positive",
+        )
         _positive_integer(self.training.num_threads, "num_threads")
         _path_value(self.training.output_root, "output_root")
-        if (
-            isinstance(self.training.auxiliary_warmup_epochs, bool)
-            or not isinstance(self.training.auxiliary_warmup_epochs, Integral)
-            or self.training.auxiliary_warmup_epochs < 0
-        ):
-            raise ValueError("auxiliary_warmup_epochs must be non-negative")
-        _positive_integer(self.training.auxiliary_ramp_epochs, "auxiliary_ramp_epochs")
-        if _finite_real(self.training.target_sigma, "target_sigma") < 0:
-            raise ValueError("target_sigma must be non-negative")
         if _finite_real(self.training.gradient_clip_norm, "gradient_clip_norm") <= 0:
             raise ValueError("gradient_clip_norm must be positive")
+        if not isinstance(self.training.mixed_precision, bool):
+            raise ValueError("mixed_precision must be boolean")
         for name in ("max_train_files", "max_val_files"):
             value = getattr(self.training, name)
             if value is not None:
                 _positive_integer(value, name)
-        for name in (
-            "view_event_weight",
-            "view_weight",
-            "consistency_weight",
-            "temporal_weight",
-        ):
-            if _finite_real(getattr(self.loss, name), name) < 0:
-                raise ValueError(f"{name} must be non-negative")
+        focal_alpha = _finite_real(self.loss.focal_alpha, "focal_alpha")
+        if not 0 <= focal_alpha <= 1:
+            raise ValueError("focal_alpha must be in [0,1]")
+        if _finite_real(self.loss.focal_gamma, "focal_gamma") < 0:
+            raise ValueError("focal_gamma must be non-negative")
+        if _finite_real(self.loss.lambda_dice, "lambda_dice") <= 0:
+            raise ValueError("lambda_dice must be positive")
         if not isinstance(self.evaluation.optimize_threshold, bool):
             raise ValueError("optimize_threshold must be boolean")
         _positive_integer(self.evaluation.threshold_steps, "threshold_steps")
@@ -224,9 +272,20 @@ def load_config(path: Path | str) -> HUAVConfig:
         names = ", ".join(sorted(str(name) for name in unknown_sections))
         raise ValueError(f"unknown configuration section(s): {names}")
     try:
+        raw_model = dict(raw.get("model", {}))
+        if "cone_heads" in raw_model:
+            cone_values = raw_model["cone_heads"]
+            if not isinstance(cone_values, list):
+                raise ValueError("model cone_heads must be a list")
+            raw_model["cone_heads"] = tuple(
+                ConeHeadConfig(**value) if isinstance(value, dict) else value
+                for value in cone_values
+            )
+        if "layer_time_scales" in raw_model:
+            raw_model["layer_time_scales"] = tuple(raw_model["layer_time_scales"])
         config = HUAVConfig(
             resolution=ResolutionConfig(**raw.get("resolution", {})),
-            model=ModelConfig(**raw.get("model", {})),
+            model=ModelConfig(**raw_model),
             inference=InferenceConfig(**raw.get("inference", {})),
             dataset=DatasetConfig(**raw.get("dataset", {})),
             training=TrainingConfig(**raw.get("training", {})),

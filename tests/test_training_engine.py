@@ -1,21 +1,25 @@
 from __future__ import annotations
 
-from dataclasses import replace
 import json
 import os
+from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import numpy as np
 import pytest
+import torch
 
 from huav.config import (
+    ConeHeadConfig,
     DatasetConfig,
     HUAVConfig,
     ModelConfig,
     TrainingConfig,
 )
-from huav.training.engine import evaluate_checkpoint, run_training
+from huav.models import SpatioTemporalConeDetector
+from huav.training.engine import _amp_is_enabled, evaluate_checkpoint, run_training
+from huav.training.losses import EventFocalDiceLoss
 
 
 def _write_sequence(path: Path, offset: int) -> None:
@@ -39,6 +43,31 @@ def _write_sequence(path: Path, offset: int) -> None:
     np.savez(path, ev=events)
 
 
+def _write_imbalanced_sequence(path: Path) -> None:
+    dtype = [
+        ("x", "<i2"),
+        ("y", "<i2"),
+        ("t", "<f8"),
+        ("p", "i1"),
+        ("label", "i1"),
+        ("name", "i1"),
+    ]
+    rows = []
+    for index in range(12):
+        is_target = index in (0, 11)
+        rows.append(
+            (
+                index % 8,
+                index % 6,
+                index * 600.0,
+                index % 2,
+                int(is_target),
+                int(is_target),
+            )
+        )
+    np.savez(path, ev=np.array(rows, dtype=dtype))
+
+
 def _config(data_root: Path, output_root: Path) -> HUAVConfig:
     return replace(
         HUAVConfig.default(),
@@ -47,13 +76,24 @@ def _config(data_root: Path, output_root: Path) -> HUAVConfig:
             root=Path(os.path.relpath(data_root, Path.cwd())), duration_ms=8000
         ),
         model=ModelConfig(
-            time_bins=(4, 2),
-            feature_channels=8,
-            attention_heads=2,
-            window_time=2,
-            window_space=4,
-            cross_time_radius=1,
+            spatial_block_size_x=4,
+            spatial_block_size_y=3,
+            num_time_blocks=4,
+            token_dim=8,
+            event_embed_dim=4,
+            num_layers=1,
+            num_heads=2,
+            mlp_ratio=2.0,
             dropout=0.0,
+            cone_heads=(
+                ConeHeadConfig(1.0, 1.0, 2),
+                ConeHeadConfig(2.0, 2.0, 2),
+            ),
+            layer_time_scales=(1.0,),
+            max_neighbors_per_cone=2,
+            causal_mode=False,
+            direction_dropout=0.0,
+            debug_attention_stats=False,
         ),
         training=TrainingConfig(
             device="cpu",
@@ -62,12 +102,11 @@ def _config(data_root: Path, output_root: Path) -> HUAVConfig:
             weight_decay=0.0,
             seed=7,
             background_ratio=2,
+            max_background_without_positive=4,
             num_threads=1,
             output_root=output_root,
-            auxiliary_warmup_epochs=0,
-            auxiliary_ramp_epochs=1,
-            target_sigma=1.0,
             gradient_clip_norm=1.0,
+            mixed_precision=False,
             max_train_files=None,
             max_val_files=None,
         ),
@@ -122,9 +161,75 @@ def test_cpu_training_writes_reproducible_metrics_and_checkpoint() -> None:
         assert reproduced["event"] == metrics["event"]
         incompatible_config = replace(
             _config(data_root, output_root),
-            model=replace(_config(data_root, output_root).model, cross_time_radius=2),
+            model=replace(
+                _config(data_root, output_root).model,
+                max_neighbors_per_cone=3,
+            ),
         )
         with pytest.raises(ValueError, match="model configuration"):
             evaluate_checkpoint(incompatible_config, run_dir / "best.pt", device="cpu")
+        unsupported_checkpoint = run_dir / "unsupported-schema.pt"
+        checkpoint["schema_version"] = 999
+        torch.save(checkpoint, unsupported_checkpoint)
+        with pytest.raises(ValueError, match="schema version"):
+            evaluate_checkpoint(
+                _config(data_root, output_root),
+                unsupported_checkpoint,
+                device="cpu",
+            )
         with pytest.raises(FileExistsError, match="not empty"):
             run_training(_config(data_root, output_root), output_dir=run_dir)
+
+
+def test_amp_is_enabled_only_when_requested_on_cuda() -> None:
+    assert _amp_is_enabled(True, torch.device("cuda"))
+    assert not _amp_is_enabled(False, torch.device("cuda"))
+    assert not _amp_is_enabled(True, torch.device("cpu"))
+
+
+def test_training_forwards_all_events_before_sampling_loss(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model_event_counts: list[int] = []
+    loss_event_counts: list[int] = []
+    original_model_forward = SpatioTemporalConeDetector.forward
+    original_loss_forward = EventFocalDiceLoss.forward
+
+    def record_model_forward(
+        self: SpatioTemporalConeDetector,
+        events: torch.Tensor,
+        batch_indices: torch.Tensor | None = None,
+    ) -> dict[str, object]:
+        model_event_counts.append(len(events))
+        return original_model_forward(self, events, batch_indices)
+
+    def record_loss_forward(
+        self: EventFocalDiceLoss,
+        logits: torch.Tensor,
+        targets: torch.Tensor,
+        batch_indices: torch.Tensor | None = None,
+    ) -> dict[str, torch.Tensor]:
+        loss_event_counts.append(len(logits))
+        return original_loss_forward(self, logits, targets, batch_indices)
+
+    monkeypatch.setattr(SpatioTemporalConeDetector, "forward", record_model_forward)
+    monkeypatch.setattr(EventFocalDiceLoss, "forward", record_loss_forward)
+    with TemporaryDirectory(dir=Path.cwd()) as directory:
+        temporary_root = Path(directory)
+        data_root = temporary_root / "data"
+        train_root = data_root / "train"
+        val_root = data_root / "val"
+        train_root.mkdir(parents=True)
+        val_root.mkdir(parents=True)
+        _write_imbalanced_sequence(train_root / "train_000.npz")
+        _write_sequence(val_root / "val_000.npz", 0)
+        config = _config(data_root, temporary_root / "outputs")
+        config = replace(
+            config,
+            training=replace(config.training, background_ratio=1),
+        )
+
+        run_training(config, output_dir=temporary_root / "outputs" / "run")
+
+    assert model_event_counts[0] == 12
+    assert loss_event_counts == [4]

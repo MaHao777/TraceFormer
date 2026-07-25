@@ -9,7 +9,7 @@ import torch
 
 from huav.data import EventBatch
 
-from .dual_view import DualViewEventClassifier
+from .spatiotemporal_cone import SpatioTemporalConeDetector
 
 
 @dataclass(frozen=True)
@@ -37,4 +37,8 @@ class EventSegmenter(ABC):
         """Return voxel logits aligned to the batch's ``[B,T,H,W]`` grid."""
 
 
-__all__ = ["DualViewEventClassifier", "EventSegmenter", "ModelOutput"]
+__all__ = [
+    "EventSegmenter",
+    "ModelOutput",
+    "SpatioTemporalConeDetector",
+]

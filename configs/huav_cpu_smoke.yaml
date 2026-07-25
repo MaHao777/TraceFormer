@@ -2,13 +2,25 @@ resolution:
   width: 346
   height: 260
 model:
-  time_bins: [32, 16, 8]
-  feature_channels: 8
-  attention_heads: 2
-  window_time: 4
-  window_space: 16
-  cross_time_radius: 1
+  spatial_block_size_x: 16
+  spatial_block_size_y: 16
+  num_time_blocks: 32
+  token_dim: 16
+  event_embed_dim: 8
+  num_layers: 2
+  num_heads: 4
+  mlp_ratio: 2.0
   dropout: 0.1
+  cone_heads:
+    - {base_radius: 1.0, slope: 0.5, max_time_distance: 2}
+    - {base_radius: 1.0, slope: 1.0, max_time_distance: 2}
+    - {base_radius: 2.0, slope: 1.5, max_time_distance: 3}
+    - {base_radius: 2.0, slope: 2.0, max_time_distance: 4}
+  layer_time_scales: [0.5, 1.0]
+  max_neighbors_per_cone: 4
+  causal_mode: false
+  direction_dropout: 0.0
+  debug_attention_stats: false
 inference:
   sigmoid_threshold: 0.5
 dataset:
@@ -21,19 +33,17 @@ training:
   weight_decay: 0.0001
   seed: 37
   background_ratio: 10
+  max_background_without_positive: 4096
   num_threads: 14
   output_root: ../outputs
-  auxiliary_warmup_epochs: 1
-  auxiliary_ramp_epochs: 2
-  target_sigma: 1.25
   gradient_clip_norm: 1.0
+  mixed_precision: false
   max_train_files: 4
   max_val_files: 2
 loss:
-  view_event_weight: 0.25
-  view_weight: 0.5
-  consistency_weight: 0.1
-  temporal_weight: 0.01
+  focal_alpha: 0.75
+  focal_gamma: 2.0
+  lambda_dice: 1.0
 evaluation:
   optimize_threshold: true
   threshold_steps: 19

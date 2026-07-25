@@ -5,8 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
-from .losses import DualViewLoss, binary_dice_loss, binary_focal_loss
-from .metrics import EVUAVMetricAccumulator, EventMetricAccumulator
+from .losses import EventFocalDiceLoss, binary_dice_loss, binary_focal_loss
+from .metrics import EventMetricAccumulator, EVUAVMetricAccumulator
 from .sampling import sample_event_indices
 
 
@@ -33,7 +33,7 @@ class Evaluator(Protocol):
 
 
 __all__ = [
-    "DualViewLoss",
+    "EventFocalDiceLoss",
     "EvaluationResult",
     "Evaluator",
     "EVUAVMetricAccumulator",

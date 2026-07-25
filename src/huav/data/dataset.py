@@ -9,7 +9,6 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-
 REQUIRED_EVENT_FIELDS = ("x", "y", "t", "p", "label", "name")
 
 

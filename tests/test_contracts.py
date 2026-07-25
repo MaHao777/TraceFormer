@@ -1,15 +1,16 @@
 from __future__ import annotations
 
-import numpy as np
-import torch
 import sys
 from pathlib import Path
+
+import numpy as np
+import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from huav.data import EventBatch, EventSequence, EventWindow
-from huav.models import ModelOutput
 from huav.inference import validate_prediction_logits
+from huav.models import ModelOutput
 
 
 def raises(exc_type: type[Exception], fn: object) -> None:

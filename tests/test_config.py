@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from pathlib import Path
 import sys
+from dataclasses import replace
+from pathlib import Path
 from tempfile import TemporaryDirectory
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from huav.config import HUAVConfig, load_config
+from huav.config import ConeHeadConfig, HUAVConfig, load_config
 
 
 def raises(exc_type: type[Exception], fn: object) -> None:
@@ -26,17 +27,28 @@ def test_base_yaml_loads_with_phase_one_defaults() -> None:
     assert Path(config.dataset.root).name == "训练集、验证集"
 
 
-def test_base_yaml_exposes_dual_view_training_and_loss_configuration() -> None:
+def test_base_yaml_exposes_cone_training_and_loss_configuration() -> None:
     config = load_config(Path("configs/huav_base.yaml"))
-    assert tuple(config.model.time_bins) == (32, 16, 8)
-    assert config.model.feature_channels == 8
+    assert config.model.spatial_block_size_x == 8
+    assert config.model.spatial_block_size_y == 8
+    assert config.model.num_time_blocks == 64
+    assert config.model.token_dim == 32
+    assert config.model.event_embed_dim == 16
+    assert config.model.num_layers == 3
+    assert config.model.num_heads == 4
+    assert tuple(config.model.layer_time_scales) == (0.5, 0.75, 1.0)
+    assert [head.slope for head in config.model.cone_heads] == [0.5, 1.0, 1.5, 2.0]
+    assert [head.base_radius for head in config.model.cone_heads] == [1.0, 1.0, 2.0, 2.0]
+    assert config.model.max_neighbors_per_cone == 8
+    assert config.model.causal_mode is False
+    assert config.model.direction_dropout == 0.0
     assert config.dataset.duration_ms == 8000
     assert config.training.device == "cpu"
     assert config.training.background_ratio == 10
-    assert config.loss.view_weight == 0.5
-    assert config.loss.view_event_weight == 0.25
-    assert config.loss.consistency_weight == 0.1
-    assert config.loss.temporal_weight == 0.01
+    assert config.training.mixed_precision is False
+    assert config.loss.focal_alpha == 0.75
+    assert config.loss.focal_gamma == 2.0
+    assert config.loss.lambda_dice == 1.0
     assert config.evaluation.frame_ms == 50
 
 
@@ -44,6 +56,47 @@ def test_cross_field_config_validation_rejects_inconsistent_values() -> None:
     valid = HUAVConfig.default()
     raises(ValueError, lambda: valid.with_overrides(sigmoid_threshold=1.1))
     raises(ValueError, lambda: valid.with_overrides(width=0))
+    raises(
+        ValueError,
+        lambda: replace(
+            valid,
+            model=replace(valid.model, token_dim=30, num_heads=4),
+        ).validate(),
+    )
+    raises(
+        ValueError,
+        lambda: replace(
+            valid,
+            model=replace(valid.model, cone_heads=valid.model.cone_heads[:2]),
+        ).validate(),
+    )
+    raises(
+        ValueError,
+        lambda: replace(
+            valid,
+            model=replace(
+                valid.model,
+                cone_heads=(
+                    ConeHeadConfig(base_radius=1.0, slope=-0.1, max_time_distance=2),
+                )
+                + valid.model.cone_heads[1:],
+            ),
+        ).validate(),
+    )
+    raises(
+        ValueError,
+        lambda: replace(
+            valid,
+            model=replace(valid.model, direction_dropout=1.1),
+        ).validate(),
+    )
+    raises(
+        ValueError,
+        lambda: replace(
+            valid,
+            loss=replace(valid.loss, lambda_dice=0.0),
+        ).validate(),
+    )
 
 
 def test_config_overrides_reject_unknown_keys_including_mixed_valid_invalid_values() -> None:

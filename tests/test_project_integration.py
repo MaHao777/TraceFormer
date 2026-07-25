@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import subprocess
-import sys
 from pathlib import Path
-
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -24,7 +22,12 @@ def test_root_dataset_paths_are_ignored_but_source_data_package_is_addable() -> 
         ["git", "check-ignore", "-q", "src/huav/data/__init__.py"], cwd=ROOT, check=False,
     )
     assert source.returncode == 1
-    dry_run = subprocess.run(
-        ["git", "add", "--dry-run", "--all"], cwd=ROOT, check=True, text=True, capture_output=True,
+    tracked = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", "src/huav/data/__init__.py"],
+        cwd=ROOT,
+        check=False,
+        text=True,
+        capture_output=True,
     )
-    assert "src/huav/data/__init__.py" in dry_run.stdout.replace("\\", "/")
+    assert tracked.returncode == 0
+    assert tracked.stdout.strip().replace("\\", "/") == "src/huav/data/__init__.py"

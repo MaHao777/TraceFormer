@@ -1,14 +1,18 @@
 """HUAV event-level tiny-object detection package."""
 
 from .data import EventBatch, EventSequence, EventWindow, NPZEventDataset
-from .models import DualViewEventClassifier, EventSegmenter, ModelOutput
+from .models import (
+    EventSegmenter,
+    ModelOutput,
+    SpatioTemporalConeDetector,
+)
 
 __all__ = [
-    "DualViewEventClassifier",
     "EventBatch",
     "EventSegmenter",
     "EventSequence",
     "EventWindow",
     "ModelOutput",
     "NPZEventDataset",
+    "SpatioTemporalConeDetector",
 ]

@@ -1,4 +1,4 @@
-"""Command-line entry point for dual-view HUAV training."""
+"""Command-line entry point for spatiotemporal-cone HUAV training."""
 
 from __future__ import annotations
 
@@ -10,7 +10,8 @@ from huav.training.engine import run_training
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        prog="huav-train", description="Train and validate the HUAV dual-view event model"
+        prog="huav-train",
+        description="Train and validate the HUAV spatiotemporal-cone event model",
     )
     parser.add_argument(
         "--config",

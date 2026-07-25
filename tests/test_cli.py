@@ -6,7 +6,6 @@ import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-
 COMMANDS = ("inspect", "train", "evaluate", "predict", "package")
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -27,11 +26,18 @@ def test_each_phase_one_command_has_successful_help() -> None:
 
 
 def test_normal_execution_validates_config_then_fails_explicitly() -> None:
-    for command in ("inspect", "predict", "package"):
+    for command in ("inspect", "package"):
         result = run(command, "--config", "configs/huav_base.yaml")
         assert result.returncode != 0
         assert "Phase 1" in result.stderr
         assert "not implemented" in result.stderr
+
+
+def test_predict_requires_checkpoint_argument() -> None:
+    result = run("predict", "--config", "configs/huav_base.yaml")
+    assert result.returncode != 0
+    assert "--checkpoint" in result.stderr
+    assert "required" in result.stderr
 
 
 def test_train_and_evaluate_expose_runtime_arguments() -> None:

@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 from numbers import Integral
+from pathlib import Path
 from types import MappingProxyType
 from typing import Mapping
 

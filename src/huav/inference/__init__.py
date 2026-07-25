@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import math
+import zipfile
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-import math
 from numbers import Integral, Real
 from pathlib import Path
 from typing import Iterable, Sequence
@@ -65,8 +66,8 @@ def _timestamp_row_value(value: object) -> float:
 
 
 def _validate_submission_row(row: SubmissionRow) -> None:
-    x = _integer_row_value(row.x, "x")
-    y = _integer_row_value(row.y, "y")
+    _integer_row_value(row.x, "x")
+    _integer_row_value(row.y, "y")
     _timestamp_row_value(row.t)
     p = _integer_row_value(row.p, "p")
     label = _integer_row_value(row.label, "label")
@@ -137,7 +138,83 @@ class SubmissionWriter(ABC):
         """Validate five-column rows and root-level txt-only zip manifest before writing."""
 
 
+def generate_submission_rows(
+    sequence: EventSequence,
+    logits: torch.Tensor,
+    threshold: float,
+) -> tuple[SubmissionRow, ...]:
+    """Convert predicted logits to validated submission rows.
+
+    Each logit is transformed via sigmoid; values >= *threshold* produce
+    label=1, others label=0. The returned rows are validated against the
+    source *sequence* before being returned.
+    """
+    validate_prediction_logits(sequence, logits)
+    probabilities = torch.sigmoid(logits)
+    predicted_labels = (probabilities >= threshold).to(torch.int64)
+    rows: list[SubmissionRow] = []
+    for i in range(sequence.length):
+        rows.append(SubmissionRow(
+            x=int(sequence.x[i]),
+            y=int(sequence.y[i]),
+            t=float(sequence.t[i]),
+            p=int(sequence.p[i]),
+            label=int(predicted_labels[i]),
+        ))
+    result = tuple(rows)
+    txt_name = f"{sequence.source_stem}.txt"
+    validate_submission_contract(
+        sequence, result, SubmissionManifest(txt_name, (txt_name,))
+    )
+    return result
+
+
+def write_prediction_txt(
+    rows: Sequence[SubmissionRow],
+    output_dir: str | Path,
+    txt_name: str,
+) -> Path:
+    """Write one TXT file in the five-column competition submission format.
+
+    Each line: ``x y t p label``, space-separated, with nine decimal places
+    for the timestamp column *t*.
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / txt_name
+    lines = [
+        f"{row.x} {row.y} {row.t:.9f} {row.p} {row.label}\n"
+        for row in rows
+    ]
+    output_path.write_text("".join(lines), encoding="ascii")
+    return output_path
+
+
+def pack_submission_zip(
+    txt_dir: str | Path,
+    output_path: str | Path,
+) -> Path:
+    """Pack all root-level ``.txt`` files under *txt_dir* into a submission ZIP.
+
+    Every member is validated via :func:`validate_zip_members` before
+    writing, ensuring the ZIP contains only flat ``.txt`` entries with no
+    directory structure or unsafe names.
+    """
+    txt_dir = Path(txt_dir)
+    txt_files = sorted(txt_dir.glob("*.txt"))
+    if not txt_files:
+        raise ValueError(f"no TXT files found in {txt_dir}")
+    members = validate_zip_members(txt_file.name for txt_file in txt_files)
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for member in members:
+            zf.write(txt_dir / member, arcname=member)
+    return output_path
+
+
 __all__ = [
     "Predictor", "SubmissionManifest", "SubmissionRow", "SubmissionWriter",
+    "generate_submission_rows", "write_prediction_txt", "pack_submission_zip",
     "validate_prediction_logits", "validate_submission_contract", "validate_zip_members",
 ]

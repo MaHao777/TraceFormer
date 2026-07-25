@@ -3,9 +3,12 @@ from __future__ import annotations
 import pytest
 import torch
 
-from huav.training.losses import DualViewLoss, binary_dice_loss, binary_focal_loss
-from huav.training.engine import _auxiliary_scale
-from huav.training.metrics import EVUAVMetricAccumulator, EventMetricAccumulator
+from huav.training.losses import (
+    EventFocalDiceLoss,
+    binary_dice_loss,
+    binary_focal_loss,
+)
+from huav.training.metrics import EventMetricAccumulator, EVUAVMetricAccumulator
 from huav.training.sampling import sample_event_indices
 
 
@@ -30,35 +33,40 @@ def test_focal_and_dice_losses_prefer_correct_logits() -> None:
     assert binary_dice_loss(correct, labels) < binary_dice_loss(wrong, labels)
 
 
-def test_total_loss_uses_positive_configurable_weights() -> None:
-    output = {
-        "event_logits": torch.tensor([0.0, 0.0], requires_grad=True),
-        "xt_event_logits": torch.tensor([0.1, -0.1], requires_grad=True),
-        "yt_event_logits": torch.tensor([-0.1, 0.1], requires_grad=True),
-        "xt_logits": torch.zeros((1, 1, 2, 3), requires_grad=True),
-        "yt_logits": torch.zeros((1, 1, 2, 2), requires_grad=True),
-        "event_features": torch.zeros((2, 6)),
-    }
+def test_total_loss_is_focal_plus_configured_per_sample_dice() -> None:
+    logits = torch.tensor([0.0, 0.0, 0.1, -0.1], requires_grad=True)
     labels = torch.tensor([1.0, 0.0])
-    xt_target = torch.zeros((1, 1, 2, 3))
-    yt_target = torch.zeros((1, 1, 2, 2))
-    criterion = DualViewLoss(
-        view_event_weight=0.25,
-        view_weight=0.5,
-        consistency_weight=0.1,
-        temporal_weight=0.01,
+    labels = torch.tensor([1.0, 0.0, 0.0, 1.0])
+    batches = torch.tensor([0, 0, 1, 1])
+    criterion = EventFocalDiceLoss(
+        focal_alpha=0.75,
+        focal_gamma=2.0,
+        lambda_dice=1.5,
     )
 
-    losses = criterion(output, labels, xt_target, yt_target)
-    expected = (
-        losses["event"]
-        + 0.25 * losses["view_event"]
-        + 0.5 * losses["view"]
-        + 0.1 * losses["consistency"]
-        + 0.01 * losses["temporal"]
-    )
+    losses = criterion(logits, labels, batches)
+    expected = losses["focal"] + 1.5 * losses["dice"]
     assert torch.allclose(losses["total"], expected)
     losses["total"].backward()
+    assert torch.isfinite(logits.grad).all()
+
+
+def test_event_loss_rejects_disabled_dice_objective() -> None:
+    with pytest.raises(ValueError, match="lambda_dice"):
+        EventFocalDiceLoss(lambda_dice=0.0)
+
+
+def test_per_sample_dice_safely_penalizes_false_positives_without_targets() -> None:
+    labels = torch.tensor([1.0, 0.0, 0.0, 0.0])
+    batches = torch.tensor([0, 0, 1, 1])
+    good = torch.tensor([5.0, -5.0, -5.0, -5.0])
+    bad = torch.tensor([5.0, -5.0, 5.0, 5.0])
+
+    good_loss = binary_dice_loss(good, labels, batches)
+    bad_loss = binary_dice_loss(bad, labels, batches)
+
+    assert torch.isfinite(good_loss)
+    assert good_loss < bad_loss
 
 
 def test_event_metrics_report_pd_fa_iou_and_overall_accuracy() -> None:
@@ -106,11 +114,3 @@ def test_metrics_reject_nonfinite_logits() -> None:
     accumulator = EventMetricAccumulator(threshold=0.5)
     with pytest.raises(ValueError, match="finite"):
         accumulator.update(torch.tensor([float("nan")]), torch.tensor([0.0]))
-
-
-def test_second_stage_auxiliary_losses_ramp_after_warmup() -> None:
-    values = [
-        _auxiliary_scale(epoch, warmup_epochs=1, ramp_epochs=2)
-        for epoch in range(3)
-    ]
-    assert values == [0.0, 0.5, 1.0]

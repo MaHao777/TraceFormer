@@ -1,41 +1,54 @@
-"""CPU-capable training, validation and artifact writing for the dual-view model."""
+"""CPU/GPU training, validation and artifacts for the sparse cone model."""
 
 from __future__ import annotations
 
+import json
+import random
 from dataclasses import asdict
 from datetime import datetime
 from hashlib import sha256
-import json
 from pathlib import Path
-import random
 from typing import Any
 from uuid import uuid4
 
 import numpy as np
 import torch
-from torch.nn.utils import clip_grad_norm_
 import yaml
+from torch.nn.utils import clip_grad_norm_
 
 from huav.config import HUAVConfig
-from huav.data import LoadedEventSequence, NPZEventDataset
-from huav.models import DualViewEventClassifier
-from huav.models.projection import build_view_targets
+from huav.data import EventSequence, LoadedEventSequence, NPZEventDataset
+from huav.inference import (
+    generate_submission_rows,
+    pack_submission_zip,
+    write_prediction_txt,
+)
+from huav.models import SpatioTemporalConeDetector
 
-from .losses import DualViewLoss
-from .metrics import EVUAVMetricAccumulator, EventMetricAccumulator
+from .losses import EventFocalDiceLoss
+from .metrics import EventMetricAccumulator, EVUAVMetricAccumulator
 from .sampling import sample_event_indices
 
 
-def build_model(config: HUAVConfig) -> DualViewEventClassifier:
-    return DualViewEventClassifier(
+def build_model(config: HUAVConfig) -> SpatioTemporalConeDetector:
+    return SpatioTemporalConeDetector(
         width=config.resolution.width,
         height=config.resolution.height,
-        time_bins=tuple(config.model.time_bins),
-        feature_channels=config.model.feature_channels,
-        attention_heads=config.model.attention_heads,
-        window_size=(config.model.window_time, config.model.window_space),
-        cross_time_radius=config.model.cross_time_radius,
+        spatial_block_size_x=config.model.spatial_block_size_x,
+        spatial_block_size_y=config.model.spatial_block_size_y,
+        num_time_blocks=config.model.num_time_blocks,
+        token_dim=config.model.token_dim,
+        event_embed_dim=config.model.event_embed_dim,
+        num_layers=config.model.num_layers,
+        num_heads=config.model.num_heads,
+        mlp_ratio=config.model.mlp_ratio,
         dropout=config.model.dropout,
+        cone_heads=tuple(config.model.cone_heads),
+        layer_time_scales=tuple(config.model.layer_time_scales),
+        max_neighbors_per_cone=config.model.max_neighbors_per_cone,
+        causal_mode=config.model.causal_mode,
+        direction_dropout=config.model.direction_dropout,
+        debug_attention_stats=config.model.debug_attention_stats,
     )
 
 
@@ -90,12 +103,6 @@ def _atomic_torch_save(payload: Any, path: Path) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def _auxiliary_scale(epoch: int, *, warmup_epochs: int, ramp_epochs: int) -> float:
-    if epoch < warmup_epochs:
-        return 0.0
-    return min(1.0, (epoch - warmup_epochs + 1) / ramp_epochs)
-
-
 def _select_threshold(
     logits: torch.Tensor, labels: torch.Tensor, *, steps: int, fallback: float
 ) -> float:
@@ -119,9 +126,13 @@ def _select_threshold(
     return best_threshold
 
 
+def _amp_is_enabled(requested: bool, device: torch.device) -> bool:
+    return bool(requested and device.type == "cuda")
+
+
 @torch.no_grad()
 def evaluate_model(
-    model: DualViewEventClassifier,
+    model: SpatioTemporalConeDetector,
     dataset: NPZEventDataset,
     config: HUAVConfig,
     *,
@@ -192,7 +203,7 @@ def _metrics_markdown(metrics: dict[str, Any]) -> str:
     official = metrics["ev_uav_compatible"]
     return "\n".join(
         (
-            "# HUAV CPU Validation Metrics",
+            "# HUAV Spatiotemporal-Cone Validation Metrics",
             "",
             f"- Decision threshold: `{metrics['threshold']:.6f}`",
             f"- Validation files: `{metrics['validation_files']}`",
@@ -313,11 +324,10 @@ def run_training(
     validation_manifest_digest = _manifest_identity_digest(validation_manifest)
     _write_json(run_dir / "dataset_manifest.json", manifest)
     model = build_model(config).to(torch_device)
-    criterion = DualViewLoss(
-        view_event_weight=config.loss.view_event_weight,
-        view_weight=config.loss.view_weight,
-        consistency_weight=config.loss.consistency_weight,
-        temporal_weight=config.loss.temporal_weight,
+    criterion = EventFocalDiceLoss(
+        focal_alpha=config.loss.focal_alpha,
+        focal_gamma=config.loss.focal_gamma,
+        lambda_dice=config.loss.lambda_dice,
     )
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -328,6 +338,8 @@ def run_training(
     sampling_generator = torch.Generator(device=torch_device.type).manual_seed(
         config.training.seed
     )
+    amp_enabled = _amp_is_enabled(config.training.mixed_precision, torch_device)
+    scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
     history: list[dict[str, Any]] = []
     best_iou = -1.0
     best_metrics: dict[str, Any] | None = None
@@ -341,11 +353,8 @@ def run_training(
         model.train()
         totals = {
             "total": 0.0,
-            "event": 0.0,
-            "view_event": 0.0,
-            "view": 0.0,
-            "consistency": 0.0,
-            "temporal": 0.0,
+            "focal": 0.0,
+            "dice": 0.0,
         }
         order = torch.randperm(
             len(train_dataset), generator=order_generator
@@ -358,42 +367,39 @@ def run_training(
                 labels,
                 background_ratio=config.training.background_ratio,
                 generator=sampling_generator,
+                max_background_without_positive=(
+                    config.training.max_background_without_positive
+                ),
             )
             batch_indices = torch.zeros(
                 len(events), dtype=torch.long, device=torch_device
             )
-            output = model(
-                events,
-                batch_indices,
-                batch_size=1,
-                query_indices=query_indices,
-            )
-            xt_target, yt_target = build_view_targets(
-                events,
-                labels,
-                batch_indices,
-                batch_size=1,
-                width=config.resolution.width,
-                height=config.resolution.height,
-                time_bins=model.fine_time_bins,
-                sigma=config.training.target_sigma,
-            )
-            auxiliary_scale = _auxiliary_scale(
-                epoch,
-                warmup_epochs=config.training.auxiliary_warmup_epochs,
-                ramp_epochs=config.training.auxiliary_ramp_epochs,
-            )
-            losses = criterion(
-                output,
-                labels[query_indices],
-                xt_target,
-                yt_target,
-                auxiliary_scale=auxiliary_scale,
-            )
             optimizer.zero_grad(set_to_none=True)
-            losses["total"].backward()
-            clip_grad_norm_(model.parameters(), config.training.gradient_clip_norm)
-            optimizer.step()
+            with torch.autocast(
+                device_type=torch_device.type,
+                dtype=torch.float16,
+                enabled=amp_enabled,
+            ):
+                output = model(events, batch_indices)
+                losses = criterion(
+                    output["event_logits"][query_indices],
+                    labels[query_indices],
+                    batch_indices[query_indices],
+                )
+            if amp_enabled:
+                scaler.scale(losses["total"]).backward()
+                scaler.unscale_(optimizer)
+                clip_grad_norm_(
+                    model.parameters(), config.training.gradient_clip_norm
+                )
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                losses["total"].backward()
+                clip_grad_norm_(
+                    model.parameters(), config.training.gradient_clip_norm
+                )
+                optimizer.step()
             for name in totals:
                 totals[name] += float(losses[name].detach().item())
             if progress:
@@ -430,7 +436,7 @@ def run_training(
             best_metrics = metrics
             _atomic_torch_save(
                 {
-                    "schema_version": 1,
+                    "schema_version": 2,
                     "model_state": model.state_dict(),
                     "epoch": epoch + 1,
                     "decision_threshold": float(metrics["threshold"]),
@@ -451,6 +457,8 @@ def run_training(
         "run_dir": str(run_dir.resolve()),
         "device": torch_device.type,
         "epochs": config.training.epochs,
+        "mixed_precision": amp_enabled,
+        "parameter_count": sum(parameter.numel() for parameter in model.parameters()),
         "best_iou": best_iou,
         "metrics": best_metrics,
     }
@@ -471,6 +479,8 @@ def evaluate_checkpoint(
     checkpoint = torch.load(
         checkpoint_path, map_location=torch_device, weights_only=True
     )
+    if checkpoint.get("schema_version") != 2:
+        raise ValueError("unsupported checkpoint schema version")
     expected_model = _serializable(asdict(config.model))
     expected_resolution = _serializable(asdict(config.resolution))
     if checkpoint.get("model_config") != expected_model:
@@ -496,9 +506,95 @@ def evaluate_checkpoint(
     )
 
 
+def _loaded_to_event_sequence(
+    loaded: LoadedEventSequence,
+    config: HUAVConfig,
+) -> EventSequence:
+    """Bridge from the pipeline's *LoadedEventSequence* to *EventSequence* for submission."""
+    return EventSequence(
+        x=loaded.events[:, 0].round().to(torch.int64).numpy(),
+        y=loaded.events[:, 1].round().to(torch.int64).numpy(),
+        t=loaded.timestamps_ms.numpy(),
+        p=loaded.events[:, 3].round().to(torch.int64).numpy(),
+        width=config.resolution.width,
+        height=config.resolution.height,
+        source_path=loaded.source_path,
+    )
+
+
+def generate_submission_package(
+    config: HUAVConfig,
+    checkpoint_path: str | Path,
+    output_dir: str | Path,
+    *,
+    device: str = "cpu",
+    progress: bool = False,
+) -> Path:
+    """Load a trained checkpoint and produce a competition-ready submission ZIP.
+
+    Steps
+    -----
+    1. Validate *config* and the checkpoint metadata.
+    2. Run inference on every file in the validation set.
+    3. For each sequence write a ``val_XXX.txt`` with the five-column format
+       ``x y t p predicted_label``.
+    4. Bundle all TXT files into ``submission.zip``.
+
+    Returns the path of the created ZIP archive.
+    """
+    config.validate()
+    torch_device = torch.device(device)
+    torch.set_num_threads(config.training.num_threads)
+    checkpoint = torch.load(
+        checkpoint_path, map_location=torch_device, weights_only=True
+    )
+    if checkpoint.get("schema_version") != 2:
+        raise ValueError("unsupported checkpoint schema version")
+    expected_model = _serializable(asdict(config.model))
+    expected_resolution = _serializable(asdict(config.resolution))
+    if checkpoint.get("model_config") != expected_model:
+        raise ValueError("checkpoint model configuration does not match the supplied config")
+    if checkpoint.get("resolution") != expected_resolution:
+        raise ValueError("checkpoint resolution does not match the supplied config")
+    validation_dataset = _dataset(config, "val")
+    actual_validation_digest = _manifest_identity_digest(
+        _dataset_manifest(validation_dataset)
+    )
+    if checkpoint.get("validation_manifest_sha256") != actual_validation_digest:
+        raise ValueError("checkpoint validation dataset manifest does not match current data")
+    model = build_model(config).to(torch_device)
+    model.load_state_dict(checkpoint["model_state"])
+    threshold = float(checkpoint.get("decision_threshold", config.inference.sigmoid_threshold))
+    model.eval()
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    for index in range(len(validation_dataset)):
+        sequence = validation_dataset[index]
+        events = sequence.events.to(torch_device)
+        with torch.no_grad():
+            output = model(events)
+        logits = output["event_logits"].detach().cpu()
+        event_sequence = _loaded_to_event_sequence(sequence, config)
+        rows = generate_submission_rows(event_sequence, logits, threshold)
+        txt_name = f"{event_sequence.source_stem}.txt"
+        write_prediction_txt(rows, output_dir, txt_name)
+        if progress:
+            print(
+                f"  {index + 1:03d}/{len(validation_dataset):03d} "
+                f"{txt_name}: {sequence.length:,} events",
+                flush=True,
+            )
+
+    zip_path = output_dir / "submission.zip"
+    pack_submission_zip(output_dir, zip_path)
+    return zip_path
+
+
 __all__ = [
+    "_amp_is_enabled",
     "build_model",
-    "_auxiliary_scale",
     "evaluate_checkpoint",
     "evaluate_model",
     "run_training",

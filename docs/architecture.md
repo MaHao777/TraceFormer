@@ -1,66 +1,124 @@
-# HUAV 多尺度双视图事件分类架构
+# HUAV 稀疏时空锥模型
 
-## 1. 输入与投影
+## 1. 输入与稀疏块
 
-一个 batch 的原始事件表示为 `events[N,4] = (x,y,t_norm,p)`，另有 `batch_indices[N]`。`t_norm` 是 8 秒序列内的归一化时间。
-
-`MultiScaleEventProjector` 对每个时间尺度 `T` 生成：
-
-- `XT[B,4,T,346]`：在 y 方向聚合；
-- `YT[B,4,T,260]`：在 x 方向聚合。
-
-四个通道依次是正极性计数、负极性计数、平均归一化时间、最近归一化时间。模型输入计数经过 `log1p` 压缩，但不会生成 `[B,T,260,346]` 的三维稠密体。
-
-## 2. 独立编码器
-
-每个尺度先由独立浅层卷积映射到 `C=8`，双线性对齐到最高时间分辨率后拼接融合。XT 与 YT 使用两个完全不共享权重的 `HierarchicalViewEncoder`：
-
-1. 高分辨率 3×3 CNN；
-2. 非重叠局部窗口自注意力；
-3. stride-2 CNN 下采样；
-4. 低分辨率局部窗口自注意力；
-5. FPN lateral + top-down 上采样；
-6. 高分辨率平滑卷积。
-
-因此最终保留 `[B,C,T,346]` 与 `[B,C,T,260]` 的高分辨率轨迹特征。
-
-## 3. 跨视图交互
-
-每个视图先只沿空间轴求平均，得到 `[B,T,C]` 时间 token。双向 Cross-Attention 使用布尔 mask，只允许时间距离不超过 `cross_time_radius` 的 token 互相关注：
+公开输入为浮点张量 `[N,5]`：
 
 ```text
-XT token = Query, YT token = Key/Value
-YT token = Query, XT token = Key/Value
+[batch_index, x, y, normalized_time, polarity]
 ```
 
-交互结果通过可学习门控广播回各自空间轴。这里没有对 XT 全部位置和 YT 全部位置做全局笛卡尔注意力。
+也可传 `[N,4] = [x,y,t,p]` 和独立 `batch_indices[N]`。`normalized_time` 基于固定 8 秒序列范围归一化到 `[0,1]`。
 
-## 4. 回到原始事件
-
-对于查询事件 `(x_i,y_i,t_i,p_i)`：
-
-- 在 XT 特征图按 `(x_i,t_i)` 使用 `grid_sample` 双线性插值；
-- 在 YT 特征图按 `(y_i,t_i)` 使用 `grid_sample` 双线性插值。
-
-查询保持原事件的 x/y 对应关系。最终事件特征为：
+`EventTokenizer` 计算：
 
 ```text
-[f_xt, f_yt, f_xt * f_yt, abs(f_xt - f_yt), polarity, normalized_time]
+x_block = floor(x / block_size_x)
+y_block = floor(y / block_size_y)
+t_block = min(floor(t * num_time_blocks), num_time_blocks - 1)
 ```
 
-MLP 输出 `event_logits[N]`。默认查询全部事件；训练器可传 `query_indices` 仅查询“全部正事件 + 最多 10 倍背景”，而投影图和辅助标签仍由完整序列构造。
+复合键包含 batch，因此不同样本即使块坐标相同也会生成不同 Token。`torch.unique` 只枚举非空块并返回 `event_token_indices[N]`，不分配稠密三维网格。
 
-## 5. 输出与监督
+块内每个事件的局部特征为：
 
-辅助 1×1 卷积头输出：
+```text
+[local_x, local_y, local_t, polarity]
+```
 
-- `xt_logits[B,1,T,346]`
-- `yt_logits[B,1,T,260]`
+Event MLP 编码后分别做均值和最大池化。块统计为：
 
-正事件被投影到两个平面，并以二维高斯核扩展为软标签。事件主头、两个辅助头、两个单视图事件头共同支持 Focal、Dice、跨视图 L1 一致性和弱时间平滑损失。
+```text
+[log(1+count), positive_polarity_ratio, negative_polarity_ratio,
+ local_t_mean, local_t_variance, bounded_density]
+```
 
-总损失中的各项采用正权重相加，两个单视图事件头另有直接标签损失。配置默认让 epoch 1 的 consistency/temporal scale 为 0，epoch 2 为 0.5，epoch 3 为 1.0。
+池化特征、统计量和归一化 Token 坐标编码共同投影为 `tokens[M,C]`。
 
-## 6. 评测
+## 2. 数据测得的锥
 
-验证按文件依次推理，但每个文件的每个事件都进入最终混淆矩阵。阈值可固定，也可在验证候选阈值上按正类 IoU 选择。训练保存验证 IoU 最优 checkpoint，并额外实现 EV-UAV 的 50 ms 目标 Pd 与空间连通分量 Fa 口径。
+空间距离使用：
+
+```text
+d_space = max(abs(dx), abs(dy))
+```
+
+某一头在时间距离 `dt` 的硬边界为：
+
+```text
+d_space <= base_radius + slope * dt
+```
+
+训练集轨迹统计得到原始斜率 q50/q90/q95/q99 为 `0.640625 / 1.25 / 1.446429 / 1.875`，所以四头配置采用：
+
+| Head | Base radius | Slope | Max time distance |
+|---:|---:|---:|---:|
+| 0 | 1 | 0.5 | 4 |
+| 1 | 1 | 1.0 | 4 |
+| 2 | 2 | 1.5 | 6 |
+| 3 | 2 | 2.0 | 8 |
+
+三层时间尺度为 `0.5 / 0.75 / 1.0`，浅层先建模短轨迹，深层再扩大时间范围。
+
+## 3. 稀疏邻域
+
+`ConeNeighborBuilder` 对每个 `(batch,time_block)` 的非空空间坐标建立一个 `cKDTree`。每个中心 Token 只查询同 batch、配置时间范围内的过去或未来切片，`p=∞` 对应 Chebyshev 距离。候选按时间距离、空间距离排序并截断到配置的 `K`。
+
+输出索引：
+
+```text
+past_indices[M,H,K]
+future_indices[M,H,K]
+```
+
+无邻居位置填 `-1`。该过程的存储量与 `M×H×K` 成正比，不构造完整 `M×M` 关系。
+
+## 4. 双向多锥中心注意力
+
+中心 Token 只产生 Query。全部 Token 经过同一组 Key/Value 投影，过去和未来复用这些参数，但分别加入可学习的方向 embedding 并执行独立 softmax。
+
+每条边的相对特征为：
+
+```text
+[dx, dy, signed_dt, Chebyshev_space, abs_dt, Chebyshev_space / abs_dt]
+```
+
+小型 MLP 将其变为注意力分数偏置。全空邻域在 softmax 前显式识别，聚合结果为零，不产生 NaN。
+
+中心 Token 经线性层和 softmax 得到过去/未来门控。没有邻域的分支被屏蔽并重新归一化；`causal_mode=True` 时未来分支恒为零。注意力更新后保留残差：
+
+```text
+LayerNorm → bidirectional cone attention → residual
+LayerNorm → MLP → residual
+```
+
+## 5. 事件解码
+
+每个事件通过 `event_token_indices` 取回更新后的父 Token，并拼接：
+
+```text
+[parent_token, local_x, local_y, local_t, polarity,
+ log_block_count, bounded_block_density]
+```
+
+轻量 MLP 输出 `event_logits[N]`。同一块内事件仍能根据局部坐标、时间和极性得到不同结果。
+
+## 6. 训练
+
+模型始终对完整序列前向。背景下采样只生成损失索引：
+
+```text
+all positive events + at most ratio × positive background events
+```
+
+无正事件序列保留最多 `max_background_without_positive` 个背景损失项。损失为数值稳定的 BCE-with-logits Focal 与按 batch 单独计算再平均的 Dice：
+
+```text
+total = focal + lambda_dice * dice
+```
+
+优化器为 AdamW，支持梯度裁剪。`mixed_precision=true` 且设备为 CUDA 时启用 autocast 和 GradScaler；CPU 自动保持 FP32。
+
+## 7. 评估与可复现性
+
+验证对全部事件预测，输出事件级 Pd/Fa/IoU/Acc 和单独命名的 EV-UAV-compatible 指标。训练时选出的事件 IoU 阈值随最佳 checkpoint 保存，复评不会再次使用标签调阈值。checkpoint 同时保存模型配置和验证集 manifest 摘要，配置或数据不匹配时拒绝复评。

@@ -1,4 +1,4 @@
-"""Loss functions for event and projection-view supervision."""
+"""Numerically stable event-level focal and per-sample Dice losses."""
 
 from __future__ import annotations
 
@@ -7,107 +7,108 @@ from torch import nn
 from torch.nn import functional as F
 
 
+def _validate_inputs(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    if logits.ndim != 1 or targets.ndim != 1 or len(logits) != len(targets):
+        raise ValueError("logits and targets must have matching shape [N]")
+    return targets.to(dtype=logits.dtype)
+
+
 def binary_focal_loss(
     logits: torch.Tensor,
     targets: torch.Tensor,
     *,
-    alpha: float = 0.25,
+    alpha: float = 0.75,
     gamma: float = 2.0,
 ) -> torch.Tensor:
-    targets = targets.to(dtype=logits.dtype)
-    cross_entropy = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
+    targets = _validate_inputs(logits, targets)
+    if len(logits) == 0:
+        return logits.sum() * 0.0
+    cross_entropy = F.binary_cross_entropy_with_logits(
+        logits, targets, reduction="none"
+    )
     probabilities = torch.sigmoid(logits)
-    target_probability = probabilities * targets + (1 - probabilities) * (1 - targets)
+    target_probability = probabilities * targets + (1 - probabilities) * (
+        1 - targets
+    )
     alpha_factor = alpha * targets + (1 - alpha) * (1 - targets)
-    return (alpha_factor * (1 - target_probability).pow(gamma) * cross_entropy).mean()
+    return (
+        alpha_factor
+        * (1 - target_probability).pow(gamma)
+        * cross_entropy
+    ).mean()
 
 
 def binary_dice_loss(
-    logits: torch.Tensor, targets: torch.Tensor, *, smooth: float = 1.0
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    batch_indices: torch.Tensor | None = None,
+    *,
+    smooth: float = 1.0,
 ) -> torch.Tensor:
-    targets = targets.to(dtype=logits.dtype)
-    probabilities = torch.sigmoid(logits).reshape(-1)
-    flat_targets = targets.reshape(-1)
-    intersection = torch.sum(probabilities * flat_targets)
-    denominator = probabilities.sum() + flat_targets.sum()
-    return 1.0 - (2.0 * intersection + smooth) / (denominator + smooth)
+    targets = _validate_inputs(logits, targets)
+    if batch_indices is None:
+        batch_indices = torch.zeros(
+            len(logits), dtype=torch.long, device=logits.device
+        )
+    if batch_indices.ndim != 1 or len(batch_indices) != len(logits):
+        raise ValueError("batch_indices must have shape [N]")
+    if len(logits) == 0:
+        return logits.sum() * 0.0
+    probabilities = torch.sigmoid(logits)
+    sample_losses: list[torch.Tensor] = []
+    for batch_index in torch.unique(batch_indices):
+        mask = batch_indices == batch_index
+        sample_probabilities = probabilities[mask]
+        sample_targets = targets[mask]
+        intersection = torch.sum(sample_probabilities * sample_targets)
+        denominator = sample_probabilities.sum() + sample_targets.sum()
+        sample_losses.append(
+            1.0 - (2.0 * intersection + smooth) / (denominator + smooth)
+        )
+    return torch.stack(sample_losses).mean()
 
 
-def focal_dice_loss(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-    return binary_focal_loss(logits, targets) + binary_dice_loss(logits, targets)
-
-
-class DualViewLoss(nn.Module):
+class EventFocalDiceLoss(nn.Module):
     def __init__(
         self,
         *,
-        view_event_weight: float = 0.25,
-        view_weight: float = 0.5,
-        consistency_weight: float = 0.1,
-        temporal_weight: float = 0.01,
+        focal_alpha: float = 0.75,
+        focal_gamma: float = 2.0,
+        lambda_dice: float = 1.0,
     ) -> None:
         super().__init__()
-        self.view_event_weight = float(view_event_weight)
-        self.view_weight = float(view_weight)
-        self.consistency_weight = float(consistency_weight)
-        self.temporal_weight = float(temporal_weight)
-        if min(
-            self.view_event_weight,
-            self.view_weight,
-            self.consistency_weight,
-            self.temporal_weight,
-        ) < 0:
-            raise ValueError("loss weights must be non-negative")
+        if not 0 <= focal_alpha <= 1:
+            raise ValueError("focal_alpha must be in [0,1]")
+        if focal_gamma < 0:
+            raise ValueError("focal_gamma must be non-negative")
+        if lambda_dice <= 0:
+            raise ValueError("lambda_dice must be positive")
+        self.focal_alpha = float(focal_alpha)
+        self.focal_gamma = float(focal_gamma)
+        self.lambda_dice = float(lambda_dice)
 
     def forward(
         self,
-        output: dict[str, torch.Tensor],
-        event_targets: torch.Tensor,
-        xt_target: torch.Tensor,
-        yt_target: torch.Tensor,
-        *,
-        auxiliary_scale: float = 1.0,
+        logits: torch.Tensor,
+        targets: torch.Tensor,
+        batch_indices: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
-        event = focal_dice_loss(output["event_logits"], event_targets)
-        view_event = 0.5 * (
-            focal_dice_loss(output["xt_event_logits"], event_targets)
-            + focal_dice_loss(output["yt_event_logits"], event_targets)
+        focal = binary_focal_loss(
+            logits,
+            targets,
+            alpha=self.focal_alpha,
+            gamma=self.focal_gamma,
         )
-        view = 0.5 * (
-            focal_dice_loss(output["xt_logits"], xt_target)
-            + focal_dice_loss(output["yt_logits"], yt_target)
-        )
-        consistency = F.l1_loss(
-            torch.sigmoid(output["xt_event_logits"]),
-            torch.sigmoid(output["yt_event_logits"]),
-        )
-        xt_probability = torch.sigmoid(output["xt_logits"])
-        yt_probability = torch.sigmoid(output["yt_logits"])
-        temporal = 0.5 * (
-            torch.abs(xt_probability[:, :, 1:] - xt_probability[:, :, :-1]).mean()
-            + torch.abs(yt_probability[:, :, 1:] - yt_probability[:, :, :-1]).mean()
-        )
-        scale = float(auxiliary_scale)
-        total = (
-            event
-            + self.view_event_weight * view_event
-            + self.view_weight * view
-            + scale * self.consistency_weight * consistency
-            + scale * self.temporal_weight * temporal
-        )
+        dice = binary_dice_loss(logits, targets, batch_indices)
         return {
-            "total": total,
-            "event": event,
-            "view_event": view_event,
-            "view": view,
-            "consistency": consistency,
-            "temporal": temporal,
+            "total": focal + self.lambda_dice * dice,
+            "focal": focal,
+            "dice": dice,
         }
 
 
 __all__ = [
-    "DualViewLoss",
+    "EventFocalDiceLoss",
     "binary_dice_loss",
     "binary_focal_loss",
-    "focal_dice_loss",
 ]
