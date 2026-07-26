@@ -6,7 +6,8 @@ model:
   spatial_block_size_y: 8
   num_time_blocks: 64
   token_dim: 48
-  event_embed_dim: 24
+  event_embed_dim: 64
+  num_pool_queries: 4
   num_layers: 3
   num_heads: 4
   mlp_ratio: 2.0

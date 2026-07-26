@@ -45,6 +45,7 @@ def build_model(config: HUAVConfig) -> SpatioTemporalConeDetector:
         num_time_blocks=config.model.num_time_blocks,
         token_dim=config.model.token_dim,
         event_embed_dim=config.model.event_embed_dim,
+        num_pool_queries=config.model.num_pool_queries,
         num_layers=config.model.num_layers,
         num_heads=config.model.num_heads,
         mlp_ratio=config.model.mlp_ratio,
@@ -584,6 +585,296 @@ def run_training(
     return summary
 
 
+def resume_training(
+    config: HUAVConfig,
+    checkpoint_path: str | Path,
+    *,
+    additional_epochs: int = 10,
+    output_dir: str | Path | None = None,
+    device: str | None = None,
+    progress: bool = False,
+) -> dict[str, Any]:
+    """Resume training from a saved checkpoint for additional epochs.
+
+    The checkpoint's model architecture (model config + resolution) must match
+    the supplied *config*.  The optimizer and LR scheduler are freshly created,
+    so the LR schedule restarts from the configured learning rate.
+
+    Args:
+        config: Fresh training configuration.  The ``training`` section controls
+            the learning rate, scheduler, loss weights etc. for the resumed run.
+            The ``epochs`` field is **not** used directly; use *additional_epochs*
+            to control how many extra epochs to train.
+        checkpoint_path: Path to a ``best.pt`` checkpoint saved by a prior
+            :func:`run_training` call.
+        additional_epochs: How many extra epochs to train.
+        output_dir: If set, use this exact directory (must be empty or
+            non-existent).  Otherwise a timestamped directory is created under
+            ``config.training.output_root``.
+        device: Override the configured training device.
+        progress: Print per-file / per-epoch progress.
+
+    Returns:
+        A summary dict with keys ``run_dir``, ``best_score``, etc.
+    """
+    config.validate()
+    device_name = device or config.training.device
+    if device_name == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA was requested but is not available")
+    torch_device = torch.device(device_name)
+    torch.set_num_threads(config.training.num_threads)
+    random.seed(config.training.seed)
+    np.random.seed(config.training.seed)
+    torch.manual_seed(config.training.seed)
+
+    # ── Validate checkpoint compatibility ──────────────────────────────
+    checkpoint_path = Path(checkpoint_path)
+    checkpoint = torch.load(
+        checkpoint_path, map_location=torch_device, weights_only=True
+    )
+    if checkpoint.get("schema_version") != CHECKPOINT_SCHEMA_VERSION:
+        raise ValueError("unsupported checkpoint schema version")
+    expected_model = _serializable(asdict(config.model))
+    expected_resolution = _serializable(asdict(config.resolution))
+    if checkpoint.get("model_config") != expected_model:
+        raise ValueError(
+            "checkpoint model configuration does not match the supplied config"
+        )
+    if checkpoint.get("resolution") != expected_resolution:
+        raise ValueError(
+            "checkpoint resolution does not match the supplied config"
+        )
+
+    # ── Run directory ───────────────────────────────────────────────────
+    run_dir = _run_directory(config, output_dir, device_name=torch_device.type)
+    configuration = _serializable(asdict(config))
+    _atomic_write_text(
+        run_dir / "config.yaml",
+        yaml.safe_dump(configuration, allow_unicode=True, sort_keys=False),
+    )
+    _atomic_write_text(
+        run_dir / "resumed_from.txt",
+        f"checkpoint: {checkpoint_path.resolve()}\n"
+        f"source_epoch: {checkpoint.get('epoch', 'unknown')}\n",
+    )
+
+    # ── Datasets & manifest ─────────────────────────────────────────────
+    train_dataset = _dataset(config, "train")
+    validation_dataset = _dataset(config, "val")
+    manifest = _dataset_manifest(train_dataset, validation_dataset)
+    validation_manifest = {
+        "schema": manifest["schema"],
+        "files": [
+            item
+            for item in manifest["files"]
+            if item["split"] == validation_dataset.root.name
+        ],
+    }
+    validation_manifest_digest = _manifest_identity_digest(validation_manifest)
+    _write_json(run_dir / "dataset_manifest.json", manifest)
+
+    # ── Build model & load weights ──────────────────────────────────────
+    model = build_model(config).to(torch_device)
+    model.load_state_dict(checkpoint["model_state"])
+
+    # ── Loss, optimiser, scheduler ──────────────────────────────────────
+    criterion = EventFocalDiceLoss(
+        focal_alpha=config.loss.focal_alpha,
+        focal_gamma=config.loss.focal_gamma,
+        lambda_dice=config.loss.lambda_dice,
+        lambda_object_frame=config.loss.lambda_object_frame,
+        object_frame_logit_margin=config.loss.object_frame_logit_margin,
+    )
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=config.training.learning_rate,
+        weight_decay=config.training.weight_decay,
+    )
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=max(1, additional_epochs),
+        eta_min=(
+            config.training.learning_rate
+            * config.training.min_learning_rate_ratio
+        ),
+    )
+    order_generator = torch.Generator().manual_seed(config.training.seed)
+    sampling_generator = torch.Generator(device=torch_device.type).manual_seed(
+        config.training.seed
+    )
+    amp_enabled = _amp_is_enabled(config.training.mixed_precision, torch_device)
+    scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
+    history: list[dict[str, Any]] = []
+    best_score = -1.0
+    best_metrics: dict[str, Any] | None = None
+
+    source_epoch = int(checkpoint.get("epoch", 0))
+    total_epochs_display = source_epoch + additional_epochs
+
+    print(
+        f"HUAV resumed training on {torch_device.type}: "
+        f"{len(train_dataset)} train files, "
+        f"{len(validation_dataset)} validation files, "
+        f"{additional_epochs} additional epochs "
+        f"(resumed from checkpoint epoch {source_epoch})",
+        flush=True,
+    )
+
+    for epoch in range(additional_epochs):
+        model.train()
+        totals = {
+            "total": 0.0,
+            "focal": 0.0,
+            "dice": 0.0,
+            "object_frame": 0.0,
+        }
+        learning_rate = float(optimizer.param_groups[0]["lr"])
+        order = torch.randperm(
+            len(train_dataset), generator=order_generator
+        ).tolist()
+        for step, dataset_index in enumerate(order):
+            sequence = train_dataset[dataset_index]
+            events = sequence.events.to(torch_device)
+            labels = sequence.labels.to(torch_device)
+            batch_indices = torch.zeros(
+                len(events), dtype=torch.long, device=torch_device
+            )
+            optimizer.zero_grad(set_to_none=True)
+            with torch.autocast(
+                device_type=torch_device.type,
+                dtype=torch.float16,
+                enabled=amp_enabled,
+            ):
+                output = model(events, batch_indices)
+                query_indices = sample_event_indices(
+                    labels,
+                    logits=output["event_logits"],
+                    background_ratio=config.training.background_ratio,
+                    hard_negative_fraction=(
+                        config.training.hard_negative_fraction
+                    ),
+                    generator=sampling_generator,
+                    max_background_without_positive=(
+                        config.training.max_background_without_positive
+                    ),
+                )
+                losses = criterion(
+                    output["event_logits"][query_indices],
+                    labels[query_indices],
+                    batch_indices[query_indices],
+                    object_ids=sequence.object_ids.to(torch_device)[
+                        query_indices
+                    ],
+                    timestamps_ms=sequence.timestamps_ms.to(torch_device)[
+                        query_indices
+                    ],
+                    frame_ms=config.evaluation.frame_ms,
+                )
+                sequence_weight = _dense_sequence_loss_weight(
+                    events,
+                    labels,
+                    config,
+                )
+                losses["total"] = losses["total"] * sequence_weight
+            if amp_enabled:
+                scaler.scale(losses["total"]).backward()
+                scaler.unscale_(optimizer)
+                clip_grad_norm_(
+                    model.parameters(), config.training.gradient_clip_norm
+                )
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                losses["total"].backward()
+                clip_grad_norm_(
+                    model.parameters(), config.training.gradient_clip_norm
+                )
+                optimizer.step()
+            for name in totals:
+                totals[name] += float(losses[name].detach().item())
+            if progress:
+                current_display = source_epoch + epoch + 1
+                print(
+                    f"  epoch {current_display}/{total_epochs_display} "
+                    f"train {step + 1:03d}/{len(order):03d} "
+                    f"loss={losses['total'].item():.5f} "
+                    f"weight={sequence_weight:.2f} "
+                    f"queries={len(query_indices):,}/{sequence.length:,}",
+                    flush=True,
+                )
+
+        for name in totals:
+            totals[name] /= len(train_dataset)
+        metrics = evaluate_model(
+            model,
+            validation_dataset,
+            config,
+            device=torch_device,
+            progress=progress,
+        )
+        epoch_record = {
+            "epoch": source_epoch + epoch + 1,
+            "resumed_epoch": epoch + 1,
+            "learning_rate": learning_rate,
+            "train_loss": totals,
+            "validation": metrics,
+        }
+        history.append(epoch_record)
+        _write_json(run_dir / "history.json", history)
+        competition = metrics["competition"]
+        score = float(competition["score"])
+        print(
+            f"epoch {source_epoch + epoch + 1}/{total_epochs_display} "
+            f"(resumed {epoch + 1}/{additional_epochs}): "
+            f"loss={totals['total']:.6f} Score={score:.6f} "
+            f"IoU={competition['iou']:.6f} SegAcc={competition['seg_acc']:.6f} "
+            f"Pd={competition['pd']:.6f} Fa={competition['fa']:.3e} "
+            f"threshold={metrics['threshold']:.3f}",
+            flush=True,
+        )
+        if score > best_score:
+            best_score = score
+            best_metrics = metrics
+            _atomic_torch_save(
+                {
+                    "schema_version": CHECKPOINT_SCHEMA_VERSION,
+                    "model_state": model.state_dict(),
+                    "epoch": source_epoch + epoch + 1,
+                    "decision_threshold": float(metrics["threshold"]),
+                    "model_config": configuration["model"],
+                    "resolution": configuration["resolution"],
+                    "validation_manifest_sha256": validation_manifest_digest,
+                },
+                run_dir / "best.pt",
+            )
+            _write_json(run_dir / "metrics.json", best_metrics)
+            _atomic_write_text(
+                run_dir / "metrics.md", _metrics_markdown(best_metrics)
+            )
+        scheduler.step()
+
+    if best_metrics is None:
+        raise RuntimeError(
+            "resumed training completed without validation metrics"
+        )
+    summary = {
+        "run_dir": str(run_dir.resolve()),
+        "device": torch_device.type,
+        "resumed_from": str(checkpoint_path.resolve()),
+        "source_epoch": source_epoch,
+        "additional_epochs": additional_epochs,
+        "mixed_precision": amp_enabled,
+        "parameter_count": sum(
+            parameter.numel() for parameter in model.parameters()
+        ),
+        "best_score": best_score,
+        "best_iou": float(best_metrics["competition"]["iou"]),
+        "metrics": best_metrics,
+    }
+    _write_json(run_dir / "summary.json", summary)
+    return summary
+
+
 def evaluate_checkpoint(
     config: HUAVConfig,
     checkpoint_path: str | Path,
@@ -715,5 +1006,6 @@ __all__ = [
     "build_model",
     "evaluate_checkpoint",
     "evaluate_model",
+    "resume_training",
     "run_training",
 ]

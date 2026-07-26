@@ -24,7 +24,7 @@ class EventTokenizer(nn.Module):
     """Map occupied regular spacetime blocks to learned tokens."""
 
     event_feature_dim = 6
-    statistic_dim = 8
+    statistic_dim = 7
 
     def __init__(
         self,
@@ -36,6 +36,7 @@ class EventTokenizer(nn.Module):
         num_time_blocks: int,
         event_embed_dim: int,
         token_dim: int,
+        num_pool_queries: int = 4,
     ) -> None:
         super().__init__()
         values = (
@@ -46,6 +47,7 @@ class EventTokenizer(nn.Module):
             num_time_blocks,
             event_embed_dim,
             token_dim,
+            num_pool_queries,
         )
         if any(value <= 0 for value in values):
             raise ValueError("tokenizer dimensions must be positive")
@@ -56,24 +58,99 @@ class EventTokenizer(nn.Module):
         self.num_time_blocks = int(num_time_blocks)
         self.event_embed_dim = int(event_embed_dim)
         self.token_dim = int(token_dim)
+        self.num_pool_queries = int(num_pool_queries)
         self.num_x_blocks = math.ceil(self.width / self.spatial_block_size_x)
         self.num_y_blocks = math.ceil(self.height / self.spatial_block_size_y)
 
         self.event_encoder = nn.Sequential(
             nn.Linear(self.event_feature_dim, self.event_embed_dim),
+            nn.LayerNorm(self.event_embed_dim),
             nn.GELU(),
             nn.Linear(self.event_embed_dim, self.event_embed_dim),
+        )
+        self.pool_queries = nn.Parameter(
+            torch.empty(self.num_pool_queries, self.event_embed_dim)
+        )
+        nn.init.normal_(
+            self.pool_queries,
+            mean=0.0,
+            std=1.0 / math.sqrt(self.event_embed_dim),
+        )
+        self.key_projection = nn.Linear(
+            self.event_embed_dim,
+            self.event_embed_dim,
+            bias=False,
+        )
+        self.value_projection = nn.Linear(
+            self.event_embed_dim,
+            self.event_embed_dim,
+            bias=False,
+        )
+        self.query_fusion = nn.Sequential(
+            nn.Linear(
+                self.num_pool_queries * self.event_embed_dim,
+                self.event_embed_dim,
+            ),
+            nn.LayerNorm(self.event_embed_dim),
             nn.GELU(),
+            nn.Linear(self.event_embed_dim, self.event_embed_dim),
         )
         self.position_encoder = nn.Sequential(
             nn.Linear(3, self.event_embed_dim),
             nn.GELU(),
         )
-        projection_input = self.event_embed_dim * 3 + self.statistic_dim
+        projection_input = self.event_embed_dim * 2 + self.statistic_dim
         self.token_projection = nn.Sequential(
             nn.Linear(projection_input, self.token_dim),
             nn.LayerNorm(self.token_dim),
         )
+
+    def _attention_pool(
+        self,
+        encoded_events: torch.Tensor,
+        inverse: torch.Tensor,
+        *,
+        token_count: int,
+    ) -> torch.Tensor:
+        """Pool variable-length event groups without padding."""
+        keys = self.key_projection(encoded_events)
+        values = self.value_projection(encoded_events)
+        value_indices = inverse[:, None].expand(-1, self.event_embed_dim)
+        scale = 1.0 / math.sqrt(self.event_embed_dim)
+        pooled_queries = []
+        for query in self.pool_queries:
+            logits = torch.sum(keys * query, dim=1) * scale
+            group_maximum = torch.full(
+                (token_count,),
+                -torch.inf,
+                dtype=logits.dtype,
+                device=logits.device,
+            )
+            group_maximum.scatter_reduce_(
+                0,
+                inverse,
+                logits,
+                reduce="amax",
+                include_self=True,
+            )
+            unnormalized_weights = torch.exp(logits - group_maximum[inverse])
+            normalizers = torch.zeros(
+                token_count,
+                dtype=logits.dtype,
+                device=logits.device,
+            )
+            normalizers.scatter_add_(0, inverse, unnormalized_weights)
+            weights = unnormalized_weights / normalizers[inverse].clamp_min(
+                torch.finfo(logits.dtype).tiny
+            )
+            pooled = torch.zeros(
+                (token_count, self.event_embed_dim),
+                dtype=values.dtype,
+                device=values.device,
+            )
+            pooled.scatter_add_(0, value_indices, values * weights[:, None])
+            pooled_queries.append(pooled)
+        return torch.stack(pooled_queries, dim=1)
 
     def _split_input(
         self,
@@ -151,11 +228,17 @@ class EventTokenizer(nn.Module):
         sample_event_counts = torch.bincount(
             parsed_batches, minlength=sample_count
         ).to(events.dtype)
+        positive_indicator = (polarity > 0).to(events.dtype)
         sample_polarity_sum = torch.zeros(
             sample_count, dtype=events.dtype, device=events.device
         )
         sample_polarity_sum.scatter_add_(0, parsed_batches, polarity)
         sample_polarity_mean = sample_polarity_sum / sample_event_counts.clamp_min(1)
+        sample_positive_sum = torch.zeros_like(sample_polarity_sum)
+        sample_positive_sum.scatter_add_(0, parsed_batches, positive_indicator)
+        sample_positive_fraction = (
+            sample_positive_sum / sample_event_counts.clamp_min(1)
+        )
         event_sample_polarity_mean = sample_polarity_mean[parsed_batches]
         local_features = torch.stack(
             (
@@ -190,26 +273,18 @@ class EventTokenizer(nn.Module):
             unique_keys, cells_per_sample, rounding_mode="floor"
         )
         encoded_events = self.event_encoder(local_features)
-        expanded_inverse = inverse[:, None].expand(-1, self.event_embed_dim)
-        mean_pool = torch.zeros(
-            (token_count, self.event_embed_dim),
-            dtype=encoded_events.dtype,
-            device=encoded_events.device,
-        )
-        mean_pool.scatter_add_(0, expanded_inverse, encoded_events)
-        mean_pool = mean_pool / counts[:, None].to(mean_pool.dtype)
-        max_pool = torch.full_like(mean_pool, -torch.inf)
-        max_pool.scatter_reduce_(
-            0,
-            expanded_inverse,
+        attention_output = self._attention_pool(
             encoded_events,
-            reduce="amax",
-            include_self=True,
+            inverse,
+            token_count=token_count,
+        )
+        attention_feature = self.query_fusion(
+            attention_output.flatten(start_dim=1)
         )
 
         float_counts = counts.to(events.dtype)
         polarity_sum = torch.zeros(token_count, dtype=events.dtype, device=events.device)
-        polarity_sum.scatter_add_(0, inverse, polarity)
+        polarity_sum.scatter_add_(0, inverse, positive_indicator)
         positive_fraction = polarity_sum / float_counts
         local_time_sum = torch.zeros_like(polarity_sum)
         local_time_sum.scatter_add_(0, inverse, local_features[:, 2])
@@ -220,8 +295,8 @@ class EventTokenizer(nn.Module):
             local_time_square_sum / float_counts - local_time_mean.square()
         ).clamp_min(0)
         density = float_counts / (float_counts + 8.0)
-        token_sample_polarity_mean = sample_polarity_mean[token_batches]
-        polarity_contrast = positive_fraction - token_sample_polarity_mean
+        token_sample_positive_fraction = sample_positive_fraction[token_batches]
+        polarity_contrast = positive_fraction - token_sample_positive_fraction
         epsilon = torch.finfo(events.dtype).eps
         bounded_polarity = positive_fraction.clamp(epsilon, 1.0 - epsilon)
         polarity_entropy = -(
@@ -232,7 +307,6 @@ class EventTokenizer(nn.Module):
             (
                 torch.log1p(float_counts),
                 positive_fraction,
-                1.0 - positive_fraction,
                 local_time_mean,
                 local_time_variance,
                 density,
@@ -263,7 +337,10 @@ class EventTokenizer(nn.Module):
         )
         encoded_position = self.position_encoder(position)
         tokens = self.token_projection(
-            torch.cat((mean_pool, max_pool, statistics, encoded_position), dim=1)
+            torch.cat(
+                (attention_feature, statistics, encoded_position),
+                dim=1,
+            )
         )
         return TokenizedEvents(
             tokens=tokens,

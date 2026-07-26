@@ -34,6 +34,7 @@ def test_base_yaml_exposes_cone_training_and_loss_configuration() -> None:
     assert config.model.num_time_blocks == 64
     assert config.model.token_dim == 32
     assert config.model.event_embed_dim == 16
+    assert config.model.num_pool_queries == 4
     assert config.model.num_layers == 3
     assert config.model.num_heads == 4
     assert tuple(config.model.layer_time_scales) == (0.5, 0.75, 1.0)
@@ -63,7 +64,8 @@ def test_score_optimized_yaml_exposes_dense_domain_training_configuration() -> N
     assert config.model.spatial_block_size_y == 8
     assert config.model.num_time_blocks == 64
     assert config.model.token_dim == 48
-    assert config.model.event_embed_dim == 24
+    assert config.model.event_embed_dim == 64
+    assert config.model.num_pool_queries == 4
     assert config.model.num_layers == 3
     assert tuple(config.model.layer_time_scales) == (0.5, 0.75, 1.0)
     assert config.model.max_neighbors_per_cone == 8
@@ -87,6 +89,13 @@ def test_cross_field_config_validation_rejects_inconsistent_values() -> None:
         lambda: replace(
             valid,
             model=replace(valid.model, token_dim=30, num_heads=4),
+        ).validate(),
+    )
+    raises(
+        ValueError,
+        lambda: replace(
+            valid,
+            model=replace(valid.model, num_pool_queries=0),
         ).validate(),
     )
     raises(

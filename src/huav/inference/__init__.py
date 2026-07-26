@@ -176,14 +176,14 @@ def write_prediction_txt(
 ) -> Path:
     """Write one TXT file in the five-column competition submission format.
 
-    Each line: ``x y t p label``, space-separated, with nine decimal places
-    for the timestamp column *t*.
+    Each line is ``x y t p label``, space-separated. Timestamps use enough
+    significant digits to round-trip the source float64 value exactly.
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / txt_name
     lines = [
-        f"{row.x} {row.y} {row.t:.9f} {row.p} {row.label}\n"
+        f"{row.x} {row.y} {row.t:.17g} {row.p} {row.label}\n"
         for row in rows
     ]
     output_path.write_text("".join(lines), encoding="ascii")

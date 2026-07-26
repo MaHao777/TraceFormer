@@ -47,6 +47,7 @@ class SpatioTemporalConeDetector(nn.Module):
         causal_mode: bool,
         direction_dropout: float,
         debug_attention_stats: bool,
+        num_pool_queries: int = 4,
     ) -> None:
         super().__init__()
         if num_layers != len(layer_time_scales):
@@ -61,6 +62,7 @@ class SpatioTemporalConeDetector(nn.Module):
             num_time_blocks=num_time_blocks,
             event_embed_dim=event_embed_dim,
             token_dim=token_dim,
+            num_pool_queries=num_pool_queries,
         )
         self.encoder = ConeTransformerEncoder(
             token_dim=token_dim,

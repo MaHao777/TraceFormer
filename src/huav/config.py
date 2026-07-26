@@ -39,6 +39,7 @@ class ModelConfig:
     num_time_blocks: int = 64
     token_dim: int = 32
     event_embed_dim: int = 16
+    num_pool_queries: int = 4
     num_layers: int = 3
     num_heads: int = 4
     mlp_ratio: float = 2.0
@@ -142,6 +143,7 @@ class HUAVConfig:
             "num_time_blocks",
             "token_dim",
             "event_embed_dim",
+            "num_pool_queries",
             "num_layers",
             "num_heads",
             "max_neighbors_per_cone",

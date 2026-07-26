@@ -34,7 +34,7 @@ class EventDecoder(nn.Module):
             return token_features.new_empty((0,))
         parent_tokens = token_features[event_token_indices]
         block_decoder_statistics = token_statistics[event_token_indices][
-            :, (0, 5, 6, 7)
+            :, (0, 4, 5, 6)
         ]
         decoder_input = torch.cat(
             (

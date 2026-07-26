@@ -7,6 +7,7 @@ model:
   num_time_blocks: 32
   token_dim: 16
   event_embed_dim: 8
+  num_pool_queries: 4
   num_layers: 2
   num_heads: 4
   mlp_ratio: 2.0

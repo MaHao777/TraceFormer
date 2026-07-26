@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import sys
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import numpy as np
 
@@ -14,6 +15,7 @@ from huav.inference import (
     SubmissionRow,
     validate_submission_contract,
     validate_zip_members,
+    write_prediction_txt,
 )
 
 
@@ -39,6 +41,19 @@ def rows() -> tuple[SubmissionRow, ...]:
 
 def test_submission_contract_accepts_valid_rows_and_root_txt_manifest() -> None:
     validate_submission_contract(source(), rows(), SubmissionManifest("sample_01.txt", ("sample_01.txt",)))
+
+
+def test_prediction_txt_preserves_float64_timestamp_exactly() -> None:
+    timestamp = 0.0009999999992942321
+    row = SubmissionRow(1, 3, timestamp, 0, 1)
+
+    with TemporaryDirectory(dir=Path.cwd()) as directory:
+        output_path = write_prediction_txt((row,), directory, "sample.txt")
+        written_timestamp = float(
+            output_path.read_text(encoding="ascii").split()[2]
+        )
+
+    assert written_timestamp == timestamp
 
 
 def test_submission_contract_rejects_count_label_stem_and_order_mismatches() -> None:
