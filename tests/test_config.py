@@ -50,6 +50,7 @@ def test_base_yaml_exposes_cone_training_and_loss_configuration() -> None:
     assert config.training.dense_sequence_weight == 1.0
     assert config.training.min_learning_rate_ratio == 1.0
     assert config.training.mixed_precision is False
+    assert config.training.mixed_precision_dtype == "float16"
     assert config.loss.focal_alpha == 0.75
     assert config.loss.focal_gamma == 2.0
     assert config.loss.lambda_dice == 1.0
@@ -78,6 +79,28 @@ def test_score_optimized_yaml_exposes_dense_domain_training_configuration() -> N
     assert config.loss.lambda_dice == 0.75
     assert config.loss.lambda_object_frame == 0.25
     assert config.loss.object_frame_logit_margin == 2.0
+
+
+def test_autodl_configs_preserve_score_model_and_select_cuda_bfloat16() -> None:
+    smoke = load_config(Path("configs/huav_score_optimized_autodl_smoke.yaml"))
+    full = load_config(Path("configs/huav_score_optimized_autodl.yaml"))
+
+    for config in (smoke, full):
+        assert config.model.spatial_block_size_x == 8
+        assert config.model.spatial_block_size_y == 8
+        assert config.model.num_time_blocks == 64
+        assert config.model.token_dim == 48
+        assert config.model.event_embed_dim == 64
+        assert config.model.num_pool_queries == 4
+        assert config.model.num_layers == 3
+        assert config.training.device == "cuda"
+        assert config.training.mixed_precision is True
+        assert config.training.mixed_precision_dtype == "bfloat16"
+    assert smoke.training.max_train_files == 4
+    assert smoke.training.max_val_files == 2
+    assert full.training.epochs == 18
+    assert full.training.max_train_files is None
+    assert full.training.max_val_files is None
 
 
 def test_cross_field_config_validation_rejects_inconsistent_values() -> None:
@@ -144,6 +167,13 @@ def test_cross_field_config_validation_rejects_inconsistent_values() -> None:
         lambda: replace(
             valid,
             training=replace(valid.training, dense_sequence_weight=0.5),
+        ).validate(),
+    )
+    raises(
+        ValueError,
+        lambda: replace(
+            valid,
+            training=replace(valid.training, mixed_precision_dtype="float32"),
         ).validate(),
     )
     raises(

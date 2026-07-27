@@ -81,6 +81,7 @@ class TrainingConfig:
     output_root: str | Path = "outputs"
     gradient_clip_norm: float = 1.0
     mixed_precision: bool = False
+    mixed_precision_dtype: str = "float16"
     max_train_files: int | None = None
     max_val_files: int | None = None
 
@@ -253,6 +254,10 @@ class HUAVConfig:
             raise ValueError("gradient_clip_norm must be positive")
         if not isinstance(self.training.mixed_precision, bool):
             raise ValueError("mixed_precision must be boolean")
+        if self.training.mixed_precision_dtype not in {"float16", "bfloat16"}:
+            raise ValueError(
+                "mixed_precision_dtype must be 'float16' or 'bfloat16'"
+            )
         for name in ("max_train_files", "max_val_files"):
             value = getattr(self.training, name)
             if value is not None:

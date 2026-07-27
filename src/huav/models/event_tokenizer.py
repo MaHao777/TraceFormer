@@ -143,12 +143,11 @@ class EventTokenizer(nn.Module):
             weights = unnormalized_weights / normalizers[inverse].clamp_min(
                 torch.finfo(logits.dtype).tiny
             )
-            pooled = torch.zeros(
-                (token_count, self.event_embed_dim),
-                dtype=values.dtype,
-                device=values.device,
+            weighted_values = values * weights[:, None]
+            pooled = weighted_values.new_zeros(
+                (token_count, self.event_embed_dim)
             )
-            pooled.scatter_add_(0, value_indices, values * weights[:, None])
+            pooled.scatter_add_(0, value_indices, weighted_values)
             pooled_queries.append(pooled)
         return torch.stack(pooled_queries, dim=1)
 

@@ -31,6 +31,7 @@ from .metrics import (
     EVUAVMetricAccumulator,
     competition_metrics,
 )
+from .runtime import prepare_device
 from .sampling import sample_event_indices
 
 CHECKPOINT_SCHEMA_VERSION = 3
@@ -192,6 +193,18 @@ def _select_competition_threshold(
 
 def _amp_is_enabled(requested: bool, device: torch.device) -> bool:
     return bool(requested and device.type == "cuda")
+
+
+def _autocast_dtype(name: str) -> torch.dtype:
+    if name == "float16":
+        return torch.float16
+    if name == "bfloat16":
+        return torch.bfloat16
+    raise ValueError("mixed precision dtype must be 'float16' or 'bfloat16'")
+
+
+def _grad_scaler_is_enabled(amp_enabled: bool, dtype: torch.dtype) -> bool:
+    return bool(amp_enabled and dtype == torch.float16)
 
 
 def _dense_sequence_loss_weight(
@@ -378,10 +391,8 @@ def run_training(
 ) -> dict[str, Any]:
     config.validate()
     device_name = device or config.training.device
-    if device_name == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("CUDA was requested but is not available")
-    torch_device = torch.device(device_name)
-    torch.set_num_threads(config.training.num_threads)
+    runtime = prepare_device(device_name, num_threads=config.training.num_threads)
+    torch_device = runtime.device
     random.seed(config.training.seed)
     np.random.seed(config.training.seed)
     torch.manual_seed(config.training.seed)
@@ -431,7 +442,9 @@ def run_training(
         config.training.seed
     )
     amp_enabled = _amp_is_enabled(config.training.mixed_precision, torch_device)
-    scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
+    amp_dtype = _autocast_dtype(config.training.mixed_precision_dtype)
+    scaler_enabled = _grad_scaler_is_enabled(amp_enabled, amp_dtype)
+    scaler = torch.amp.GradScaler("cuda", enabled=scaler_enabled)
     history: list[dict[str, Any]] = []
     best_score = -1.0
     best_metrics: dict[str, Any] | None = None
@@ -463,7 +476,7 @@ def run_training(
             optimizer.zero_grad(set_to_none=True)
             with torch.autocast(
                 device_type=torch_device.type,
-                dtype=torch.float16,
+                dtype=amp_dtype,
                 enabled=amp_enabled,
             ):
                 output = model(events, batch_indices)
@@ -576,6 +589,11 @@ def run_training(
         "device": torch_device.type,
         "epochs": config.training.epochs,
         "mixed_precision": amp_enabled,
+        "mixed_precision_dtype": (
+            config.training.mixed_precision_dtype if amp_enabled else None
+        ),
+        "gradient_scaling": scaler_enabled,
+        "runtime": runtime.metadata,
         "parameter_count": sum(parameter.numel() for parameter in model.parameters()),
         "best_score": best_score,
         "best_iou": float(best_metrics["competition"]["iou"]),
@@ -619,10 +637,8 @@ def resume_training(
     """
     config.validate()
     device_name = device or config.training.device
-    if device_name == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("CUDA was requested but is not available")
-    torch_device = torch.device(device_name)
-    torch.set_num_threads(config.training.num_threads)
+    runtime = prepare_device(device_name, num_threads=config.training.num_threads)
+    torch_device = runtime.device
     random.seed(config.training.seed)
     np.random.seed(config.training.seed)
     torch.manual_seed(config.training.seed)
@@ -703,7 +719,9 @@ def resume_training(
         config.training.seed
     )
     amp_enabled = _amp_is_enabled(config.training.mixed_precision, torch_device)
-    scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
+    amp_dtype = _autocast_dtype(config.training.mixed_precision_dtype)
+    scaler_enabled = _grad_scaler_is_enabled(amp_enabled, amp_dtype)
+    scaler = torch.amp.GradScaler("cuda", enabled=scaler_enabled)
     history: list[dict[str, Any]] = []
     best_score = -1.0
     best_metrics: dict[str, Any] | None = None
@@ -742,7 +760,7 @@ def resume_training(
             optimizer.zero_grad(set_to_none=True)
             with torch.autocast(
                 device_type=torch_device.type,
-                dtype=torch.float16,
+                dtype=amp_dtype,
                 enabled=amp_enabled,
             ):
                 output = model(events, batch_indices)
@@ -864,6 +882,11 @@ def resume_training(
         "source_epoch": source_epoch,
         "additional_epochs": additional_epochs,
         "mixed_precision": amp_enabled,
+        "mixed_precision_dtype": (
+            config.training.mixed_precision_dtype if amp_enabled else None
+        ),
+        "gradient_scaling": scaler_enabled,
+        "runtime": runtime.metadata,
         "parameter_count": sum(
             parameter.numel() for parameter in model.parameters()
         ),
@@ -883,8 +906,8 @@ def evaluate_checkpoint(
     progress: bool = False,
 ) -> dict[str, Any]:
     config.validate()
-    torch_device = torch.device(device)
-    torch.set_num_threads(config.training.num_threads)
+    runtime = prepare_device(device, num_threads=config.training.num_threads)
+    torch_device = runtime.device
     checkpoint = torch.load(
         checkpoint_path, map_location=torch_device, weights_only=True
     )
@@ -952,8 +975,8 @@ def generate_submission_package(
     Returns the path of the created ZIP archive.
     """
     config.validate()
-    torch_device = torch.device(device)
-    torch.set_num_threads(config.training.num_threads)
+    runtime = prepare_device(device, num_threads=config.training.num_threads)
+    torch_device = runtime.device
     checkpoint = torch.load(
         checkpoint_path, map_location=torch_device, weights_only=True
     )

@@ -21,7 +21,9 @@ from huav.data import LoadedEventSequence
 from huav.models import SpatioTemporalConeDetector
 from huav.training.engine import (
     _amp_is_enabled,
+    _autocast_dtype,
     _dense_sequence_loss_weight,
+    _grad_scaler_is_enabled,
     _select_competition_threshold,
     evaluate_checkpoint,
     run_training,
@@ -203,6 +205,14 @@ def test_amp_is_enabled_only_when_requested_on_cuda() -> None:
     assert _amp_is_enabled(True, torch.device("cuda"))
     assert not _amp_is_enabled(False, torch.device("cuda"))
     assert not _amp_is_enabled(True, torch.device("cpu"))
+
+
+def test_blackwell_bfloat16_amp_does_not_use_gradient_scaling() -> None:
+    assert _autocast_dtype("float16") == torch.float16
+    assert _autocast_dtype("bfloat16") == torch.bfloat16
+    assert _grad_scaler_is_enabled(True, torch.float16)
+    assert not _grad_scaler_is_enabled(True, torch.bfloat16)
+    assert not _grad_scaler_is_enabled(False, torch.float16)
 
 
 def test_threshold_selection_prefers_official_score_over_event_iou() -> None:

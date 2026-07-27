@@ -31,3 +31,25 @@ def test_root_dataset_paths_are_ignored_but_source_data_package_is_addable() -> 
     )
     assert tracked.returncode == 0
     assert tracked.stdout.strip().replace("\\", "/") == "src/huav/data/__init__.py"
+
+
+def test_autodl_launcher_preflights_gpu_and_uses_unique_run_directories() -> None:
+    launcher = ROOT / "scripts" / "autodl_train.sh"
+    assert launcher.is_file()
+    contents = launcher.read_text(encoding="utf-8")
+    assert "huav.cli.check_gpu" in contents
+    assert "huav_score_optimized_autodl_smoke.yaml" in contents
+    assert "huav_score_optimized_autodl.yaml" in contents
+    assert 'date +"%Y%m%d_%H%M%S"' in contents
+    assert "--device cuda" in contents
+    assert "tee" in contents
+
+
+def test_largest_sequence_check_runs_forward_loss_backward_and_reports_memory() -> None:
+    checker = ROOT / "scripts" / "check_largest_sequence.py"
+    assert checker.is_file()
+    contents = checker.read_text(encoding="utf-8")
+    assert "train_094.npz" in contents
+    assert "model(events, batch_indices)" in contents
+    assert 'losses["total"].backward()' in contents
+    assert "max_memory_allocated" in contents

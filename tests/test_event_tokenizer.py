@@ -161,6 +161,28 @@ def test_attention_pool_matches_explicit_variable_length_group_softmax() -> None
     torch.testing.assert_close(actual, expected)
 
 
+def test_attention_pool_backpropagates_under_bfloat16_autocast() -> None:
+    tokenizer = _tokenizer()
+    events = torch.tensor(
+        [
+            [0.0, 1.0, 2.0, 0.10, 1.0],
+            [0.0, 3.0, 1.0, 0.20, 0.0],
+            [0.0, 6.0, 2.0, 0.20, 1.0],
+        ]
+    )
+
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        output = tokenizer(events)
+        loss = output.tokens.float().square().mean()
+    loss.backward()
+
+    assert torch.isfinite(output.tokens).all()
+    assert all(
+        parameter.grad is not None and torch.isfinite(parameter.grad).all()
+        for parameter in tokenizer.parameters()
+    )
+
+
 def test_pooling_parameters_are_shared_and_do_not_depend_on_event_count() -> None:
     tokenizer = _tokenizer()
 

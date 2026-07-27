@@ -19,6 +19,7 @@ huav-train = "huav.cli.train:main"
 huav-evaluate = "huav.cli.evaluate:main"
 huav-predict = "huav.cli.predict:main"
 huav-package = "huav.cli.package:main"
+huav-check-gpu = "huav.cli.check_gpu:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

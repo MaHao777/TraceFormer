@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-COMMANDS = ("inspect", "train", "evaluate", "predict", "package")
+COMMANDS = ("inspect", "train", "evaluate", "predict", "package", "check_gpu")
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -22,7 +22,10 @@ def test_each_phase_one_command_has_successful_help() -> None:
     for command in COMMANDS:
         result = run(command, "--help")
         assert result.returncode == 0
-        assert "--config" in result.stdout
+        if command == "check_gpu":
+            assert "--device" in result.stdout
+        else:
+            assert "--config" in result.stdout
 
 
 def test_normal_execution_validates_config_then_fails_explicitly() -> None:

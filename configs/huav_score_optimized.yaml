@@ -44,6 +44,7 @@ training:
   output_root: ../outputs
   gradient_clip_norm: 1.0
   mixed_precision: false
+  mixed_precision_dtype: float16
   max_train_files:
   max_val_files:
 loss:
