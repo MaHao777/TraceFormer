@@ -119,6 +119,10 @@ def _config(data_root: Path, output_root: Path) -> HUAVConfig:
             max_train_files=None,
             max_val_files=None,
         ),
+        loss=replace(
+            HUAVConfig.default().loss,
+            lambda_false_alarm=0.05,
+        ),
     ).validate()
 
 
@@ -161,10 +165,14 @@ def test_cpu_training_writes_reproducible_metrics_and_checkpoint() -> None:
             "counts",
         }.issubset(metrics["competition"])
         assert summary["best_score"] == metrics["competition"]["score"]
+        history = json.loads(
+            (run_dir / "history.json").read_text(encoding="utf-8")
+        )
+        assert history[0]["train_loss"]["false_alarm"] >= 0.0
         checkpoint = __import__("torch").load(
             run_dir / "best.pt", map_location="cpu", weights_only=True
         )
-        assert checkpoint["schema_version"] == 3
+        assert checkpoint["schema_version"] == 4
         assert checkpoint["decision_threshold"] == metrics["threshold"]
         changed_config = replace(
             _config(data_root, output_root),

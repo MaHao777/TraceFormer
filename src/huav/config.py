@@ -93,6 +93,9 @@ class LossConfig:
     lambda_dice: float = 1.0
     lambda_object_frame: float = 0.0
     object_frame_logit_margin: float = 2.0
+    lambda_false_alarm: float = 0.0
+    false_alarm_logit_margin: float = 0.0
+    false_alarm_topk_per_frame: int = 32
 
 
 @dataclass(frozen=True)
@@ -271,9 +274,19 @@ class HUAVConfig:
             raise ValueError("lambda_dice must be positive")
         if _finite_real(self.loss.lambda_object_frame, "lambda_object_frame") < 0:
             raise ValueError("lambda_object_frame must be non-negative")
+        if _finite_real(self.loss.lambda_false_alarm, "lambda_false_alarm") < 0:
+            raise ValueError("lambda_false_alarm must be non-negative")
         _finite_real(
             self.loss.object_frame_logit_margin,
             "object_frame_logit_margin",
+        )
+        _finite_real(
+            self.loss.false_alarm_logit_margin,
+            "false_alarm_logit_margin",
+        )
+        _positive_integer(
+            self.loss.false_alarm_topk_per_frame,
+            "false_alarm_topk_per_frame",
         )
         if not isinstance(self.evaluation.optimize_threshold, bool):
             raise ValueError("optimize_threshold must be boolean")

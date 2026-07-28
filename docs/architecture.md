@@ -23,14 +23,16 @@ t_block = min(floor(t * num_time_blocks), num_time_blocks - 1)
 块内每个事件的局部特征为：
 
 ```text
-[local_x, local_y, local_t, polarity]
+[local_x, local_y, local_t, polarity,
+ polarity - sequence_polarity_mean, sequence_polarity_mean]
 ```
 
-Event MLP 编码后分别做均值和最大池化。块统计为：
+Event MLP 编码后使用四个共享查询执行不依赖 padding 的块内注意力池化。块统计为：
 
 ```text
-[log(1+count), positive_polarity_ratio, negative_polarity_ratio,
- local_t_mean, local_t_variance, bounded_density]
+[log(1+count), positive_polarity_ratio,
+ local_t_mean, local_t_variance, bounded_density,
+ token_vs_sequence_polarity_contrast, polarity_entropy]
 ```
 
 池化特征、统计量和归一化 Token 坐标编码共同投影为 `tokens[M,C]`。
@@ -97,11 +99,12 @@ LayerNorm → MLP → residual
 每个事件通过 `event_token_indices` 取回更新后的父 Token，并拼接：
 
 ```text
-[parent_token, local_x, local_y, local_t, polarity,
- log_block_count, bounded_block_density]
+[parent_token,
+ local_x, local_y, local_t, polarity,
+ polarity - sequence_polarity_mean, sequence_polarity_mean]
 ```
 
-轻量 MLP 输出 `event_logits[N]`。同一块内事件仍能根据局部坐标、时间和极性得到不同结果。
+块统计量已经参与初始 Token 构造，不在解码器中重复拼接。轻量 MLP 输出 `event_logits[N]`；同一块内事件仍能根据各自的局部坐标、时间和极性得到不同结果。
 
 ## 6. 训练
 
@@ -111,10 +114,13 @@ LayerNorm → MLP → residual
 all positive events + at most ratio × positive background events
 ```
 
-无正事件序列保留最多 `max_background_without_positive` 个背景损失项。损失为数值稳定的 BCE-with-logits Focal 与按 batch 单独计算再平均的 Dice：
+无正事件序列保留最多 `max_background_without_positive` 个背景损失项。Focal、Dice 和目标帧召回项使用采样事件；Fa 项使用全部事件，先按 50 ms 帧与像素聚合背景响应，再惩罚每帧最高的 32 个像素 logit：
 
 ```text
-total = focal + lambda_dice * dice
+total = focal
+      + lambda_dice * dice
+      + lambda_object_frame * object_frame
+      + lambda_false_alarm * false_alarm
 ```
 
 优化器为 AdamW，支持梯度裁剪。`mixed_precision=true` 且设备为 CUDA 时启用 autocast 和 GradScaler；CPU 自动保持 FP32。

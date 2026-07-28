@@ -55,6 +55,8 @@ def test_base_yaml_exposes_cone_training_and_loss_configuration() -> None:
     assert config.loss.focal_gamma == 2.0
     assert config.loss.lambda_dice == 1.0
     assert config.loss.lambda_object_frame == 0.0
+    assert config.loss.lambda_false_alarm == 0.0
+    assert config.loss.false_alarm_topk_per_frame == 32
     assert config.evaluation.frame_ms == 50
 
 
@@ -79,6 +81,9 @@ def test_score_optimized_yaml_exposes_dense_domain_training_configuration() -> N
     assert config.loss.lambda_dice == 0.75
     assert config.loss.lambda_object_frame == 0.25
     assert config.loss.object_frame_logit_margin == 2.0
+    assert config.loss.lambda_false_alarm == 0.05
+    assert config.loss.false_alarm_logit_margin == 0.0
+    assert config.loss.false_alarm_topk_per_frame == 32
 
 
 def test_autodl_configs_preserve_score_model_and_select_cuda_bfloat16() -> None:
@@ -96,6 +101,9 @@ def test_autodl_configs_preserve_score_model_and_select_cuda_bfloat16() -> None:
         assert config.training.device == "cuda"
         assert config.training.mixed_precision is True
         assert config.training.mixed_precision_dtype == "bfloat16"
+        assert config.loss.lambda_false_alarm == 0.05
+        assert config.loss.false_alarm_logit_margin == 0.0
+        assert config.loss.false_alarm_topk_per_frame == 32
     assert smoke.training.max_train_files == 4
     assert smoke.training.max_val_files == 2
     assert full.training.epochs == 18
@@ -181,6 +189,20 @@ def test_cross_field_config_validation_rejects_inconsistent_values() -> None:
         lambda: replace(
             valid,
             loss=replace(valid.loss, lambda_object_frame=-0.1),
+        ).validate(),
+    )
+    raises(
+        ValueError,
+        lambda: replace(
+            valid,
+            loss=replace(valid.loss, lambda_false_alarm=-0.1),
+        ).validate(),
+    )
+    raises(
+        ValueError,
+        lambda: replace(
+            valid,
+            loss=replace(valid.loss, false_alarm_topk_per_frame=0),
         ).validate(),
     )
 

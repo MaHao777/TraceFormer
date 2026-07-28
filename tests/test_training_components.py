@@ -7,6 +7,7 @@ from huav.training.losses import (
     EventFocalDiceLoss,
     binary_dice_loss,
     binary_focal_loss,
+    false_alarm_pixel_loss,
     object_frame_recall_loss,
 )
 from huav.training.metrics import (
@@ -130,6 +131,116 @@ def test_total_loss_adds_configured_object_frame_objective() -> None:
         + 0.25 * losses["object_frame"]
     )
     assert torch.allclose(losses["total"], expected)
+
+
+def test_false_alarm_pixel_loss_penalizes_high_background_responses() -> None:
+    labels = torch.zeros(4)
+    batches = torch.zeros(4, dtype=torch.long)
+    timestamps_ms = torch.tensor([1.0, 2.0, 51.0, 52.0])
+    coordinates = torch.tensor(
+        [[1.0, 1.0], [1.0, 1.0], [2.0, 2.0], [3.0, 3.0]]
+    )
+    low_background = torch.full((4,), -5.0)
+    high_background = torch.tensor([5.0, -5.0, 5.0, -5.0])
+
+    low_loss = false_alarm_pixel_loss(
+        low_background,
+        labels,
+        batches,
+        timestamps_ms,
+        coordinates,
+        frame_ms=50.0,
+        logit_margin=0.0,
+    )
+    high_loss = false_alarm_pixel_loss(
+        high_background,
+        labels,
+        batches,
+        timestamps_ms,
+        coordinates,
+        frame_ms=50.0,
+        logit_margin=0.0,
+    )
+
+    assert low_loss < high_loss
+
+
+def test_false_alarm_pixel_loss_counts_repeated_pixel_events_once() -> None:
+    single_loss = false_alarm_pixel_loss(
+        torch.tensor([2.0]),
+        torch.zeros(1),
+        torch.zeros(1, dtype=torch.long),
+        torch.tensor([1.0]),
+        torch.tensor([[4.0, 5.0]]),
+    )
+    repeated_loss = false_alarm_pixel_loss(
+        torch.tensor([2.0, -1.0, -3.0]),
+        torch.zeros(3),
+        torch.zeros(3, dtype=torch.long),
+        torch.tensor([1.0, 2.0, 3.0]),
+        torch.tensor([[4.0, 5.0], [4.0, 5.0], [4.0, 5.0]]),
+    )
+
+    torch.testing.assert_close(single_loss, repeated_loss)
+
+
+def test_false_alarm_pixel_loss_focuses_on_hardest_pixels_per_frame() -> None:
+    single_hard_loss = false_alarm_pixel_loss(
+        torch.tensor([3.0]),
+        torch.zeros(1),
+        torch.zeros(1, dtype=torch.long),
+        torch.tensor([1.0]),
+        torch.tensor([[1.0, 1.0]]),
+        topk_per_frame=1,
+    )
+    hard_with_easy_pixels = false_alarm_pixel_loss(
+        torch.tensor([3.0, -8.0, -8.0, -8.0]),
+        torch.zeros(4),
+        torch.zeros(4, dtype=torch.long),
+        torch.tensor([1.0, 2.0, 3.0, 4.0]),
+        torch.tensor(
+            [[1.0, 1.0], [2.0, 2.0], [3.0, 3.0], [4.0, 4.0]]
+        ),
+        topk_per_frame=1,
+    )
+
+    torch.testing.assert_close(single_hard_loss, hard_with_easy_pixels)
+
+
+def test_total_loss_adds_full_event_false_alarm_objective() -> None:
+    sampled_logits = torch.tensor([2.0, -2.0], requires_grad=True)
+    sampled_labels = torch.tensor([1.0, 0.0])
+    full_logits = torch.tensor([2.0, -2.0, 3.0], requires_grad=True)
+    full_labels = torch.tensor([1.0, 0.0, 0.0])
+    criterion = EventFocalDiceLoss(
+        lambda_dice=0.5,
+        lambda_false_alarm=0.2,
+        false_alarm_logit_margin=0.0,
+        false_alarm_topk_per_frame=2,
+    )
+
+    losses = criterion(
+        sampled_logits,
+        sampled_labels,
+        full_logits=full_logits,
+        full_targets=full_labels,
+        full_batch_indices=torch.zeros(3, dtype=torch.long),
+        full_timestamps_ms=torch.tensor([1.0, 1.0, 51.0]),
+        full_coordinates=torch.tensor(
+            [[1.0, 1.0], [2.0, 2.0], [3.0, 3.0]]
+        ),
+        frame_ms=50.0,
+    )
+
+    expected = (
+        losses["focal"]
+        + 0.5 * losses["dice"]
+        + 0.2 * losses["false_alarm"]
+    )
+    assert torch.allclose(losses["total"], expected)
+    losses["total"].backward()
+    assert torch.isfinite(sampled_logits.grad).all()
+    assert torch.isfinite(full_logits.grad).all()
 
 
 def test_per_sample_dice_safely_penalizes_false_positives_without_targets() -> None:

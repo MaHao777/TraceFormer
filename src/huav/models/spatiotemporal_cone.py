@@ -93,7 +93,6 @@ class SpatioTemporalConeDetector(nn.Module):
             encoded.token_features,
             tokenized.event_token_indices,
             tokenized.event_local_features,
-            tokenized.token_statistics,
         )
         return {
             "event_logits": event_logits,

@@ -62,9 +62,14 @@ def main() -> None:
         lambda_dice=config.loss.lambda_dice,
         lambda_object_frame=config.loss.lambda_object_frame,
         object_frame_logit_margin=config.loss.object_frame_logit_margin,
+        lambda_false_alarm=config.loss.lambda_false_alarm,
+        false_alarm_logit_margin=config.loss.false_alarm_logit_margin,
+        false_alarm_topk_per_frame=config.loss.false_alarm_topk_per_frame,
     )
     events = sequence.events.to(device)
     labels = sequence.labels.to(device)
+    object_ids = sequence.object_ids.to(device)
+    timestamps_ms = sequence.timestamps_ms.to(device)
     batch_indices = torch.zeros(len(events), dtype=torch.long, device=device)
     sampling_generator = torch.Generator(device=device.type).manual_seed(
         config.training.seed
@@ -94,9 +99,14 @@ def main() -> None:
             output["event_logits"][query_indices],
             labels[query_indices],
             batch_indices[query_indices],
-            object_ids=sequence.object_ids.to(device)[query_indices],
-            timestamps_ms=sequence.timestamps_ms.to(device)[query_indices],
+            object_ids=object_ids[query_indices],
+            timestamps_ms=timestamps_ms[query_indices],
             frame_ms=config.evaluation.frame_ms,
+            full_logits=output["event_logits"],
+            full_targets=labels,
+            full_batch_indices=batch_indices,
+            full_timestamps_ms=timestamps_ms,
+            full_coordinates=events[:, :2],
         )
     losses["total"].backward()
     if device.type == "cuda":
@@ -110,6 +120,11 @@ def main() -> None:
         "token_count": int(output["token_features"].shape[0]),
         "loss_query_count": int(len(query_indices)),
         "loss": float(losses["total"].detach().float().item()),
+        "losses": {
+            name: float(value.detach().float().item())
+            for name, value in losses.items()
+        },
+        "false_alarm": float(losses["false_alarm"].detach().float().item()),
         "max_memory_allocated_bytes": peak_memory,
         "runtime": runtime.metadata,
     }

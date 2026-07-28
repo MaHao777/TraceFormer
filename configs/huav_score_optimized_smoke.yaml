@@ -53,6 +53,9 @@ loss:
   lambda_dice: 0.75
   lambda_object_frame: 0.25
   object_frame_logit_margin: 2.0
+  lambda_false_alarm: 0.05
+  false_alarm_logit_margin: 0.0
+  false_alarm_topk_per_frame: 32
 evaluation:
   optimize_threshold: true
   threshold_steps: 19

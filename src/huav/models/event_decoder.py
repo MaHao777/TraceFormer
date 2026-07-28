@@ -7,6 +7,8 @@ from torch import nn
 
 
 class EventDecoder(nn.Module):
+    event_feature_dim = 6
+
     def __init__(self, *, token_dim: int, dropout: float) -> None:
         super().__init__()
         if token_dim <= 0:
@@ -14,7 +16,10 @@ class EventDecoder(nn.Module):
         hidden_dim = max(8, token_dim // 2)
         self.token_dim = int(token_dim)
         self.classifier = nn.Sequential(
-            nn.Linear(self.token_dim + 10, self.token_dim),
+            nn.Linear(
+                self.token_dim + self.event_feature_dim,
+                self.token_dim,
+            ),
             nn.LayerNorm(self.token_dim),
             nn.GELU(),
             nn.Dropout(dropout),
@@ -28,19 +33,14 @@ class EventDecoder(nn.Module):
         token_features: torch.Tensor,
         event_token_indices: torch.Tensor,
         event_local_features: torch.Tensor,
-        token_statistics: torch.Tensor,
     ) -> torch.Tensor:
         if len(event_token_indices) == 0:
             return token_features.new_empty((0,))
         parent_tokens = token_features[event_token_indices]
-        block_decoder_statistics = token_statistics[event_token_indices][
-            :, (0, 4, 5, 6)
-        ]
         decoder_input = torch.cat(
             (
                 parent_tokens,
                 event_local_features,
-                block_decoder_statistics,
             ),
             dim=1,
         )

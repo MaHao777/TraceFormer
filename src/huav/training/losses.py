@@ -122,6 +122,105 @@ def object_frame_recall_loss(
     return F.softplus(float(logit_margin) - group_maximum).mean()
 
 
+def false_alarm_pixel_loss(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    batch_indices: torch.Tensor,
+    timestamps_ms: torch.Tensor,
+    coordinates: torch.Tensor,
+    *,
+    frame_ms: float = 50.0,
+    logit_margin: float = 0.0,
+    topk_per_frame: int = 32,
+) -> torch.Tensor:
+    """Suppress the strongest background response at each frame/pixel.
+
+    The competition counts connected components of false-positive pixels in
+    50 ms frames. Connectivity is discrete, so this differentiable surrogate
+    first collapses repeated background events at the same frame/pixel to their
+    maximum logit. Reducing those pixel maxima removes the source pixels from
+    which false connected components are formed.
+    """
+
+    targets = _validate_inputs(logits, targets)
+    if not (
+        batch_indices.ndim == timestamps_ms.ndim == 1
+        and len(batch_indices) == len(timestamps_ms) == len(logits)
+    ):
+        raise ValueError("batch indices and timestamps must align with logits")
+    if coordinates.shape != (len(logits), 2):
+        raise ValueError("coordinates must have shape [N,2]")
+    if frame_ms <= 0 or not math.isfinite(frame_ms):
+        raise ValueError("frame_ms must be positive and finite")
+    if not math.isfinite(logit_margin):
+        raise ValueError("logit_margin must be finite")
+    if (
+        isinstance(topk_per_frame, bool)
+        or not isinstance(topk_per_frame, int)
+        or topk_per_frame <= 0
+    ):
+        raise ValueError("topk_per_frame must be a positive integer")
+    if len(logits) == 0:
+        return logits.sum() * 0.0
+
+    integer_time = torch.floor(timestamps_ms.to(dtype=torch.float64))
+    within_frame = torch.remainder(integer_time, frame_ms)
+    background = (targets <= 0.5) & (within_frame > 0)
+    if not bool(background.any()):
+        return logits.sum() * 0.0
+
+    frame_indices = torch.div(
+        integer_time[background],
+        frame_ms,
+        rounding_mode="floor",
+    ).long()
+    group_coordinates = torch.cat(
+        (
+            batch_indices[background].long()[:, None],
+            frame_indices[:, None],
+            coordinates[background].long(),
+        ),
+        dim=1,
+    )
+    unique_group_coordinates, inverse = torch.unique(
+        group_coordinates,
+        dim=0,
+        return_inverse=True,
+    )
+    pixel_maximum = torch.full(
+        (int(inverse.max().item()) + 1,),
+        -torch.inf,
+        dtype=logits.dtype,
+        device=logits.device,
+    )
+    pixel_maximum.scatter_reduce_(
+        0,
+        inverse,
+        logits[background],
+        reduce="amax",
+        include_self=True,
+    )
+    frame_coordinates = unique_group_coordinates[:, :2]
+    unique_frames, frame_inverse = torch.unique(
+        frame_coordinates,
+        dim=0,
+        return_inverse=True,
+    )
+    frame_losses: list[torch.Tensor] = []
+    for frame_index in range(len(unique_frames)):
+        frame_pixels = pixel_maximum[frame_inverse == frame_index]
+        hard_pixels = torch.topk(
+            frame_pixels,
+            k=min(int(topk_per_frame), len(frame_pixels)),
+            largest=True,
+            sorted=False,
+        ).values
+        frame_losses.append(
+            F.softplus(hard_pixels - float(logit_margin)).mean()
+        )
+    return torch.stack(frame_losses).mean()
+
+
 class EventFocalDiceLoss(nn.Module):
     def __init__(
         self,
@@ -131,6 +230,9 @@ class EventFocalDiceLoss(nn.Module):
         lambda_dice: float = 1.0,
         lambda_object_frame: float = 0.0,
         object_frame_logit_margin: float = 2.0,
+        lambda_false_alarm: float = 0.0,
+        false_alarm_logit_margin: float = 0.0,
+        false_alarm_topk_per_frame: int = 32,
     ) -> None:
         super().__init__()
         if not 0 <= focal_alpha <= 1:
@@ -141,13 +243,28 @@ class EventFocalDiceLoss(nn.Module):
             raise ValueError("lambda_dice must be positive")
         if lambda_object_frame < 0:
             raise ValueError("lambda_object_frame must be non-negative")
+        if lambda_false_alarm < 0:
+            raise ValueError("lambda_false_alarm must be non-negative")
         if not math.isfinite(object_frame_logit_margin):
             raise ValueError("object_frame_logit_margin must be finite")
+        if not math.isfinite(false_alarm_logit_margin):
+            raise ValueError("false_alarm_logit_margin must be finite")
+        if (
+            isinstance(false_alarm_topk_per_frame, bool)
+            or not isinstance(false_alarm_topk_per_frame, int)
+            or false_alarm_topk_per_frame <= 0
+        ):
+            raise ValueError(
+                "false_alarm_topk_per_frame must be a positive integer"
+            )
         self.focal_alpha = float(focal_alpha)
         self.focal_gamma = float(focal_gamma)
         self.lambda_dice = float(lambda_dice)
         self.lambda_object_frame = float(lambda_object_frame)
         self.object_frame_logit_margin = float(object_frame_logit_margin)
+        self.lambda_false_alarm = float(lambda_false_alarm)
+        self.false_alarm_logit_margin = float(false_alarm_logit_margin)
+        self.false_alarm_topk_per_frame = int(false_alarm_topk_per_frame)
 
     def forward(
         self,
@@ -158,6 +275,11 @@ class EventFocalDiceLoss(nn.Module):
         object_ids: torch.Tensor | None = None,
         timestamps_ms: torch.Tensor | None = None,
         frame_ms: float = 50.0,
+        full_logits: torch.Tensor | None = None,
+        full_targets: torch.Tensor | None = None,
+        full_batch_indices: torch.Tensor | None = None,
+        full_timestamps_ms: torch.Tensor | None = None,
+        full_coordinates: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         focal = binary_focal_loss(
             logits,
@@ -181,15 +303,42 @@ class EventFocalDiceLoss(nn.Module):
             )
         else:
             object_frame = logits.sum() * 0.0
+        if self.lambda_false_alarm:
+            full_inputs = (
+                full_logits,
+                full_targets,
+                full_batch_indices,
+                full_timestamps_ms,
+                full_coordinates,
+            )
+            if any(value is None for value in full_inputs):
+                raise ValueError(
+                    "full-event logits, targets, batches, timestamps and "
+                    "coordinates are required for false-alarm loss"
+                )
+            false_alarm = false_alarm_pixel_loss(
+                full_logits,  # type: ignore[arg-type]
+                full_targets,  # type: ignore[arg-type]
+                full_batch_indices,  # type: ignore[arg-type]
+                full_timestamps_ms,  # type: ignore[arg-type]
+                full_coordinates,  # type: ignore[arg-type]
+                frame_ms=frame_ms,
+                logit_margin=self.false_alarm_logit_margin,
+                topk_per_frame=self.false_alarm_topk_per_frame,
+            )
+        else:
+            false_alarm = logits.sum() * 0.0
         return {
             "total": (
                 focal
                 + self.lambda_dice * dice
                 + self.lambda_object_frame * object_frame
+                + self.lambda_false_alarm * false_alarm
             ),
             "focal": focal,
             "dice": dice,
             "object_frame": object_frame,
+            "false_alarm": false_alarm,
         }
 
 
@@ -197,5 +346,6 @@ __all__ = [
     "EventFocalDiceLoss",
     "binary_dice_loss",
     "binary_focal_loss",
+    "false_alarm_pixel_loss",
     "object_frame_recall_loss",
 ]
