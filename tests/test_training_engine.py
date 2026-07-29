@@ -28,6 +28,7 @@ from huav.training.engine import (
     _grad_scaler_is_enabled,
     _make_optimizer,
     _make_scheduler,
+    _offset_statistics,
     _select_competition_threshold,
     build_model,
     evaluate_checkpoint,
@@ -36,6 +37,30 @@ from huav.training.engine import (
     run_training,
 )
 from huav.training.losses import EventFocalDiceLoss
+
+
+def test_offset_statistics_canonicalize_gpu_scale_reduction_noise() -> None:
+    reference = torch.tensor(
+        [-0.222222211, 0.123456121, 0.500000001],
+        dtype=torch.float64,
+    )
+    perturbed = reference + torch.tensor(
+        [3.0e-9, -3.0e-9, 2.0e-9],
+        dtype=torch.float64,
+    )
+
+    reference_statistics = _offset_statistics(reference)
+    perturbed_statistics = _offset_statistics(perturbed)
+
+    assert reference_statistics == perturbed_statistics
+    assert all(
+        value == round(value, 6)
+        for value in reference_statistics.values()
+    )
+    near_zero_statistics = _offset_statistics(
+        torch.tensor([-1.0e-9], dtype=torch.float64)
+    )
+    assert "-0.0" not in json.dumps(near_zero_statistics)
 
 
 def _write_sequence(path: Path, offset: int) -> None:
@@ -827,6 +852,19 @@ def test_schema4_detector_initialization_records_provenance_and_trains_calibrato
         }
         first = evaluate_checkpoint(adaptive, run_dir / "best.pt")
         second = evaluate_checkpoint(adaptive, run_dir / "best.pt")
+        diagnostic_values = [
+            *first["calibration"]["global"].values(),
+            *first["calibration"]["local"].values(),
+            *(
+                item["mean"]
+                for item in first["calibration"][
+                    "per_sequence_global_mean"
+                ]
+            ),
+        ]
+        assert all(
+            value == round(value, 6) for value in diagnostic_values
+        )
         assert first["calibration"] == second["calibration"]
         assert first == json.loads(
             (run_dir / "metrics.json").read_text(encoding="utf-8")

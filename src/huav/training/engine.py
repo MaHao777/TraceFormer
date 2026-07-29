@@ -522,6 +522,14 @@ def _initialize_detector_weights(
     }
 
 
+CALIBRATION_DIAGNOSTIC_DECIMALS = 6
+
+
+def _canonical_calibration_diagnostic(value: float) -> float:
+    canonical = round(float(value), CALIBRATION_DIAGNOSTIC_DECIMALS)
+    return 0.0 if canonical == 0.0 else canonical
+
+
 def _offset_statistics(values: torch.Tensor) -> dict[str, float]:
     flattened = values.detach().to(device="cpu", dtype=torch.float64).reshape(-1)
     if flattened.numel() == 0:
@@ -533,10 +541,14 @@ def _offset_statistics(values: torch.Tensor) -> dict[str, float]:
         }
     absolute = flattened.abs()
     return {
-        "mean": float(flattened.mean().item()),
-        "std": float(flattened.std(unbiased=False).item()),
-        "p95_abs": float(torch.quantile(absolute, 0.95).item()),
-        "max_abs": float(absolute.max().item()),
+        "mean": _canonical_calibration_diagnostic(flattened.mean().item()),
+        "std": _canonical_calibration_diagnostic(
+            flattened.std(unbiased=False).item()
+        ),
+        "p95_abs": _canonical_calibration_diagnostic(
+            torch.quantile(absolute, 0.95).item()
+        ),
+        "max_abs": _canonical_calibration_diagnostic(absolute.max().item()),
     }
 
 
@@ -789,7 +801,9 @@ def evaluate_model(
             {
                 "source": sequence.source_path.name,
                 "mean": (
-                    float(sequence_global_offsets.double().mean().item())
+                    _canonical_calibration_diagnostic(
+                        sequence_global_offsets.double().mean().item()
+                    )
                     if sequence_global_offsets.numel()
                     else 0.0
                 ),

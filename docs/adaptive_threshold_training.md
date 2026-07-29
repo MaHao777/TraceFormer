@@ -207,4 +207,13 @@ print({
 PY
 ```
 
+## Calibration diagnostic precision
+
+The `calibration` section of validation JSON is diagnostic-only. Its global
+and local `mean`, `std`, `p95_abs`, and `max_abs` values, together with every
+`per_sequence_global_mean.mean`, are canonicalized to six decimal places
+before serialization. Values that round to zero are written as positive
+`0.0`. This reporting contract absorbs CUDA grouped-reduction noise without
+changing logits, losses, threshold selection, or any model tensor.
+
 最终报告必须同时列出 baseline、四个 frozen、三个 joint 的最佳 epoch、阈值、`competition.score`、IoU、SegAcc、Pd、Fa，以及最终模型的事件级 Pd/Fa/IoU/Acc、独立复评一致性和提交 ZIP 绝对路径。
