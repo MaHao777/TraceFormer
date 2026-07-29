@@ -20,7 +20,8 @@ python -m huav.cli.check_gpu --device cuda
 
 ```bash
 python scripts/check_largest_sequence.py \
-  --config configs/huav_score_optimized_autodl.yaml \
+  --config configs/huav_adaptive_hierarchical_autodl.yaml \
+  --initialize-detector outputs/<baseline-run>/best.pt \
   --device cuda
 ```
 

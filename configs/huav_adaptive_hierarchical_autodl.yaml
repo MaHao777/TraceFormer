@@ -1,0 +1,68 @@
+resolution: {width: 346, height: 260}
+model:
+  spatial_block_size_x: 8
+  spatial_block_size_y: 8
+  num_time_blocks: 64
+  token_dim: 48
+  event_embed_dim: 64
+  num_pool_queries: 4
+  num_layers: 3
+  num_heads: 4
+  mlp_ratio: 2.0
+  dropout: 0.1
+  cone_heads:
+    - {base_radius: 1.0, slope: 0.5, max_time_distance: 4}
+    - {base_radius: 1.0, slope: 1.0, max_time_distance: 4}
+    - {base_radius: 2.0, slope: 1.5, max_time_distance: 6}
+    - {base_radius: 2.0, slope: 2.0, max_time_distance: 8}
+  layer_time_scales: [0.5, 0.75, 1.0]
+  max_neighbors_per_cone: 8
+  causal_mode: false
+  direction_dropout: 0.1
+  debug_attention_stats: false
+  adaptive_threshold_mode: hierarchical
+  threshold_hidden_dim: 32
+  threshold_time_bins: 160
+  threshold_max_global_offset: 0.5
+  threshold_max_local_offset: 0.75
+inference: {sigmoid_threshold: 0.5}
+dataset: {root: ../data/ev-uav, duration_ms: 8000}
+training:
+  device: cuda
+  training_stage: calibrator
+  epochs: 6
+  learning_rate: 0.0003
+  detector_learning_rate:
+  weight_decay: 0.0002
+  seed: 37
+  background_ratio: 12
+  hard_negative_fraction: 0.5
+  max_background_without_positive: 4096
+  dense_sequence_event_threshold: 300000
+  dense_sequence_background_polarity_max: 0.65
+  dense_sequence_weight: 3.0
+  min_learning_rate_ratio: 0.1
+  num_threads: 8
+  output_root: ../outputs
+  gradient_clip_norm: 1.0
+  mixed_precision: true
+  mixed_precision_dtype: bfloat16
+  max_train_files:
+  max_val_files:
+loss:
+  focal_alpha: 0.75
+  focal_gamma: 2.0
+  lambda_dice: 0.75
+  lambda_object_frame: 0.25
+  object_frame_logit_margin: 2.0
+  lambda_false_alarm: 0.05
+  false_alarm_logit_margin: 0.0
+  false_alarm_topk_per_frame: 32
+  lambda_threshold_magnitude: 0.01
+  lambda_threshold_center: 0.05
+  lambda_threshold_smoothness: 0.01
+evaluation:
+  optimize_threshold: true
+  threshold_steps: 61
+  frame_ms: 50
+  object_correct_fraction: 0.0001

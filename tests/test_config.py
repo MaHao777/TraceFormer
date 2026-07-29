@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import sys
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from huav.config import ConeHeadConfig, HUAVConfig, load_config
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def raises(exc_type: type[Exception], fn: object) -> None:
@@ -369,3 +373,111 @@ def test_yaml_loader_rejects_non_mapping_unknown_and_syntactically_invalid_docum
             path = Path(directory) / f"document-{index}.yaml"
             path.write_text(contents, encoding="utf-8")
             raises(ValueError, lambda path=path: load_config(path))
+
+
+@pytest.mark.parametrize(
+    ("mode", "center", "smoothness"),
+    (
+        ("global", 0.0, 0.0),
+        ("local", 0.05, 0.0),
+        ("local_neighbor", 0.05, 0.01),
+        ("hierarchical", 0.05, 0.01),
+    ),
+)
+def test_adaptive_threshold_autodl_ablation_configs_are_production_aligned(
+    mode: str,
+    center: float,
+    smoothness: float,
+) -> None:
+    production = load_config(
+        ROOT / "configs" / "huav_score_optimized_autodl.yaml"
+    )
+    frozen = load_config(
+        ROOT / "configs" / f"huav_adaptive_{mode}_autodl.yaml"
+    )
+    joint = load_config(
+        ROOT / "configs" / f"huav_adaptive_{mode}_joint_autodl.yaml"
+    )
+
+    for config in (frozen, joint):
+        assert config.model.adaptive_threshold_mode == mode
+        assert config.model.spatial_block_size_x == 8
+        assert config.model.spatial_block_size_y == 8
+        assert config.model.num_time_blocks == 64
+        assert config.model.threshold_hidden_dim == 32
+        assert config.model.threshold_time_bins == 160
+        assert config.model.threshold_max_global_offset == pytest.approx(0.5)
+        assert config.model.threshold_max_local_offset == pytest.approx(0.75)
+        assert config.training.device == "cuda"
+        assert config.training.mixed_precision is True
+        assert config.training.mixed_precision_dtype == "bfloat16"
+        assert config.training.weight_decay == pytest.approx(2e-4)
+        assert config.training.seed == 37
+        assert config.training.min_learning_rate_ratio == pytest.approx(0.1)
+        assert config.training.max_train_files is None
+        assert config.training.max_val_files is None
+        assert config.loss.lambda_threshold_magnitude == pytest.approx(0.01)
+        assert config.loss.lambda_threshold_center == pytest.approx(center)
+        assert config.loss.lambda_threshold_smoothness == pytest.approx(
+            smoothness
+        )
+        assert config.evaluation.threshold_steps == 61
+        unchanged_fields = {
+            "resolution": set(),
+            "model": {
+                "adaptive_threshold_mode",
+                "threshold_hidden_dim",
+                "threshold_time_bins",
+                "threshold_max_global_offset",
+                "threshold_max_local_offset",
+            },
+            "inference": set(),
+            "dataset": set(),
+            "training": {
+                "training_stage",
+                "epochs",
+                "learning_rate",
+                "detector_learning_rate",
+            },
+            "loss": {
+                "lambda_threshold_magnitude",
+                "lambda_threshold_center",
+                "lambda_threshold_smoothness",
+            },
+            "evaluation": {"threshold_steps"},
+        }
+        for section, allowed_changes in unchanged_fields.items():
+            expected = asdict(getattr(production, section))
+            actual = asdict(getattr(config, section))
+            for field in expected.keys() - allowed_changes:
+                assert actual[field] == expected[field], (
+                    f"{section}.{field} drifted from production"
+                )
+
+    assert frozen.training.training_stage == "calibrator"
+    assert frozen.training.epochs == 6
+    assert frozen.training.learning_rate == pytest.approx(3e-4)
+    assert frozen.training.detector_learning_rate is None
+    assert joint.training.training_stage == "joint"
+    assert joint.training.epochs == 8
+    assert joint.training.learning_rate == pytest.approx(1e-4)
+    assert joint.training.detector_learning_rate == pytest.approx(3e-5)
+
+
+def test_adaptive_threshold_autodl_smoke_config_has_explicit_limits() -> None:
+    config = load_config(
+        ROOT
+        / "configs"
+        / "huav_adaptive_hierarchical_autodl_smoke.yaml"
+    )
+
+    assert config.model.adaptive_threshold_mode == "hierarchical"
+    assert config.model.spatial_block_size_x == 8
+    assert config.model.spatial_block_size_y == 8
+    assert config.model.num_time_blocks == 64
+    assert config.training.training_stage == "calibrator"
+    assert config.training.epochs == 1
+    assert config.training.max_train_files == 4
+    assert config.training.max_val_files == 2
+    assert config.training.mixed_precision is True
+    assert config.training.mixed_precision_dtype == "bfloat16"

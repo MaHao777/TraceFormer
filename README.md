@@ -129,7 +129,7 @@ python -m huav.cli.evaluate `
 - 对事件数不少于 300,000 且背景极性均值位于 `[0.35, 0.65]` 的序列使用 3 倍损失权重；
 - 验证阈值按官网总分进行粗到细搜索，而不是只按事件 IoU 搜索。
 
-对应烟雾配置为 `configs/huav_score_optimized_smoke.yaml`。当前事件解码器不再重复拼接块统计量，首层权重形状随之变化，因此 checkpoint schema 为 `4`；schema `2/3` 结果继续保留为历史产物，但不能用当前模型代码直接加载。
+对应烟雾配置为 `configs/huav_score_optimized_smoke.yaml`。当前训练产物使用 checkpoint schema `5`；schema `4` 仅支持非自适应检测器的只读评估以及作为 `--initialize-detector` 的初始化来源，schema `3`（以及更早版本）由当前代码明确拒绝，继续保留为历史产物。
 
 ## 完整训练结果
 
