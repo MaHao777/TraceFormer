@@ -535,6 +535,37 @@ def test_resume_rejects_non_joint_training_stage() -> None:
             assert not rejected_dir.exists()
 
 
+def test_resume_rejects_full_adaptive_parent_before_creating_output() -> None:
+    with TemporaryDirectory(dir=Path.cwd()) as directory:
+        temporary_root = Path(directory)
+        data_root = temporary_root / "data"
+        (data_root / "train").mkdir(parents=True)
+        (data_root / "val").mkdir(parents=True)
+        _write_sequence(data_root / "train" / "train_000.npz", 0)
+        _write_sequence(data_root / "val" / "val_000.npz", 1)
+        output_root = temporary_root / "outputs"
+        full_config = _adaptive_config(
+            data_root,
+            output_root,
+            stage="full",
+        )
+        trained = run_training(
+            full_config,
+            output_dir=output_root / "full-adaptive",
+        )
+        rejected_dir = output_root / "rejected-resume"
+
+        with pytest.raises(ValueError, match="calibrator or joint checkpoint"):
+            resume_training(
+                _adaptive_config(data_root, output_root, stage="joint"),
+                Path(trained["run_dir"]) / "best.pt",
+                additional_epochs=1,
+                output_dir=rejected_dir,
+            )
+
+        assert not rejected_dir.exists()
+
+
 def test_amp_is_enabled_only_when_requested_on_cuda() -> None:
     assert _amp_is_enabled(True, torch.device("cuda"))
     assert not _amp_is_enabled(False, torch.device("cuda"))
@@ -846,6 +877,32 @@ def test_schema4_detector_initialization_records_provenance_and_trains_calibrato
             "detector",
             "calibrator",
         }
+        resumed_again = resume_training(
+            _adaptive_config(data_root, output_root, stage="joint"),
+            resumed_dir / "best.pt",
+            additional_epochs=1,
+            output_dir=output_root / "resumed-again",
+        )
+        resumed_again_checkpoint_path = (
+            Path(resumed_again["run_dir"]) / "best.pt"
+        )
+        resumed_again_checkpoint = torch.load(
+            resumed_again_checkpoint_path,
+            map_location="cpu",
+            weights_only=True,
+        )
+        assert resumed_again_checkpoint["source_checkpoint"] == checkpoint[
+            "source_checkpoint"
+        ]
+        assert resumed_again_checkpoint["source_checkpoint_sha256"] == checkpoint[
+            "source_checkpoint_sha256"
+        ]
+        assert resumed_again_checkpoint["resumed_from_checkpoint"] == str(
+            (resumed_dir / "best.pt").resolve()
+        )
+        assert resumed_again_checkpoint["resumed_from_sha256"] == __import__(
+            "hashlib"
+        ).sha256((resumed_dir / "best.pt").read_bytes()).hexdigest()
         for invalid_epochs in (0, -1):
             with pytest.raises(ValueError, match="positive"):
                 resume_training(

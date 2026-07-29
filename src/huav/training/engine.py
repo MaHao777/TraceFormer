@@ -1297,6 +1297,10 @@ def resume_training(
     if checkpoint.get("schema_version") != CHECKPOINT_SCHEMA_VERSION:
         raise ValueError("unsupported checkpoint schema version")
     _validate_schema5_metadata(checkpoint)
+    if checkpoint["training_stage"] not in {"calibrator", "joint"}:
+        raise ValueError(
+            "resume_training requires a calibrator or joint checkpoint"
+        )
     _stored_decision_threshold(checkpoint)
     expected_model = _serializable(asdict(config.model))
     expected_resolution = _serializable(asdict(config.resolution))
