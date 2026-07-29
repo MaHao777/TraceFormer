@@ -78,6 +78,28 @@ def test_zero_initialized_modes_exactly_reproduce_base_logits(mode: str) -> None
     assert torch.count_nonzero(result.local_event_offsets) == 0
 
 
+@pytest.mark.parametrize(
+    "mode",
+    ("none", "global", "local", "local_neighbor", "hierarchical"),
+)
+def test_large_finite_singleton_logit_keeps_finite_zero_std_and_identity(
+    mode: str,
+) -> None:
+    base_logits = torch.tensor([1.0e20])
+
+    result = _calibrator(mode)(
+        torch.tensor([[1.0, 1.0, 0.5, 1.0]]),
+        torch.zeros((1, 4)),
+        torch.zeros((1, 7)),
+        base_logits,
+        torch.zeros(1, dtype=torch.long),
+    )
+
+    assert torch.isfinite(result.group_descriptors).all()
+    assert result.group_descriptors[0, 15].item() == 0.0
+    assert torch.equal(result.final_logits, base_logits)
+
+
 def test_groups_events_in_50ms_8x8_cells_and_clamps_time_one() -> None:
     events = torch.tensor(
         [
@@ -111,6 +133,23 @@ def test_groups_events_in_50ms_8x8_cells_and_clamps_time_one() -> None:
     assert torch.isfinite(descriptor).all()
     torch.testing.assert_close(descriptor[1, 16:], torch.tensor([1.0, 0.0, 1 / 159]))
     torch.testing.assert_close(descriptor[2, 16:], torch.tensor([0.0, 1.0, 1.0]))
+
+
+def test_zero_polarity_is_not_counted_as_positive() -> None:
+    result = _calibrator("none")(
+        torch.tensor(
+            [
+                [1.0, 1.0, 0.1, 0.0],
+                [2.0, 2.0, 0.1, 0.0],
+            ]
+        ),
+        torch.zeros((2, 4)),
+        torch.zeros((2, 7)),
+        torch.zeros(2),
+        torch.zeros(2, dtype=torch.long),
+    )
+
+    assert result.group_descriptors[0, 12].item() == 0.0
 
 
 def test_events_in_same_group_share_local_offset_and_offsets_are_bounded() -> None:
@@ -190,6 +229,46 @@ def test_neighbor_edges_are_exact_26_cell_neighbors_and_batch_isolated() -> None
     assert edges
     for target, source in edges:
         assert result.group_batch_indices[target] == result.group_batch_indices[source]
+
+
+def test_neighbor_context_is_exactly_zero_without_edges() -> None:
+    calibrator = _calibrator("local_neighbor")
+    embeddings = torch.randn(3, calibrator.hidden_dim)
+    coords = torch.tensor([[0, 0, 0], [1, 0, 0], [0, 1, 0]])
+
+    context = calibrator._neighbor_context(
+        embeddings,
+        coords,
+        torch.empty((2, 0), dtype=torch.long),
+    )
+
+    assert torch.equal(context, torch.zeros_like(embeddings))
+
+
+def test_relative_coordinate_encoding_changes_neighbor_context() -> None:
+    calibrator = _calibrator("local_neighbor")
+    embeddings = torch.zeros((2, calibrator.hidden_dim))
+    coords = torch.tensor([[0, 0, 0], [1, 0, 0]])
+    edge_indices = torch.tensor([[0], [1]])
+    with torch.no_grad():
+        calibrator.neighbor_value.weight.zero_()
+        for layer in calibrator.relative_encoder:
+            if isinstance(layer, torch.nn.Linear):
+                layer.weight.zero_()
+    without_relative_position = calibrator._neighbor_context(
+        embeddings, coords, edge_indices
+    )
+
+    with torch.no_grad():
+        calibrator.relative_encoder[0].weight[0, 0] = 1.0
+        calibrator.relative_encoder[2].weight[0, 0] = 1.0
+    with_relative_position = calibrator._neighbor_context(
+        embeddings, coords, edge_indices
+    )
+
+    assert torch.equal(without_relative_position, torch.zeros_like(embeddings))
+    assert with_relative_position[0, 0] > 0
+    assert torch.count_nonzero(with_relative_position) == 1
 
 
 def test_empty_input_returns_finite_correctly_shaped_tensors() -> None:

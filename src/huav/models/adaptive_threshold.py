@@ -315,11 +315,10 @@ class AdaptiveThresholdCalibrator(nn.Module):
         logit_max.scatter_reduce_(
             0, inverse, detached_logits, reduce="amax", include_self=True
         )
-        logit_square_sum = detached_logits.new_zeros(group_count)
-        logit_square_sum.scatter_add_(0, inverse, detached_logits.square())
-        logit_variance = (
-            logit_square_sum / float_counts - logit_mean.square()
-        ).clamp_min(0)
+        centered_logits = detached_logits - logit_mean[inverse]
+        centered_square_sum = detached_logits.new_zeros(group_count)
+        centered_square_sum.scatter_add_(0, inverse, centered_logits.square())
+        logit_variance = (centered_square_sum / float_counts).clamp_min(0)
         logit_std = torch.sqrt(logit_variance)
 
         normalized_coords = torch.stack(
@@ -513,7 +512,12 @@ class AdaptiveThresholdCalibrator(nn.Module):
             counts,
             group_coords,
         )
-        group_embeddings = self.descriptor_projection(descriptors)
+        group_embeddings = torch.nan_to_num(
+            self.descriptor_projection(descriptors),
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        )
         neighbor_edges = self._neighbor_edges(
             group_keys, group_coords, group_batches
         )
