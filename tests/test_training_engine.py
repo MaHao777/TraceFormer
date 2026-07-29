@@ -815,6 +815,27 @@ def test_schema4_detector_initialization_records_provenance_and_trains_calibrato
         )
         resumed_dir = Path(resumed["run_dir"])
         assert resumed_dir.joinpath("best.pt").is_file()
+        resumed_checkpoint = torch.load(
+            resumed_dir / "best.pt", map_location="cpu", weights_only=True
+        )
+        assert resumed_checkpoint["source_checkpoint"] == checkpoint[
+            "source_checkpoint"
+        ]
+        assert resumed_checkpoint["source_checkpoint_sha256"] == checkpoint[
+            "source_checkpoint_sha256"
+        ]
+        assert resumed_checkpoint["resumed_from_checkpoint"] == str(
+            (run_dir / "best.pt").resolve()
+        )
+        assert resumed_checkpoint["resumed_from_sha256"] == __import__(
+            "hashlib"
+        ).sha256((run_dir / "best.pt").read_bytes()).hexdigest()
+        assert resumed["resumed_from_checkpoint"] == str(
+            (run_dir / "best.pt").resolve()
+        )
+        assert resumed["resumed_from_sha256"] == resumed_checkpoint[
+            "resumed_from_sha256"
+        ]
         resumed_history = json.loads(
             resumed_dir.joinpath("history.json").read_text(encoding="utf-8")
         )
@@ -852,6 +873,17 @@ def test_schema4_detector_initialization_records_provenance_and_trains_calibrato
         first_file = markdown.index("| val_000.npz |")
         second_file = markdown.index("| val_001.npz |")
         assert first_file < second_file
+
+        _write_sequence(val_root / "val_000.npz", 3)
+        mismatch_output = output_root / "resume-manifest-mismatch"
+        with pytest.raises(ValueError, match="validation dataset manifest"):
+            resume_training(
+                _adaptive_config(data_root, output_root, stage="joint"),
+                run_dir / "best.pt",
+                additional_epochs=1,
+                output_dir=mismatch_output,
+            )
+        assert not mismatch_output.exists()
 
 
 def test_schema4_none_checkpoint_supports_control_evaluation_and_reoptimization() -> None:
@@ -951,6 +983,24 @@ def test_schema5_metadata_is_strict_for_evaluate_predict_and_resume() -> None:
         variants.append(("missing-count", missing_count))
         variant("boolean-count", trainable_parameter_count=True)
         variant("zero-count", trainable_parameter_count=0)
+        variant(
+            "wrong-count",
+            trainable_parameter_count=checkpoint[
+                "trainable_parameter_count"
+            ]
+            + 1,
+        )
+        variant("invalid-model-config", model_config=[])
+        mode_none = dict(checkpoint)
+        mode_none["model_config"] = dict(checkpoint["model_config"])
+        mode_none["model_config"]["adaptive_threshold_mode"] = "none"
+        variants.append(("calibrator-none-mode", mode_none))
+        full_with_provenance = dict(checkpoint)
+        full_with_provenance["training_stage"] = "full"
+        full_with_provenance["trainable_parameter_count"] = sum(
+            value.numel() for value in checkpoint["model_state"].values()
+        )
+        variants.append(("full-with-provenance", full_with_provenance))
         missing_source = dict(checkpoint)
         missing_source.pop("source_checkpoint")
         variants.append(("missing-source", missing_source))
@@ -963,6 +1013,14 @@ def test_schema5_metadata_is_strict_for_evaluate_predict_and_resume() -> None:
         missing_provenance.pop("source_checkpoint")
         missing_provenance.pop("source_checkpoint_sha256")
         variants.append(("calibrator-without-provenance", missing_provenance))
+        missing_state = dict(checkpoint)
+        missing_state.pop("model_state")
+        variants.append(("missing-state", missing_state))
+        variant("non-mapping-state", model_state=[])
+        invalid_state_value = dict(checkpoint)
+        invalid_state_value["model_state"] = dict(checkpoint["model_state"])
+        invalid_state_value["model_state"]["calibrator.invalid"] = "not-a-tensor"
+        variants.append(("non-tensor-state", invalid_state_value))
 
         joint = _adaptive_config(data_root, output_root, stage="joint")
         for name, payload in variants:
@@ -985,6 +1043,51 @@ def test_schema5_metadata_is_strict_for_evaluate_predict_and_resume() -> None:
                     output_dir=resume_dir,
                 )
             assert not resume_dir.exists()
+
+
+def test_checkpoint_load_paths_reject_non_mapping_top_level_without_artifacts() -> None:
+    with TemporaryDirectory(dir=Path.cwd()) as directory:
+        temporary_root = Path(directory)
+        data_root = temporary_root / "data"
+        (data_root / "train").mkdir(parents=True)
+        (data_root / "val").mkdir(parents=True)
+        _write_sequence(data_root / "train" / "train_000.npz", 0)
+        _write_sequence(data_root / "val" / "val_000.npz", 1)
+        checkpoint_path = temporary_root / "not-mapping.pt"
+        torch.save([], checkpoint_path)
+        full = _config(data_root, temporary_root / "outputs")
+        calibrator = _adaptive_config(
+            data_root, temporary_root / "outputs"
+        )
+        joint = _adaptive_config(
+            data_root, temporary_root / "outputs", stage="joint"
+        )
+
+        with pytest.raises(ValueError, match="checkpoint.*mapping"):
+            evaluate_checkpoint(full, checkpoint_path)
+        with pytest.raises(ValueError, match="checkpoint.*mapping"):
+            generate_submission_package(
+                full,
+                checkpoint_path,
+                temporary_root / "submission",
+            )
+        init_output = temporary_root / "init-output"
+        with pytest.raises(ValueError, match="checkpoint.*mapping"):
+            run_training(
+                calibrator,
+                output_dir=init_output,
+                initialize_detector=checkpoint_path,
+            )
+        assert not init_output.exists()
+        resume_output = temporary_root / "resume-output"
+        with pytest.raises(ValueError, match="checkpoint.*mapping"):
+            resume_training(
+                joint,
+                checkpoint_path,
+                additional_epochs=1,
+                output_dir=resume_output,
+            )
+        assert not resume_output.exists()
 
 
 def test_run_training_rejects_fresh_joint_stage() -> None:
@@ -1065,13 +1168,15 @@ def test_detector_initialization_rejects_schema3() -> None:
         config = _adaptive_config(data_root, temporary_root / "outputs")
         checkpoint = temporary_root / "schema3.pt"
         torch.save({"schema_version": 3}, checkpoint)
+        output_dir = temporary_root / "outputs" / "run"
 
         with pytest.raises(ValueError, match="schema version"):
             run_training(
                 config,
-                output_dir=temporary_root / "outputs" / "run",
+                output_dir=output_dir,
                 initialize_detector=checkpoint,
             )
+        assert not output_dir.exists()
 
 
 @pytest.mark.parametrize(
@@ -1082,6 +1187,9 @@ def test_detector_initialization_rejects_schema3() -> None:
         ("missing", "missing="),
         ("unexpected", "unexpected="),
         ("calibrator_state", "non-adaptive source state"),
+        ("missing_state", "model_state"),
+        ("non_mapping_state", "model_state.*mapping"),
+        ("non_tensor_state", "string names to tensors"),
     ),
 )
 def test_detector_initialization_rejects_incompatible_detector_state(
@@ -1114,14 +1222,32 @@ def test_detector_initialization_rejects_incompatible_detector_state(
             checkpoint["model_state"].pop(detector_key)
         elif mutation == "calibrator_state":
             checkpoint["model_state"]["calibrator.unexpected"] = torch.zeros(1)
+        elif mutation == "missing_state":
+            checkpoint.pop("model_state")
+        elif mutation == "non_mapping_state":
+            checkpoint["model_state"] = []
+        elif mutation == "non_tensor_state":
+            checkpoint["model_state"]["invalid"] = "not-a-tensor"
         else:
             checkpoint["model_state"]["detector.unexpected"] = torch.zeros(1)
+        if mutation not in {
+            "config",
+            "missing_state",
+            "non_mapping_state",
+            "non_tensor_state",
+        }:
+            checkpoint["trainable_parameter_count"] = sum(
+                value.numel()
+                for value in checkpoint["model_state"].values()
+            )
         incompatible = output_root / f"{mutation}.pt"
         torch.save(checkpoint, incompatible)
 
+        output_dir = output_root / f"adaptive-{mutation}"
         with pytest.raises(ValueError, match=message):
             run_training(
                 _adaptive_config(data_root, output_root),
-                output_dir=output_root / f"adaptive-{mutation}",
+                output_dir=output_dir,
                 initialize_detector=incompatible,
             )
+        assert not output_dir.exists()

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import random
+from collections.abc import Mapping
 from dataclasses import asdict
 from datetime import datetime
 from hashlib import sha256
@@ -217,6 +218,29 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _load_checkpoint(path: str | Path, device: torch.device) -> dict[str, Any]:
+    loaded = torch.load(path, map_location=device, weights_only=True)
+    if not isinstance(loaded, Mapping):
+        raise ValueError("checkpoint must be a mapping")
+    return dict(loaded)
+
+
+def _checkpoint_model_state(
+    checkpoint: Mapping[str, Any],
+) -> dict[str, torch.Tensor]:
+    state = checkpoint.get("model_state")
+    if not isinstance(state, Mapping):
+        raise ValueError("checkpoint model_state must be a mapping")
+    if any(
+        not isinstance(name, str) or not isinstance(value, torch.Tensor)
+        for name, value in state.items()
+    ):
+        raise ValueError(
+            "checkpoint model_state must map string names to tensors"
+        )
+    return dict(state)
+
+
 def _normalized_legacy_model_config(model_config: object) -> dict[str, Any]:
     if not isinstance(model_config, dict):
         raise ValueError("checkpoint model configuration is invalid")
@@ -249,6 +273,8 @@ def _validate_checkpoint_metadata(
         )
     else:
         raise ValueError("unsupported checkpoint schema version")
+    if schema == LEGACY_READ_ONLY_SCHEMA_VERSION:
+        _checkpoint_model_state(checkpoint)
     _stored_decision_threshold(checkpoint)
     if actual_model != expected_model:
         raise ValueError(
@@ -278,7 +304,50 @@ def _stored_decision_threshold(checkpoint: dict[str, Any]) -> float:
     return float(threshold)
 
 
+def _validate_provenance_pair(
+    checkpoint: Mapping[str, Any],
+    path_key: str,
+    hash_key: str,
+) -> bool:
+    path_present = path_key in checkpoint
+    hash_present = hash_key in checkpoint
+    if path_present != hash_present:
+        raise ValueError(
+            f"checkpoint {path_key} and {hash_key} must appear together"
+        )
+    if not path_present:
+        return False
+    source = checkpoint[path_key]
+    source_hash = checkpoint[hash_key]
+    if not isinstance(source, str) or not source.strip():
+        raise ValueError(f"checkpoint {path_key} must be non-empty")
+    if (
+        not isinstance(source_hash, str)
+        or len(source_hash) != 64
+        or any(
+            character not in "0123456789abcdefABCDEF"
+            for character in source_hash
+        )
+    ):
+        raise ValueError(f"checkpoint {hash_key} must be 64 hex characters")
+    return True
+
+
+def _expected_trainable_state_count(
+    state: Mapping[str, torch.Tensor],
+    training_stage: str,
+) -> int:
+    if training_stage == "calibrator":
+        return sum(
+            value.numel()
+            for name, value in state.items()
+            if name.startswith("calibrator.")
+        )
+    return sum(value.numel() for value in state.values())
+
+
 def _validate_schema5_metadata(checkpoint: dict[str, Any]) -> None:
+    state = _checkpoint_model_state(checkpoint)
     training_stage = checkpoint.get("training_stage")
     if (
         not isinstance(training_stage, str)
@@ -286,6 +355,27 @@ def _validate_schema5_metadata(checkpoint: dict[str, Any]) -> None:
     ):
         raise ValueError(
             "checkpoint training_stage must be full, calibrator, or joint"
+        )
+    model_config = checkpoint.get("model_config")
+    if not isinstance(model_config, dict):
+        raise ValueError("checkpoint model_config must be a mapping")
+    adaptive_mode = model_config.get("adaptive_threshold_mode")
+    if adaptive_mode not in {
+        "none",
+        "global",
+        "local",
+        "local_neighbor",
+        "hierarchical",
+    }:
+        raise ValueError(
+            "checkpoint adaptive_threshold_mode is missing or invalid"
+        )
+    if (
+        training_stage in {"calibrator", "joint"}
+        and adaptive_mode == "none"
+    ):
+        raise ValueError(
+            "checkpoint calibrator/joint stage requires adaptive thresholding"
         )
     trainable_count = checkpoint.get("trainable_parameter_count")
     if (
@@ -296,33 +386,29 @@ def _validate_schema5_metadata(checkpoint: dict[str, Any]) -> None:
         raise ValueError(
             "checkpoint trainable_parameter_count must be a positive integer"
         )
-    source_present = "source_checkpoint" in checkpoint
-    hash_present = "source_checkpoint_sha256" in checkpoint
-    if source_present != hash_present:
+    expected_count = _expected_trainable_state_count(state, training_stage)
+    if int(trainable_count) != expected_count:
         raise ValueError(
-            "checkpoint source_checkpoint and source_checkpoint_sha256 "
-            "must appear together"
+            "checkpoint trainable_parameter_count does not match model_state"
         )
-    if training_stage == "calibrator" and not source_present:
+    source_present = _validate_provenance_pair(
+        checkpoint,
+        "source_checkpoint",
+        "source_checkpoint_sha256",
+    )
+    _validate_provenance_pair(
+        checkpoint,
+        "resumed_from_checkpoint",
+        "resumed_from_sha256",
+    )
+    if training_stage in {"calibrator", "joint"} and not source_present:
         raise ValueError(
-            "calibrator checkpoint requires source checkpoint provenance"
+            "calibrator/joint checkpoint requires source checkpoint provenance"
         )
-    if source_present:
-        source = checkpoint["source_checkpoint"]
-        source_hash = checkpoint["source_checkpoint_sha256"]
-        if not isinstance(source, str) or not source.strip():
-            raise ValueError("checkpoint source_checkpoint must be non-empty")
-        if (
-            not isinstance(source_hash, str)
-            or len(source_hash) != 64
-            or any(
-                character not in "0123456789abcdefABCDEF"
-                for character in source_hash
-            )
-        ):
-            raise ValueError(
-                "checkpoint source_checkpoint_sha256 must be 64 hex characters"
-            )
+    if training_stage == "full" and source_present:
+        raise ValueError(
+            "full checkpoint must not contain source checkpoint provenance"
+        )
 
 
 def _base_model_config(model_config: object) -> dict[str, Any]:
@@ -347,9 +433,7 @@ def _initialize_detector_weights(
         raise ValueError(
             "initialize_detector requires an adaptive target model"
         )
-    checkpoint = torch.load(
-        checkpoint_path, map_location=device, weights_only=True
-    )
+    checkpoint = _load_checkpoint(checkpoint_path, device)
     if checkpoint.get("schema_version") not in {
         LEGACY_READ_ONLY_SCHEMA_VERSION,
         CHECKPOINT_SCHEMA_VERSION,
@@ -378,9 +462,7 @@ def _initialize_detector_weights(
         raise ValueError(
             "detector checkpoint validation dataset manifest does not match target"
         )
-    source_state = checkpoint.get("model_state")
-    if not isinstance(source_state, dict):
-        raise ValueError("detector checkpoint model state is invalid")
+    source_state = _checkpoint_model_state(checkpoint)
     if any(name.startswith("calibrator.") for name in source_state):
         raise ValueError(
             "detector initialization requires a non-adaptive source state"
@@ -915,12 +997,7 @@ def run_training(
     np.random.seed(config.training.seed)
     torch.manual_seed(config.training.seed)
 
-    run_dir = _run_directory(config, output_dir, device_name=torch_device.type)
     configuration = _serializable(asdict(config))
-    _atomic_write_text(
-        run_dir / "config.yaml",
-        yaml.safe_dump(configuration, allow_unicode=True, sort_keys=False),
-    )
     train_dataset = _dataset(config, "train")
     validation_dataset = _dataset(config, "val")
     manifest = _dataset_manifest(train_dataset, validation_dataset)
@@ -933,7 +1010,6 @@ def run_training(
         ],
     }
     validation_manifest_digest = _manifest_identity_digest(validation_manifest)
-    _write_json(run_dir / "dataset_manifest.json", manifest)
     model = build_model(config).to(torch_device)
     initialization_metadata: dict[str, str] = {}
     if initialize_detector is not None:
@@ -944,14 +1020,11 @@ def run_training(
             validation_manifest_digest,
             device=torch_device,
         )
-        _atomic_write_text(
-            run_dir / "initialized_from.txt",
-            f"checkpoint: {initialization_metadata['source_checkpoint']}\n"
-            f"sha256: "
-            f"{initialization_metadata['source_checkpoint_sha256']}\n",
-        )
-    trainable_parameter_count = _configure_training_stage(
+    _configure_training_stage(
         model, config.training.training_stage
+    )
+    trainable_parameter_count = _expected_trainable_state_count(
+        model.state_dict(), config.training.training_stage
     )
     criterion = _criterion(config)
     optimizer = _make_optimizer(model, config)
@@ -960,6 +1033,19 @@ def run_training(
         epochs=config.training.epochs,
         minimum_ratio=config.training.min_learning_rate_ratio,
     )
+    run_dir = _run_directory(config, output_dir, device_name=torch_device.type)
+    _atomic_write_text(
+        run_dir / "config.yaml",
+        yaml.safe_dump(configuration, allow_unicode=True, sort_keys=False),
+    )
+    _write_json(run_dir / "dataset_manifest.json", manifest)
+    if initialization_metadata:
+        _atomic_write_text(
+            run_dir / "initialized_from.txt",
+            f"checkpoint: {initialization_metadata['source_checkpoint']}\n"
+            f"sha256: "
+            f"{initialization_metadata['source_checkpoint_sha256']}\n",
+        )
     order_generator = torch.Generator().manual_seed(config.training.seed)
     sampling_generator = torch.Generator(device=torch_device.type).manual_seed(
         config.training.seed
@@ -1198,9 +1284,7 @@ def resume_training(
 
     # ── Validate checkpoint compatibility ──────────────────────────────
     checkpoint_path = Path(checkpoint_path)
-    checkpoint = torch.load(
-        checkpoint_path, map_location=torch_device, weights_only=True
-    )
+    checkpoint = _load_checkpoint(checkpoint_path, torch_device)
     if checkpoint.get("schema_version") != CHECKPOINT_SCHEMA_VERSION:
         raise ValueError("unsupported checkpoint schema version")
     _validate_schema5_metadata(checkpoint)
@@ -1217,17 +1301,11 @@ def resume_training(
         )
 
     # ── Run directory ───────────────────────────────────────────────────
-    run_dir = _run_directory(config, output_dir, device_name=torch_device.type)
     configuration = _serializable(asdict(config))
-    _atomic_write_text(
-        run_dir / "config.yaml",
-        yaml.safe_dump(configuration, allow_unicode=True, sort_keys=False),
-    )
-    _atomic_write_text(
-        run_dir / "resumed_from.txt",
-        f"checkpoint: {checkpoint_path.resolve()}\n"
-        f"source_epoch: {checkpoint.get('epoch', 'unknown')}\n",
-    )
+    resume_lineage = {
+        "resumed_from_checkpoint": str(checkpoint_path.resolve()),
+        "resumed_from_sha256": _file_sha256(checkpoint_path),
+    }
 
     # ── Datasets & manifest ─────────────────────────────────────────────
     train_dataset = _dataset(config, "train")
@@ -1246,13 +1324,14 @@ def resume_training(
         raise ValueError(
             "checkpoint validation dataset manifest does not match current data"
         )
-    _write_json(run_dir / "dataset_manifest.json", manifest)
-
     # ── Build model & load weights ──────────────────────────────────────
     model = build_model(config).to(torch_device)
-    model.load_state_dict(checkpoint["model_state"])
-    trainable_parameter_count = _configure_training_stage(
+    model.load_state_dict(_checkpoint_model_state(checkpoint))
+    _configure_training_stage(
         model, config.training.training_stage
+    )
+    trainable_parameter_count = _expected_trainable_state_count(
+        model.state_dict(), config.training.training_stage
     )
 
     # ── Loss, optimiser, scheduler ──────────────────────────────────────
@@ -1263,6 +1342,17 @@ def resume_training(
         epochs=additional_epochs,
         minimum_ratio=config.training.min_learning_rate_ratio,
     )
+    run_dir = _run_directory(config, output_dir, device_name=torch_device.type)
+    _atomic_write_text(
+        run_dir / "config.yaml",
+        yaml.safe_dump(configuration, allow_unicode=True, sort_keys=False),
+    )
+    _atomic_write_text(
+        run_dir / "resumed_from.txt",
+        f"checkpoint: {checkpoint_path.resolve()}\n"
+        f"source_epoch: {checkpoint.get('epoch', 'unknown')}\n",
+    )
+    _write_json(run_dir / "dataset_manifest.json", manifest)
     order_generator = torch.Generator().manual_seed(config.training.seed)
     sampling_generator = torch.Generator(device=torch_device.type).manual_seed(
         config.training.seed
@@ -1429,6 +1519,7 @@ def resume_training(
                     "validation_manifest_sha256": validation_manifest_digest,
                     "training_stage": config.training.training_stage,
                     "trainable_parameter_count": trainable_parameter_count,
+                    **resume_lineage,
                     **{
                         name: checkpoint[name]
                         for name in (
@@ -1467,6 +1558,7 @@ def resume_training(
         ),
         "training_stage": config.training.training_stage,
         "trainable_parameter_count": trainable_parameter_count,
+        **resume_lineage,
         "best_score": best_score,
         "best_iou": float(best_metrics["competition"]["iou"]),
         "metrics": best_metrics,
@@ -1486,9 +1578,7 @@ def evaluate_checkpoint(
     config.validate()
     runtime = prepare_device(device, num_threads=config.training.num_threads)
     torch_device = runtime.device
-    checkpoint = torch.load(
-        checkpoint_path, map_location=torch_device, weights_only=True
-    )
+    checkpoint = _load_checkpoint(checkpoint_path, torch_device)
     validation_dataset = _dataset(config, "val")
     actual_validation_digest = _manifest_identity_digest(
         _dataset_manifest(validation_dataset)
@@ -1501,7 +1591,7 @@ def evaluate_checkpoint(
     )
     model = build_model(config).to(torch_device)
     try:
-        model.load_state_dict(checkpoint["model_state"])
+        model.load_state_dict(_checkpoint_model_state(checkpoint))
     except RuntimeError as error:
         raise ValueError("checkpoint model state does not match model") from error
     threshold = (
@@ -1557,9 +1647,7 @@ def generate_submission_package(
     config.validate()
     runtime = prepare_device(device, num_threads=config.training.num_threads)
     torch_device = runtime.device
-    checkpoint = torch.load(
-        checkpoint_path, map_location=torch_device, weights_only=True
-    )
+    checkpoint = _load_checkpoint(checkpoint_path, torch_device)
     validation_dataset = _dataset(config, "val")
     actual_validation_digest = _manifest_identity_digest(
         _dataset_manifest(validation_dataset)
@@ -1572,7 +1660,7 @@ def generate_submission_package(
     )
     model = build_model(config).to(torch_device)
     try:
-        model.load_state_dict(checkpoint["model_state"])
+        model.load_state_dict(_checkpoint_model_state(checkpoint))
     except RuntimeError as error:
         raise ValueError("checkpoint model state does not match model") from error
     threshold = _stored_decision_threshold(checkpoint)
