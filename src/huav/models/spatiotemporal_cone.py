@@ -91,20 +91,21 @@ class SpatioTemporalConeDetector(nn.Module):
             debug_attention_stats=debug_attention_stats,
         )
         self.decoder = EventDecoder(token_dim=token_dim, dropout=dropout)
-        self.calibrator = AdaptiveThresholdCalibrator(
-            token_dim=token_dim,
-            width=width,
-            height=height,
-            spatial_block_size_x=spatial_block_size_x,
-            spatial_block_size_y=spatial_block_size_y,
-            threshold_time_bins=threshold_time_bins,
-            mode=adaptive_threshold_mode,
-            hidden_dim=threshold_hidden_dim,
-            max_global_offset=threshold_max_global_offset,
-            max_local_offset=threshold_max_local_offset,
-        )
         if adaptive_threshold_mode == "none":
-            self.calibrator.requires_grad_(False)
+            self.calibrator: AdaptiveThresholdCalibrator | None = None
+        else:
+            self.calibrator = AdaptiveThresholdCalibrator(
+                token_dim=token_dim,
+                width=width,
+                height=height,
+                spatial_block_size_x=spatial_block_size_x,
+                spatial_block_size_y=spatial_block_size_y,
+                threshold_time_bins=threshold_time_bins,
+                mode=adaptive_threshold_mode,
+                hidden_dim=threshold_hidden_dim,
+                max_global_offset=threshold_max_global_offset,
+                max_local_offset=threshold_max_local_offset,
+            )
 
     def forward(
         self,
@@ -122,6 +123,38 @@ class SpatioTemporalConeDetector(nn.Module):
             tokenized.event_token_indices,
             tokenized.event_local_features,
         )
+        if self.calibrator is None:
+            zero_offsets = torch.zeros_like(base_event_logits)
+            device = events.device
+            return {
+                "event_logits": base_event_logits,
+                "base_event_logits": base_event_logits,
+                "global_threshold_offsets": zero_offsets,
+                "local_threshold_offsets": zero_offsets.clone(),
+                "threshold_group_indices": torch.empty(
+                    (0,), dtype=torch.long, device=device
+                ),
+                "threshold_group_coords": torch.empty(
+                    (0, 3), dtype=torch.long, device=device
+                ),
+                "threshold_group_batch_indices": torch.empty(
+                    (0,), dtype=torch.long, device=device
+                ),
+                "threshold_neighbor_edges": torch.empty(
+                    (2, 0), dtype=torch.long, device=device
+                ),
+                "threshold_group_descriptors": torch.empty(
+                    (0, self.token_dim + 15),
+                    dtype=torch.float32,
+                    device=device,
+                ),
+                "token_features": encoded.token_features,
+                "token_coords": tokenized.token_coords,
+                "token_batch_indices": tokenized.token_batch_indices,
+                "event_token_indices": tokenized.event_token_indices,
+                "past_attention_stats": encoded.past_attention_stats,
+                "future_attention_stats": encoded.future_attention_stats,
+            }
         if events.shape[1] == 5:
             event_features = events[:, 1:]
             event_batch_indices = events[:, 0].long()

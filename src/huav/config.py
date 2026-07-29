@@ -314,6 +314,30 @@ class HUAVConfig:
         ):
             if _finite_real(getattr(self.loss, name), name) < 0:
                 raise ValueError(f"{name} must be non-negative")
+        threshold_mode = self.model.adaptive_threshold_mode
+        threshold_lambdas = (
+            self.loss.lambda_threshold_magnitude,
+            self.loss.lambda_threshold_smoothness,
+            self.loss.lambda_threshold_center,
+        )
+        if any(value > 0 for value in threshold_lambdas) and threshold_mode == "none":
+            raise ValueError(
+                "adaptive-threshold regularizers require adaptive thresholding"
+            )
+        if (
+            self.loss.lambda_threshold_center > 0
+            and threshold_mode not in {"local", "local_neighbor", "hierarchical"}
+        ):
+            raise ValueError(
+                "lambda_threshold_center requires a local adaptive threshold mode"
+            )
+        if (
+            self.loss.lambda_threshold_smoothness > 0
+            and threshold_mode not in {"local_neighbor", "hierarchical"}
+        ):
+            raise ValueError(
+                "lambda_threshold_smoothness requires a neighbor threshold mode"
+            )
         _finite_real(
             self.loss.object_frame_logit_margin,
             "object_frame_logit_margin",

@@ -230,15 +230,46 @@ def adaptive_threshold_regularization(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Return magnitude, per-sequence centering and neighbor smoothness terms."""
 
-    event_count = len(local_event_offsets)
-    if global_event_offsets.shape != (event_count,):
+    tensors = (
+        global_event_offsets,
+        local_event_offsets,
+        event_group_indices,
+        group_batch_indices,
+        neighbor_edge_indices,
+    )
+    if not all(isinstance(tensor, torch.Tensor) for tensor in tensors):
+        raise TypeError("adaptive-threshold regularization inputs must be tensors")
+    if global_event_offsets.ndim != 1:
         raise ValueError("global_event_offsets must have shape [N]")
+    if local_event_offsets.ndim != 1:
+        raise ValueError("local_event_offsets must have shape [N]")
+    if not global_event_offsets.is_floating_point():
+        raise TypeError("global_event_offsets must have a floating dtype")
+    if not local_event_offsets.is_floating_point():
+        raise TypeError("local_event_offsets must have a floating dtype")
+    event_count = len(local_event_offsets)
+    if len(global_event_offsets) != event_count:
+        raise ValueError("global and local event offsets must have matching length")
     if event_group_indices.shape != (event_count,):
         raise ValueError("event_group_indices must have shape [N]")
     if group_batch_indices.ndim != 1:
         raise ValueError("group_batch_indices must have shape [G]")
     if neighbor_edge_indices.ndim != 2 or neighbor_edge_indices.shape[0] != 2:
         raise ValueError("neighbor_edge_indices must have shape [2,E]")
+    integer_dtypes = {
+        torch.uint8,
+        torch.int8,
+        torch.int16,
+        torch.int32,
+        torch.int64,
+    }
+    for tensor, name in (
+        (event_group_indices, "event_group_indices"),
+        (group_batch_indices, "group_batch_indices"),
+        (neighbor_edge_indices, "neighbor_edge_indices"),
+    ):
+        if tensor.dtype not in integer_dtypes:
+            raise TypeError(f"{name} must have an integer dtype")
     if (
         global_event_offsets.device != local_event_offsets.device
         or event_group_indices.device != local_event_offsets.device
@@ -246,24 +277,53 @@ def adaptive_threshold_regularization(
         or neighbor_edge_indices.device != local_event_offsets.device
     ):
         raise ValueError("adaptive-threshold regularization inputs must share a device")
+    if not torch.isfinite(global_event_offsets).all() or not torch.isfinite(
+        local_event_offsets
+    ).all():
+        raise ValueError("adaptive-threshold event offsets must be finite")
+    if torch.any(group_batch_indices < 0):
+        raise ValueError("group_batch_indices must be non-negative")
 
     differentiable_zero = (
         global_event_offsets.sum() + local_event_offsets.sum()
     ) * 0.0
     if event_count == 0:
+        if len(group_batch_indices) != 0:
+            raise ValueError("declared groups must contain at least one event")
+        if neighbor_edge_indices.shape[1] != 0:
+            raise ValueError("neighbor edges require declared groups")
         return differentiable_zero, differentiable_zero, differentiable_zero
     if len(group_batch_indices) == 0:
         raise ValueError("group_batch_indices cannot be empty when events exist")
-    if torch.any(event_group_indices < 0) or torch.any(
-        event_group_indices >= len(group_batch_indices)
+    event_groups = event_group_indices.long()
+    if torch.any(event_groups < 0) or torch.any(
+        event_groups >= len(group_batch_indices)
     ):
         raise ValueError("event_group_indices contain an out-of-range group")
+    group_event_counts = torch.bincount(
+        event_groups,
+        minlength=len(group_batch_indices),
+    )
+    if torch.any(group_event_counts == 0):
+        raise ValueError("every declared group must contain at least one event")
+    edges = neighbor_edge_indices.long()
+    if edges.shape[1] and (
+        torch.any(edges < 0)
+        or torch.any(edges >= len(group_batch_indices))
+    ):
+        raise ValueError("neighbor_edge_indices contain an out-of-range group")
+    if edges.shape[1]:
+        targets, sources = edges
+        if torch.any(
+            group_batch_indices[targets] != group_batch_indices[sources]
+        ):
+            raise ValueError("neighbor edges cannot connect different batches")
 
     magnitude = (
         global_event_offsets.square().mean()
         + local_event_offsets.square().mean()
     )
-    event_batches = group_batch_indices[event_group_indices]
+    event_batches = group_batch_indices[event_groups]
     _, event_batch_inverse = torch.unique(
         event_batches,
         sorted=True,
@@ -281,18 +341,12 @@ def adaptive_threshold_regularization(
     if neighbor_edge_indices.shape[1] == 0:
         smoothness = local_event_offsets.sum() * 0.0
     else:
-        if torch.any(neighbor_edge_indices < 0) or torch.any(
-            neighbor_edge_indices >= len(group_batch_indices)
-        ):
-            raise ValueError("neighbor_edge_indices contain an out-of-range group")
         group_sums = local_event_offsets.new_zeros(len(group_batch_indices))
-        group_sums.scatter_add_(0, event_group_indices, local_event_offsets)
-        group_counts = torch.bincount(
-            event_group_indices,
-            minlength=len(group_batch_indices),
-        ).to(local_event_offsets.dtype)
-        group_offsets = group_sums / group_counts.clamp_min(1)
-        targets, sources = neighbor_edge_indices
+        group_sums.scatter_add_(0, event_groups, local_event_offsets)
+        group_offsets = group_sums / group_event_counts.to(
+            local_event_offsets.dtype
+        )
+        targets, sources = edges
         smoothness = (
             group_offsets[targets] - group_offsets[sources]
         ).square().mean()
@@ -428,70 +482,33 @@ class EventFocalDiceLoss(nn.Module):
         threshold_magnitude = threshold_zero
         threshold_center = threshold_zero
         threshold_smoothness = threshold_zero
-        if self.lambda_threshold_magnitude:
-            if (
-                global_threshold_offsets is None
-                or local_threshold_offsets is None
-            ):
-                raise ValueError(
-                    "adaptive-threshold global and local offsets are required "
-                    "for magnitude regularization"
-                )
-            if global_threshold_offsets.shape != local_threshold_offsets.shape:
-                raise ValueError(
-                    "adaptive-threshold global and local offsets must have "
-                    "matching shape [N]"
-                )
-            if len(local_threshold_offsets) == 0:
-                threshold_magnitude = (
-                    global_threshold_offsets.sum()
-                    + local_threshold_offsets.sum()
-                ) * 0.0
-            else:
-                threshold_magnitude = (
-                    global_threshold_offsets.square().mean()
-                    + local_threshold_offsets.square().mean()
-                )
-        if self.lambda_threshold_center or self.lambda_threshold_smoothness:
-            grouping_inputs = (
+        threshold_enabled = (
+            self.lambda_threshold_magnitude
+            or self.lambda_threshold_center
+            or self.lambda_threshold_smoothness
+        )
+        if threshold_enabled:
+            required_inputs = (
+                global_threshold_offsets,
                 local_threshold_offsets,
                 threshold_group_indices,
                 threshold_group_batch_indices,
+                threshold_neighbor_edges,
             )
-            if any(value is None for value in grouping_inputs):
+            if any(value is None for value in required_inputs):
                 raise ValueError(
-                    "adaptive-threshold local offsets, group indices and group "
-                    "batches are required for center or smoothness regularization"
+                    "adaptive-threshold offsets, group indices, group batches "
+                    "and neighbor edges are required for threshold regularization"
                 )
-            if (
-                self.lambda_threshold_smoothness
-                and threshold_neighbor_edges is None
-            ):
-                raise ValueError(
-                    "adaptive-threshold neighbor edges are required for "
-                    "smoothness regularization"
-                )
-            helper_global_offsets = (
-                global_threshold_offsets
-                if global_threshold_offsets is not None
-                else torch.zeros_like(local_threshold_offsets)
-            )
-            helper_neighbor_edges = (
-                threshold_neighbor_edges
-                if threshold_neighbor_edges is not None
-                else torch.empty(
-                    (2, 0),
-                    dtype=torch.long,
-                    device=local_threshold_offsets.device,
-                )
-            )
-            _, center, smoothness = adaptive_threshold_regularization(
-                helper_global_offsets,
+            magnitude, center, smoothness = adaptive_threshold_regularization(
+                global_threshold_offsets,  # type: ignore[arg-type]
                 local_threshold_offsets,  # type: ignore[arg-type]
                 threshold_group_indices,  # type: ignore[arg-type]
                 threshold_group_batch_indices,  # type: ignore[arg-type]
-                helper_neighbor_edges,
+                threshold_neighbor_edges,  # type: ignore[arg-type]
             )
+            if self.lambda_threshold_magnitude:
+                threshold_magnitude = magnitude
             if self.lambda_threshold_center:
                 threshold_center = center
             if self.lambda_threshold_smoothness:

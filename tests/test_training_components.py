@@ -248,11 +248,17 @@ def test_total_loss_adds_full_event_false_alarm_objective() -> None:
 
 
 def test_adaptive_threshold_regularization_matches_hand_computed_values() -> None:
-    global_offsets = torch.tensor([1.0, 1.0, 2.0, 3.0], requires_grad=True)
-    local_offsets = torch.tensor([1.0, 3.0, 5.0, 7.0], requires_grad=True)
-    group_indices = torch.tensor([0, 0, 1, 2])
-    group_batches = torch.tensor([0, 0, 1])
-    directed_edges = torch.tensor([[0, 1, 1], [1, 0, 2]])
+    global_offsets = torch.tensor(
+        [1.0, 1.0, 2.0, 3.0, 4.0],
+        requires_grad=True,
+    )
+    local_offsets = torch.tensor(
+        [1.0, 3.0, 5.0, 7.0, 9.0],
+        requires_grad=True,
+    )
+    group_indices = torch.tensor([0, 0, 1, 2, 3])
+    group_batches = torch.tensor([0, 0, 1, 1])
+    directed_edges = torch.tensor([[0, 1, 2], [1, 0, 3]])
 
     magnitude, center, smoothness = adaptive_threshold_regularization(
         global_offsets,
@@ -262,8 +268,8 @@ def test_adaptive_threshold_regularization_matches_hand_computed_values() -> Non
         directed_edges,
     )
 
-    torch.testing.assert_close(magnitude, torch.tensor(24.75))
-    torch.testing.assert_close(center, torch.tensor(29.0))
+    torch.testing.assert_close(magnitude, torch.tensor(39.2))
+    torch.testing.assert_close(center, torch.tensor(36.5))
     torch.testing.assert_close(smoothness, torch.tensor(22.0 / 3.0))
     (magnitude + center + smoothness).backward()
     assert torch.isfinite(global_offsets.grad).all()
@@ -302,6 +308,77 @@ def test_adaptive_threshold_regularization_no_edges_has_zero_smoothness() -> Non
     assert smoothness.item() == 0.0
     smoothness.backward()
     assert local_offsets.grad is not None
+
+
+@pytest.mark.parametrize(
+    ("global_offsets", "local_offsets", "group_indices", "group_batches", "edges", "error"),
+    (
+        (
+            torch.zeros((2, 1)),
+            torch.zeros(2),
+            torch.tensor([0, 1]),
+            torch.tensor([0, 0]),
+            torch.empty((2, 0), dtype=torch.long),
+            ValueError,
+        ),
+        (
+            torch.zeros(2),
+            torch.zeros(2),
+            torch.tensor([0.0, 1.0]),
+            torch.tensor([0, 0]),
+            torch.empty((2, 0), dtype=torch.long),
+            TypeError,
+        ),
+        (
+            torch.tensor([0.0, float("nan")]),
+            torch.zeros(2),
+            torch.tensor([0, 1]),
+            torch.tensor([0, 0]),
+            torch.empty((2, 0), dtype=torch.long),
+            ValueError,
+        ),
+        (
+            torch.zeros(2),
+            torch.zeros(2),
+            torch.tensor([0, 2]),
+            torch.tensor([0, 0, 0]),
+            torch.empty((2, 0), dtype=torch.long),
+            ValueError,
+        ),
+        (
+            torch.zeros(2),
+            torch.zeros(2),
+            torch.tensor([0, 1]),
+            torch.tensor([0, 1]),
+            torch.tensor([[0], [1]]),
+            ValueError,
+        ),
+        (
+            torch.zeros(2),
+            torch.zeros(2),
+            torch.tensor([0, 1]),
+            torch.tensor([0, -1]),
+            torch.empty((2, 0), dtype=torch.long),
+            ValueError,
+        ),
+    ),
+)
+def test_adaptive_threshold_regularization_rejects_malformed_metadata(
+    global_offsets: torch.Tensor,
+    local_offsets: torch.Tensor,
+    group_indices: torch.Tensor,
+    group_batches: torch.Tensor,
+    edges: torch.Tensor,
+    error: type[Exception],
+) -> None:
+    with pytest.raises(error):
+        adaptive_threshold_regularization(
+            global_offsets,
+            local_offsets,
+            group_indices,
+            group_batches,
+            edges,
+        )
 
 
 def test_total_loss_adds_configured_adaptive_threshold_regularizers() -> None:
@@ -345,36 +422,27 @@ def test_threshold_regularized_loss_requires_calibration_tensors() -> None:
         criterion(torch.zeros(2), torch.zeros(2))
 
 
-def test_magnitude_only_threshold_loss_requires_only_event_offsets() -> None:
+def test_magnitude_only_threshold_loss_requires_all_calibration_metadata() -> None:
     criterion = EventFocalDiceLoss(lambda_threshold_magnitude=0.1)
+
+    with pytest.raises(ValueError, match="adaptive-threshold"):
+        criterion(
+            torch.zeros(2),
+            torch.zeros(2),
+            global_threshold_offsets=torch.tensor([0.1, 0.1]),
+            local_threshold_offsets=torch.tensor([0.2, -0.2]),
+        )
 
     losses = criterion(
         torch.zeros(2),
         torch.zeros(2),
         global_threshold_offsets=torch.tensor([0.1, 0.1]),
         local_threshold_offsets=torch.tensor([0.2, -0.2]),
+        threshold_group_indices=torch.tensor([0, 1]),
+        threshold_group_batch_indices=torch.tensor([0, 0]),
+        threshold_neighbor_edges=torch.empty((2, 0), dtype=torch.long),
     )
-
-    torch.testing.assert_close(
-        losses["threshold_magnitude"],
-        torch.tensor(0.05),
-    )
-
-
-def test_magnitude_only_threshold_loss_handles_empty_events() -> None:
-    empty_offsets = torch.empty(0, requires_grad=True)
-    criterion = EventFocalDiceLoss(lambda_threshold_magnitude=0.1)
-
-    losses = criterion(
-        torch.empty(0, requires_grad=True),
-        torch.empty(0),
-        global_threshold_offsets=empty_offsets,
-        local_threshold_offsets=empty_offsets,
-    )
-
-    assert losses["threshold_magnitude"].item() == 0.0
-    losses["total"].backward()
-    assert empty_offsets.grad is not None
+    torch.testing.assert_close(losses["threshold_magnitude"], torch.tensor(0.05))
 
 
 def test_per_sample_dice_safely_penalizes_false_positives_without_targets() -> None:

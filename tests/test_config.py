@@ -286,6 +286,49 @@ def test_adaptive_threshold_requires_evaluation_frame_alignment() -> None:
     ).validate()
 
 
+def test_threshold_regularizers_require_compatible_adaptive_modes() -> None:
+    valid = HUAVConfig.default()
+    raises(
+        ValueError,
+        lambda: replace(
+            valid,
+            loss=replace(valid.loss, lambda_threshold_magnitude=0.1),
+        ).validate(),
+    )
+    raises(
+        ValueError,
+        lambda: replace(
+            valid,
+            model=replace(valid.model, adaptive_threshold_mode="global"),
+            loss=replace(valid.loss, lambda_threshold_center=0.1),
+        ).validate(),
+    )
+    raises(
+        ValueError,
+        lambda: replace(
+            valid,
+            model=replace(valid.model, adaptive_threshold_mode="local"),
+            loss=replace(valid.loss, lambda_threshold_smoothness=0.1),
+        ).validate(),
+    )
+
+    replace(
+        valid,
+        model=replace(valid.model, adaptive_threshold_mode="global"),
+        loss=replace(valid.loss, lambda_threshold_magnitude=0.1),
+    ).validate()
+    replace(
+        valid,
+        model=replace(valid.model, adaptive_threshold_mode="local"),
+        loss=replace(valid.loss, lambda_threshold_center=0.1),
+    ).validate()
+    replace(
+        valid,
+        model=replace(valid.model, adaptive_threshold_mode="local_neighbor"),
+        loss=replace(valid.loss, lambda_threshold_smoothness=0.1),
+    ).validate()
+
+
 def test_config_overrides_reject_unknown_keys_including_mixed_valid_invalid_values() -> None:
     valid = HUAVConfig.default()
     raises(ValueError, lambda: valid.with_overrides(widht=346))

@@ -3,7 +3,7 @@ from __future__ import annotations
 import torch
 
 from huav.config import ConeHeadConfig
-from huav.models import SpatioTemporalConeDetector
+from huav.models import AdaptiveThresholdCalibrator, SpatioTemporalConeDetector
 
 
 def _model(
@@ -55,8 +55,23 @@ def _events() -> torch.Tensor:
     )
 
 
-def test_forward_returns_required_event_token_and_attention_outputs() -> None:
-    output = _model()(_events())
+def test_forward_returns_required_event_token_and_attention_outputs(
+    monkeypatch: object,
+) -> None:
+    def fail_if_called(*args: object, **kwargs: object) -> None:
+        raise AssertionError("inactive calibration must not run")
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        AdaptiveThresholdCalibrator,
+        "forward",
+        fail_if_called,
+    )
+    model = _model()
+    assert model.calibrator is None
+    assert "calibrator" not in model._modules
+    assert not any(name.startswith("calibrator.") for name, _ in model.named_parameters())
+
+    output = model(_events())
 
     assert {
         "event_logits",
@@ -78,14 +93,14 @@ def test_forward_returns_required_event_token_and_attention_outputs() -> None:
     assert output["event_logits"].shape == (5,)
     assert output["event_logits"] is output["base_event_logits"]
     assert output["global_threshold_offsets"].shape == (5,)
+    assert torch.count_nonzero(output["global_threshold_offsets"]).item() == 0
     assert output["local_threshold_offsets"].shape == (5,)
-    assert output["threshold_group_indices"].shape == (5,)
-    assert output["threshold_group_coords"].shape[1] == 3
-    assert output["threshold_group_batch_indices"].ndim == 1
+    assert torch.count_nonzero(output["local_threshold_offsets"]).item() == 0
+    assert output["threshold_group_indices"].shape == (0,)
+    assert output["threshold_group_coords"].shape == (0, 3)
+    assert output["threshold_group_batch_indices"].shape == (0,)
     assert output["threshold_neighbor_edges"].shape == (2, 0)
-    assert output["threshold_group_descriptors"].shape[0] == len(
-        output["threshold_group_coords"]
-    )
+    assert output["threshold_group_descriptors"].shape == (0, 31)
     assert output["event_token_indices"].shape == (5,)
     assert output["token_features"].shape[1] == 16
     assert len(output["past_attention_stats"]) == 3
@@ -93,7 +108,7 @@ def test_forward_returns_required_event_token_and_attention_outputs() -> None:
 
 
 def test_batch_column_is_preserved_and_never_merged_in_tokenization() -> None:
-    output = _model()(_events())
+    output = _model(adaptive_threshold_mode="hierarchical")(_events())
 
     assert set(output["token_batch_indices"].tolist()) == {0, 1}
     first_batch_tokens = output["event_token_indices"][:3]
