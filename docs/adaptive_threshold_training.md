@@ -211,8 +211,9 @@ PY
 
 The `calibration` section of validation JSON is diagnostic-only. Its global
 and local `mean`, `std`, `p95_abs`, and `max_abs` values, together with every
-`per_sequence_global_mean.mean`, are canonicalized to six decimal places
-before serialization. Values that round to zero are written as positive
+`per_sequence_global_mean.mean`, are canonicalized to four decimal places
+(`1e-4` reporting resolution) before serialization. Values that round to zero
+are written as positive
 `0.0`. This reporting contract absorbs CUDA grouped-reduction noise without
 changing logits, losses, threshold selection, or any model tensor.
 

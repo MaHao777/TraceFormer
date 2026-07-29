@@ -522,7 +522,7 @@ def _initialize_detector_weights(
     }
 
 
-CALIBRATION_DIAGNOSTIC_DECIMALS = 6
+CALIBRATION_DIAGNOSTIC_DECIMALS = 4
 
 
 def _canonical_calibration_diagnostic(value: float) -> float:

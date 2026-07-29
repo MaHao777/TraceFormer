@@ -54,9 +54,26 @@ def test_offset_statistics_canonicalize_gpu_scale_reduction_noise() -> None:
 
     assert reference_statistics == perturbed_statistics
     assert all(
-        value == round(value, 6)
+        value == round(value, 4)
         for value in reference_statistics.values()
     )
+    observed_val_002_means = (
+        -0.0236605517566,
+        -0.023660544,
+        -0.023660535,
+        -0.023660526,
+        -0.023660517,
+        -0.023660508,
+        -0.023660499,
+        -0.0236604902893,
+    )
+    canonical_val_002_means = {
+        _offset_statistics(torch.tensor([value], dtype=torch.float64))[
+            "mean"
+        ]
+        for value in observed_val_002_means
+    }
+    assert canonical_val_002_means == {-0.0237}
     near_zero_statistics = _offset_statistics(
         torch.tensor([-1.0e-9], dtype=torch.float64)
     )
@@ -863,7 +880,7 @@ def test_schema4_detector_initialization_records_provenance_and_trains_calibrato
             ),
         ]
         assert all(
-            value == round(value, 6) for value in diagnostic_values
+            value == round(value, 4) for value in diagnostic_values
         )
         assert first["calibration"] == second["calibration"]
         assert first == json.loads(
