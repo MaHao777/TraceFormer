@@ -478,6 +478,6 @@ def test_adaptive_threshold_autodl_smoke_config_has_explicit_limits() -> None:
     assert config.training.training_stage == "calibrator"
     assert config.training.epochs == 1
     assert config.training.max_train_files == 4
-    assert config.training.max_val_files == 2
+    assert config.training.max_val_files is None
     assert config.training.mixed_precision is True
     assert config.training.mixed_precision_dtype == "bfloat16"

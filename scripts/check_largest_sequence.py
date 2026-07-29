@@ -5,10 +5,12 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import random
 from pathlib import Path
 from time import perf_counter
 from typing import Any
 
+import numpy as np
 import torch
 
 from huav.config import load_config
@@ -86,6 +88,40 @@ def _gradient_summary(model: torch.nn.Module) -> dict[str, Any]:
     }
 
 
+def _validate_gradient_gate(summary: dict[str, Any]) -> None:
+    missing = summary["parameters_without_grad"]
+    if missing:
+        raise ValueError(
+            f"calibrator parameters are missing gradients: {missing}"
+        )
+    if (
+        summary["gradient_parameter_count"]
+        != summary["trainable_parameter_count"]
+    ):
+        raise ValueError(
+            "gradient parameter count does not match trainable parameter count"
+        )
+    if not summary["finite_gradients"]:
+        raise ValueError("calibrator gradients contain non-finite values")
+    invalid_names = [
+        name
+        for name in summary["gradient_names"]
+        if not name.startswith("calibrator.")
+    ]
+    if invalid_names:
+        raise ValueError(
+            f"gradients must belong only to calibrator parameters: {invalid_names}"
+        )
+
+
+def _seed_everything(seed: int, device: torch.device) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if device.type == "cuda":
+        torch.cuda.manual_seed_all(seed)
+
+
 def _find_sequence(
     dataset: NPZEventDataset,
     sequence_name: str,
@@ -118,6 +154,7 @@ def run_check(arguments: argparse.Namespace) -> dict[str, Any]:
         num_threads=config.training.num_threads,
     )
     device = runtime.device
+    _seed_everything(config.training.seed, device)
     train_dataset = NPZEventDataset(
         Path(config.dataset.root) / "train",
         width=config.resolution.width,
@@ -233,10 +270,7 @@ def run_check(arguments: argparse.Namespace) -> dict[str, Any]:
         peak_reserved = 0
     elapsed_seconds = perf_counter() - started
     gradients = _gradient_summary(model)
-    if not gradients["finite_gradients"]:
-        raise RuntimeError(
-            "calibrator gradients are missing or contain non-finite values"
-        )
+    _validate_gradient_gate(gradients)
     if any(
         parameter.grad is not None
         for name, parameter in model.named_parameters()

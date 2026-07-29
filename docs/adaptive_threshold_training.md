@@ -47,7 +47,7 @@ python scripts/check_largest_sequence.py \
   --device cuda | tee "$ROOT/largest_sequence_hierarchical.json"
 ```
 
-只有 `event_count == all_event_logits_count`、`finite_loss=true`、`finite_gradients=true`、`detector_frozen=true`、`calibrator_only_gradients=true` 时才继续，并保留 token/group/neighbor 数量、两种 CUDA 峰值、source checkpoint 绝对路径和 SHA-256。
+只有 `event_count == all_event_logits_count`、`finite_loss=true`、`finite_gradients=true`、`parameters_without_grad=[]`、`gradient_parameter_count == trainable_parameter_count`、`detector_frozen=true`、`calibrator_only_gradients=true` 时才继续，并保留 token/group/neighbor 数量、两种 CUDA 峰值、source checkpoint 绝对路径和 SHA-256。
 
 ## 2. 初始化链路 smoke
 
@@ -67,7 +67,7 @@ python -m huav.cli.evaluate \
 cmp "$SMOKE/metrics.json" "$SMOKE/reproduced_metrics.json"
 ```
 
-smoke 只验证完整初始化、训练、保存和复评链路，不参与结构选择。
+smoke 只限制为 4 个训练文件和 1 epoch，但验证集必须保持全量（当前 24 个文件），以便 schema 4/5 初始化 checkpoint 的 full-val manifest digest 一致。它只验证完整初始化、训练、保存和复评链路，不参与结构选择。
 
 ## 3. 四种冻结校准器消融
 

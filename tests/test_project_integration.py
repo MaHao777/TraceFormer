@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import importlib.util
+import random
 import subprocess
 from pathlib import Path
 
+import numpy as np
+import pytest
 import torch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -109,6 +112,53 @@ def test_adaptive_largest_sequence_gate_parser_and_gradient_summary() -> None:
     assert summary["trainable_parameter_count"] == 3
     assert summary["gradient_parameter_count"] == 3
     assert summary["finite_gradients"] is False
+    with pytest.raises(ValueError, match="non-finite"):
+        module._validate_gradient_gate(summary)
+
+
+def test_adaptive_largest_sequence_gate_seeds_and_rejects_incomplete_graphs() -> None:
+    script_path = ROOT / "scripts" / "check_largest_sequence.py"
+    spec = importlib.util.spec_from_file_location(
+        "check_largest_sequence_gate", script_path
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    module._seed_everything(73, torch.device("cpu"))
+    first = (
+        random.random(),
+        float(np.random.rand()),
+        float(torch.rand(())),
+    )
+    module._seed_everything(73, torch.device("cpu"))
+    second = (
+        random.random(),
+        float(np.random.rand()),
+        float(torch.rand(())),
+    )
+    assert first == second
+
+    class Harness(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calibrator = torch.nn.Linear(2, 1)
+
+    model = Harness()
+    model.calibrator(torch.ones(1, 2)).sum().backward()
+    complete = module._gradient_summary(model)
+    module._validate_gradient_gate(complete)
+    model.calibrator.bias.grad = None
+    incomplete = module._gradient_summary(model)
+    with pytest.raises(ValueError, match="missing"):
+        module._validate_gradient_gate(incomplete)
+
+    wrong_owner = torch.nn.Linear(2, 1)
+    wrong_owner(torch.ones(1, 2)).sum().backward()
+    with pytest.raises(ValueError, match="calibrator"):
+        module._validate_gradient_gate(
+            module._gradient_summary(wrong_owner)
+        )
 
 
 def test_adaptive_threshold_docs_define_schema_lifecycle_and_full_experiment() -> None:

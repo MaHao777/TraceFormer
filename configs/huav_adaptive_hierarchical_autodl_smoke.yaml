@@ -48,7 +48,7 @@ training:
   mixed_precision: true
   mixed_precision_dtype: bfloat16
   max_train_files: 4
-  max_val_files: 2
+  max_val_files:
 loss:
   focal_alpha: 0.75
   focal_gamma: 2.0
