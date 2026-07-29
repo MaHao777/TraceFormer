@@ -100,6 +100,63 @@ def test_large_finite_singleton_logit_keeps_finite_zero_std_and_identity(
     assert torch.equal(result.final_logits, base_logits)
 
 
+def test_same_sign_extreme_logits_have_finite_exact_group_summaries() -> None:
+    base_logits = torch.tensor([3.0e38, 3.0e38])
+
+    result = _calibrator("hierarchical")(
+        torch.tensor(
+            [
+                [1.0, 1.0, 0.5, 1.0],
+                [2.0, 2.0, 0.5, -1.0],
+            ]
+        ),
+        torch.zeros((2, 4)),
+        torch.zeros((2, 7)),
+        base_logits,
+        torch.zeros(2, dtype=torch.long),
+    )
+
+    summaries = result.group_descriptors[0, 13:16]
+    assert torch.isfinite(summaries).all()
+    torch.testing.assert_close(summaries[0], torch.tensor(3.0e38))
+    torch.testing.assert_close(summaries[1], torch.tensor(3.0e38))
+    assert summaries[2].item() == 0.0
+    assert torch.equal(result.final_logits, base_logits)
+
+
+def test_opposite_sign_extreme_logits_have_finite_scaled_standard_deviation() -> None:
+    base_logits = torch.tensor([3.0e38, -3.0e38])
+
+    result = _calibrator("hierarchical")(
+        torch.tensor(
+            [
+                [1.0, 1.0, 0.5, 1.0],
+                [2.0, 2.0, 0.5, -1.0],
+            ]
+        ),
+        torch.zeros((2, 4)),
+        torch.zeros((2, 7)),
+        base_logits,
+        torch.zeros(2, dtype=torch.long),
+    )
+
+    summaries = result.group_descriptors[0, 13:16]
+    assert torch.isfinite(summaries).all()
+    assert summaries[0].item() == 0.0
+    torch.testing.assert_close(summaries[1], torch.tensor(3.0e38))
+    torch.testing.assert_close(summaries[2], torch.tensor(3.0e38))
+    assert torch.equal(result.final_logits, base_logits)
+
+
+def test_non_finite_learned_embedding_raises_instead_of_being_sanitized() -> None:
+    calibrator = _calibrator("local")
+    with torch.no_grad():
+        calibrator.descriptor_projection[0].weight[0, 0] = torch.nan
+
+    with pytest.raises(FloatingPointError, match="non-finite learned embedding"):
+        _forward(calibrator, _inputs())
+
+
 def test_groups_events_in_50ms_8x8_cells_and_clamps_time_one() -> None:
     events = torch.tensor(
         [

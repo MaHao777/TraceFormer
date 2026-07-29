@@ -27,6 +27,9 @@ class AdaptiveThresholdResult:
 class AdaptiveThresholdCalibrator(nn.Module):
     """Predict bounded global and occupied-cell logit threshold offsets."""
 
+    # Learned calibration only needs an ordered, bounded view of pathological
+    # descriptor magnitudes; raw summaries remain available in the result.
+    projection_input_bound = 1.0e4
     allowed_modes = frozenset(
         {"none", "global", "local", "local_neighbor", "hierarchical"}
     )
@@ -303,9 +306,24 @@ class AdaptiveThresholdCalibrator(nn.Module):
         positive_sum.scatter_add_(0, inverse, positive)
         positive_fraction = positive_sum / float_counts
 
-        logit_sum = detached_logits.new_zeros(group_count)
-        logit_sum.scatter_add_(0, inverse, detached_logits)
-        logit_mean = logit_sum / float_counts
+        logit_scale = detached_logits.new_zeros(group_count)
+        logit_scale.scatter_reduce_(
+            0,
+            inverse,
+            detached_logits.abs(),
+            reduce="amax",
+            include_self=True,
+        )
+        safe_logit_scale = torch.where(
+            logit_scale > 0,
+            logit_scale,
+            torch.ones_like(logit_scale),
+        )
+        normalized_logits = detached_logits / safe_logit_scale[inverse]
+        normalized_logit_sum = detached_logits.new_zeros(group_count)
+        normalized_logit_sum.scatter_add_(0, inverse, normalized_logits)
+        normalized_logit_mean = normalized_logit_sum / float_counts
+        logit_mean = normalized_logit_mean * logit_scale
         logit_max = torch.full(
             (group_count,),
             -torch.inf,
@@ -315,11 +333,19 @@ class AdaptiveThresholdCalibrator(nn.Module):
         logit_max.scatter_reduce_(
             0, inverse, detached_logits, reduce="amax", include_self=True
         )
-        centered_logits = detached_logits - logit_mean[inverse]
-        centered_square_sum = detached_logits.new_zeros(group_count)
-        centered_square_sum.scatter_add_(0, inverse, centered_logits.square())
-        logit_variance = (centered_square_sum / float_counts).clamp_min(0)
-        logit_std = torch.sqrt(logit_variance)
+        centered_normalized_logits = (
+            normalized_logits - normalized_logit_mean[inverse]
+        )
+        normalized_centered_square_sum = detached_logits.new_zeros(group_count)
+        normalized_centered_square_sum.scatter_add_(
+            0,
+            inverse,
+            centered_normalized_logits.square(),
+        )
+        normalized_logit_variance = (
+            normalized_centered_square_sum / float_counts
+        ).clamp_min(0)
+        logit_std = torch.sqrt(normalized_logit_variance) * logit_scale
 
         normalized_coords = torch.stack(
             (
@@ -512,12 +538,16 @@ class AdaptiveThresholdCalibrator(nn.Module):
             counts,
             group_coords,
         )
-        group_embeddings = torch.nan_to_num(
-            self.descriptor_projection(descriptors),
-            nan=0.0,
-            posinf=0.0,
-            neginf=0.0,
+        projection_descriptors = descriptors.clamp(
+            min=-self.projection_input_bound,
+            max=self.projection_input_bound,
         )
+        group_embeddings = self.descriptor_projection(projection_descriptors)
+        if not torch.isfinite(group_embeddings).all():
+            raise FloatingPointError(
+                "adaptive threshold descriptor projection produced "
+                "a non-finite learned embedding"
+            )
         neighbor_edges = self._neighbor_edges(
             group_keys, group_coords, group_batches
         )
