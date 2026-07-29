@@ -504,7 +504,7 @@ def test_cpu_training_writes_reproducible_metrics_and_checkpoint() -> None:
             run_training(_config(data_root, output_root), output_dir=run_dir)
 
 
-def test_resumed_training_records_validation_loss() -> None:
+def test_resume_rejects_non_joint_training_stage() -> None:
     with TemporaryDirectory(dir=Path.cwd()) as directory:
         temporary_root = Path(directory)
         data_root = temporary_root / "data"
@@ -518,40 +518,21 @@ def test_resumed_training_records_validation_loss() -> None:
         config = _config(data_root, output_root)
         initial = run_training(config, output_dir=output_root / "initial")
 
-        resumed = resume_training(
-            config,
-            Path(initial["run_dir"]) / "best.pt",
-            additional_epochs=1,
-            output_dir=output_root / "resumed",
-        )
-
-        history = json.loads(
-            (Path(resumed["run_dir"]) / "history.json").read_text(encoding="utf-8")
-        )
-        assert history[0]["epoch"] == 2
-        assert history[0]["resumed_epoch"] == 1
-        assert set(history[0]["validation_loss"]) == {
-            "total",
-            "focal",
-            "dice",
-            "object_frame",
-            "false_alarm",
-            "threshold_magnitude",
-            "threshold_center",
-            "threshold_smoothness",
-        }
-        assert all(
-            value >= 0.0 for value in history[0]["validation_loss"].values()
-        )
-        assert "loss" not in history[0]["validation"]
-        for invalid_epochs in (0, -1):
-            with pytest.raises(ValueError, match="positive"):
+        for stage in ("full", "calibrator"):
+            stage_config = (
+                config
+                if stage == "full"
+                else _adaptive_config(data_root, output_root)
+            )
+            with pytest.raises(ValueError, match="joint training stage"):
+                rejected_dir = output_root / f"resume-{stage}"
                 resume_training(
-                    config,
+                    stage_config,
                     Path(initial["run_dir"]) / "best.pt",
-                    additional_epochs=invalid_epochs,
-                    output_dir=output_root / f"invalid-{invalid_epochs}",
+                    additional_epochs=1,
+                    output_dir=rejected_dir,
                 )
+            assert not rejected_dir.exists()
 
 
 def test_amp_is_enabled_only_when_requested_on_cuda() -> None:
@@ -740,6 +721,7 @@ def test_schema4_detector_initialization_records_provenance_and_trains_calibrato
         val_root.mkdir(parents=True)
         _write_sequence(train_root / "train_000.npz", 0)
         _write_sequence(val_root / "val_000.npz", 1)
+        _write_sequence(val_root / "val_001.npz", 0)
         output_root = temporary_root / "outputs"
 
         control = run_training(
@@ -779,8 +761,8 @@ def test_schema4_detector_initialization_records_provenance_and_trains_calibrato
         assert trained["training_stage"] == "calibrator"
         assert trained["trainable_parameter_count"] < trained["parameter_count"]
         assert checkpoint["schema_version"] == 5
-        assert checkpoint["initialized_from"] == str(legacy_checkpoint.resolve())
-        assert checkpoint["initialized_from_sha256"] == __import__(
+        assert checkpoint["source_checkpoint"] == str(legacy_checkpoint.resolve())
+        assert checkpoint["source_checkpoint_sha256"] == __import__(
             "hashlib"
         ).sha256(legacy_checkpoint.read_bytes()).hexdigest()
         assert (run_dir / "initialized_from.txt").read_text(
@@ -826,12 +808,31 @@ def test_schema4_detector_initialization_records_provenance_and_trains_calibrato
         assert submission.is_file()
 
         resumed = resume_training(
-            adaptive,
+            _adaptive_config(data_root, output_root, stage="joint"),
             run_dir / "best.pt",
             additional_epochs=1,
             output_dir=output_root / "resumed",
         )
-        assert Path(resumed["run_dir"]).joinpath("best.pt").is_file()
+        resumed_dir = Path(resumed["run_dir"])
+        assert resumed_dir.joinpath("best.pt").is_file()
+        resumed_history = json.loads(
+            resumed_dir.joinpath("history.json").read_text(encoding="utf-8")
+        )
+        assert resumed_history[0]["learning_rate"] == pytest.approx(
+            adaptive.training.learning_rate
+        )
+        assert set(resumed_history[0]["learning_rates"]) == {
+            "detector",
+            "calibrator",
+        }
+        for invalid_epochs in (0, -1):
+            with pytest.raises(ValueError, match="positive"):
+                resume_training(
+                    _adaptive_config(data_root, output_root, stage="joint"),
+                    run_dir / "best.pt",
+                    additional_epochs=invalid_epochs,
+                    output_dir=output_root / f"invalid-{invalid_epochs}",
+                )
 
         schema5_initialized = run_training(
             adaptive,
@@ -839,6 +840,18 @@ def test_schema4_detector_initialization_records_provenance_and_trains_calibrato
             initialize_detector=control_checkpoint,
         )
         assert Path(schema5_initialized["run_dir"]).joinpath("best.pt").is_file()
+
+        with pytest.raises(ValueError, match="non-adaptive"):
+            run_training(
+                adaptive,
+                output_dir=output_root / "adaptive-source-rejected",
+                initialize_detector=run_dir / "best.pt",
+            )
+
+        markdown = (run_dir / "metrics.md").read_text(encoding="utf-8")
+        first_file = markdown.index("| val_000.npz |")
+        second_file = markdown.index("| val_001.npz |")
+        assert first_file < second_file
 
 
 def test_schema4_none_checkpoint_supports_control_evaluation_and_reoptimization() -> None:
@@ -899,7 +912,82 @@ def test_schema4_none_checkpoint_supports_control_evaluation_and_reoptimization(
         assert submission.is_file()
 
 
-def test_joint_history_records_head_learning_rate_and_both_groups() -> None:
+def test_schema5_metadata_is_strict_for_evaluate_predict_and_resume() -> None:
+    with TemporaryDirectory(dir=Path.cwd()) as directory:
+        temporary_root = Path(directory)
+        data_root = temporary_root / "data"
+        (data_root / "train").mkdir(parents=True)
+        (data_root / "val").mkdir(parents=True)
+        _write_sequence(data_root / "train" / "train_000.npz", 0)
+        _write_sequence(data_root / "val" / "val_000.npz", 1)
+        output_root = temporary_root / "outputs"
+        control = run_training(
+            _config(data_root, output_root),
+            output_dir=output_root / "control",
+        )
+        adaptive = _adaptive_config(data_root, output_root)
+        trained = run_training(
+            adaptive,
+            output_dir=output_root / "adaptive",
+            initialize_detector=Path(control["run_dir"]) / "best.pt",
+        )
+        checkpoint_path = Path(trained["run_dir"]) / "best.pt"
+        checkpoint = torch.load(
+            checkpoint_path, map_location="cpu", weights_only=True
+        )
+        variants: list[tuple[str, dict[str, object]]] = []
+
+        def variant(name: str, **updates: object) -> None:
+            payload = dict(checkpoint)
+            payload.update(updates)
+            variants.append((name, payload))
+
+        missing_stage = dict(checkpoint)
+        missing_stage.pop("training_stage")
+        variants.append(("missing-stage", missing_stage))
+        variant("invalid-stage", training_stage="invalid")
+        missing_count = dict(checkpoint)
+        missing_count.pop("trainable_parameter_count")
+        variants.append(("missing-count", missing_count))
+        variant("boolean-count", trainable_parameter_count=True)
+        variant("zero-count", trainable_parameter_count=0)
+        missing_source = dict(checkpoint)
+        missing_source.pop("source_checkpoint")
+        variants.append(("missing-source", missing_source))
+        missing_hash = dict(checkpoint)
+        missing_hash.pop("source_checkpoint_sha256")
+        variants.append(("missing-hash", missing_hash))
+        variant("empty-source", source_checkpoint=" ")
+        variant("short-hash", source_checkpoint_sha256="abc")
+        missing_provenance = dict(checkpoint)
+        missing_provenance.pop("source_checkpoint")
+        missing_provenance.pop("source_checkpoint_sha256")
+        variants.append(("calibrator-without-provenance", missing_provenance))
+
+        joint = _adaptive_config(data_root, output_root, stage="joint")
+        for name, payload in variants:
+            invalid_path = output_root / f"{name}.pt"
+            torch.save(payload, invalid_path)
+            with pytest.raises(ValueError, match="checkpoint"):
+                evaluate_checkpoint(adaptive, invalid_path)
+            with pytest.raises(ValueError, match="checkpoint"):
+                generate_submission_package(
+                    adaptive,
+                    invalid_path,
+                    output_root / f"submission-{name}",
+                )
+            resume_dir = output_root / f"resume-{name}"
+            with pytest.raises(ValueError, match="checkpoint"):
+                resume_training(
+                    joint,
+                    invalid_path,
+                    additional_epochs=1,
+                    output_dir=resume_dir,
+                )
+            assert not resume_dir.exists()
+
+
+def test_run_training_rejects_fresh_joint_stage() -> None:
     with TemporaryDirectory(dir=Path.cwd()) as directory:
         temporary_root = Path(directory)
         data_root = temporary_root / "data"
@@ -913,23 +1001,13 @@ def test_joint_history_records_head_learning_rate_and_both_groups() -> None:
             stage="joint",
         )
 
-        summary = run_training(
-            config,
-            output_dir=temporary_root / "outputs" / "joint",
-        )
-        history = json.loads(
-            Path(summary["run_dir"])
-            .joinpath("history.json")
-            .read_text(encoding="utf-8")
-        )
-
-        assert history[0]["learning_rate"] == pytest.approx(
-            config.training.learning_rate
-        )
-        assert history[0]["learning_rates"] == {
-            "detector": pytest.approx(config.training.detector_learning_rate),
-            "calibrator": pytest.approx(config.training.learning_rate),
-        }
+        with pytest.raises(ValueError, match="run_training.*joint"):
+            output_dir = temporary_root / "outputs" / "joint"
+            run_training(
+                config,
+                output_dir=output_dir,
+            )
+        assert not output_dir.exists()
 
 
 def test_calibrator_training_requires_detector_initialization() -> None:
@@ -963,7 +1041,12 @@ def test_detector_initialization_is_restricted_to_calibrator_stage(
             stage=stage,
         )
 
-        with pytest.raises(ValueError, match="calibrator training stage"):
+        message = (
+            "calibrator training stage"
+            if stage == "full"
+            else "run_training.*joint"
+        )
+        with pytest.raises(ValueError, match=message):
             run_training(
                 config,
                 output_dir=temporary_root / "outputs" / stage,
@@ -998,6 +1081,7 @@ def test_detector_initialization_rejects_schema3() -> None:
         ("shape", "shape mismatch"),
         ("missing", "missing="),
         ("unexpected", "unexpected="),
+        ("calibrator_state", "non-adaptive source state"),
     ),
 )
 def test_detector_initialization_rejects_incompatible_detector_state(
@@ -1028,6 +1112,8 @@ def test_detector_initialization_rejects_incompatible_detector_state(
             checkpoint["model_state"][detector_key] = value.reshape(-1)[:1]
         elif mutation == "missing":
             checkpoint["model_state"].pop(detector_key)
+        elif mutation == "calibrator_state":
+            checkpoint["model_state"]["calibrator.unexpected"] = torch.zeros(1)
         else:
             checkpoint["model_state"]["detector.unexpected"] = torch.zeros(1)
         incompatible = output_root / f"{mutation}.pt"

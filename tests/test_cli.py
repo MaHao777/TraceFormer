@@ -6,6 +6,8 @@ import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+import pytest
+
 from huav.cli import train as train_cli
 from huav.config import HUAVConfig
 
@@ -110,6 +112,53 @@ def test_train_dispatches_detector_initialization_to_new_training(
     train_cli.main()
 
     assert received["initialize_detector"] == "detector.pt"
+
+
+def test_train_reports_fresh_joint_lifecycle_error(
+    monkeypatch,
+    capsys,
+) -> None:
+    config = HUAVConfig.default()
+    config = __import__("dataclasses").replace(
+        config,
+        model=__import__("dataclasses").replace(
+            config.model,
+            adaptive_threshold_mode="hierarchical",
+        ),
+        training=__import__("dataclasses").replace(
+            config.training,
+            training_stage="joint",
+            detector_learning_rate=1e-4,
+        ),
+    ).validate()
+    monkeypatch.setattr(train_cli, "load_config", lambda _: config)
+    monkeypatch.setattr(sys, "argv", ["huav-train", "--quiet"])
+
+    with pytest.raises(SystemExit):
+        train_cli.main()
+
+    assert "run_training does not accept the joint training stage" in capsys.readouterr().err
+
+
+def test_train_reports_non_joint_resume_lifecycle_error(
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.setattr(
+        train_cli,
+        "load_config",
+        lambda _: HUAVConfig.default(),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["huav-train", "--resume", "checkpoint.pt", "--quiet"],
+    )
+
+    with pytest.raises(SystemExit):
+        train_cli.main()
+
+    assert "resume_training requires the joint training stage" in capsys.readouterr().err
 
 
 def test_malformed_yaml_is_a_concise_cli_parser_error_without_traceback() -> None:

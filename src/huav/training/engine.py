@@ -237,6 +237,7 @@ def _validate_checkpoint_metadata(
     schema = checkpoint.get("schema_version")
     expected_model = _serializable(asdict(config.model))
     if schema == CHECKPOINT_SCHEMA_VERSION:
+        _validate_schema5_metadata(checkpoint)
         actual_model = checkpoint.get("model_config")
     elif schema == LEGACY_READ_ONLY_SCHEMA_VERSION and allow_legacy_read_only:
         if config.model.adaptive_threshold_mode != "none":
@@ -277,6 +278,53 @@ def _stored_decision_threshold(checkpoint: dict[str, Any]) -> float:
     return float(threshold)
 
 
+def _validate_schema5_metadata(checkpoint: dict[str, Any]) -> None:
+    training_stage = checkpoint.get("training_stage")
+    if (
+        not isinstance(training_stage, str)
+        or training_stage not in {"full", "calibrator", "joint"}
+    ):
+        raise ValueError(
+            "checkpoint training_stage must be full, calibrator, or joint"
+        )
+    trainable_count = checkpoint.get("trainable_parameter_count")
+    if (
+        isinstance(trainable_count, bool)
+        or not isinstance(trainable_count, Integral)
+        or int(trainable_count) <= 0
+    ):
+        raise ValueError(
+            "checkpoint trainable_parameter_count must be a positive integer"
+        )
+    source_present = "source_checkpoint" in checkpoint
+    hash_present = "source_checkpoint_sha256" in checkpoint
+    if source_present != hash_present:
+        raise ValueError(
+            "checkpoint source_checkpoint and source_checkpoint_sha256 "
+            "must appear together"
+        )
+    if training_stage == "calibrator" and not source_present:
+        raise ValueError(
+            "calibrator checkpoint requires source checkpoint provenance"
+        )
+    if source_present:
+        source = checkpoint["source_checkpoint"]
+        source_hash = checkpoint["source_checkpoint_sha256"]
+        if not isinstance(source, str) or not source.strip():
+            raise ValueError("checkpoint source_checkpoint must be non-empty")
+        if (
+            not isinstance(source_hash, str)
+            or len(source_hash) != 64
+            or any(
+                character not in "0123456789abcdefABCDEF"
+                for character in source_hash
+            )
+        ):
+            raise ValueError(
+                "checkpoint source_checkpoint_sha256 must be 64 hex characters"
+            )
+
+
 def _base_model_config(model_config: object) -> dict[str, Any]:
     if not isinstance(model_config, dict):
         raise ValueError("checkpoint model configuration is invalid")
@@ -307,6 +355,16 @@ def _initialize_detector_weights(
         CHECKPOINT_SCHEMA_VERSION,
     }:
         raise ValueError("unsupported checkpoint schema version")
+    if checkpoint.get("schema_version") == CHECKPOINT_SCHEMA_VERSION:
+        _validate_schema5_metadata(checkpoint)
+        _stored_decision_threshold(checkpoint)
+    source_model_config = _normalized_legacy_model_config(
+        checkpoint.get("model_config")
+    )
+    if source_model_config["adaptive_threshold_mode"] != "none":
+        raise ValueError(
+            "detector initialization requires a non-adaptive source checkpoint"
+        )
     if (
         _base_model_config(checkpoint.get("model_config"))
         != _base_model_config(_serializable(asdict(config.model)))
@@ -323,6 +381,10 @@ def _initialize_detector_weights(
     source_state = checkpoint.get("model_state")
     if not isinstance(source_state, dict):
         raise ValueError("detector checkpoint model state is invalid")
+    if any(name.startswith("calibrator.") for name in source_state):
+        raise ValueError(
+            "detector initialization requires a non-adaptive source state"
+        )
     target_state = model.state_dict()
     target_detector_keys = {
         name for name in target_state if not name.startswith("calibrator.")
@@ -364,8 +426,8 @@ def _initialize_detector_weights(
             "uninitialized"
         )
     return {
-        "initialized_from": str(checkpoint_path.resolve()),
-        "initialized_from_sha256": _file_sha256(checkpoint_path),
+        "source_checkpoint": str(checkpoint_path.resolve()),
+        "source_checkpoint_sha256": _file_sha256(checkpoint_path),
     }
 
 
@@ -683,6 +745,13 @@ def _metrics_markdown(metrics: dict[str, Any]) -> str:
     event = metrics["event"]
     official = metrics["ev_uav_compatible"]
     calibration = metrics["calibration"]
+    per_sequence_rows = [
+        f"| {item['source']} | {item['mean']:.8f} |"
+        for item in sorted(
+            calibration["per_sequence_global_mean"],
+            key=lambda item: item["source"],
+        )
+    ]
     return "\n".join(
         (
             "# HUAV Spatiotemporal-Cone Validation Metrics",
@@ -742,6 +811,12 @@ def _metrics_markdown(metrics: dict[str, Any]) -> str:
             f"{calibration['local']['std']:.8f} | "
             f"{calibration['local']['p95_abs']:.8f} | "
             f"{calibration['local']['max_abs']:.8f} |",
+            "",
+            "### Per-sequence global mean",
+            "",
+            "| File | Global mean |",
+            "|---|---:|",
+            *per_sequence_rows,
             "",
             "The compatibility values follow the sibling EV-UAV reference: "
             "50 ms temporal frames, object-level Pd, and false connected components "
@@ -814,6 +889,11 @@ def run_training(
     initialize_detector: str | Path | None = None,
 ) -> dict[str, Any]:
     config.validate()
+    if config.training.training_stage == "joint":
+        raise ValueError(
+            "run_training does not accept the joint training stage; "
+            "use resume_training"
+        )
     if (
         config.training.training_stage == "calibrator"
         and initialize_detector is None
@@ -866,8 +946,9 @@ def run_training(
         )
         _atomic_write_text(
             run_dir / "initialized_from.txt",
-            f"checkpoint: {initialization_metadata['initialized_from']}\n"
-            f"sha256: {initialization_metadata['initialized_from_sha256']}\n",
+            f"checkpoint: {initialization_metadata['source_checkpoint']}\n"
+            f"sha256: "
+            f"{initialization_metadata['source_checkpoint_sha256']}\n",
         )
     trainable_parameter_count = _configure_training_stage(
         model, config.training.training_stage
@@ -1100,6 +1181,8 @@ def resume_training(
         A summary dict with keys ``run_dir``, ``best_score``, etc.
     """
     config.validate()
+    if config.training.training_stage != "joint":
+        raise ValueError("resume_training requires the joint training stage")
     if (
         isinstance(additional_epochs, bool)
         or not isinstance(additional_epochs, Integral)
@@ -1120,6 +1203,7 @@ def resume_training(
     )
     if checkpoint.get("schema_version") != CHECKPOINT_SCHEMA_VERSION:
         raise ValueError("unsupported checkpoint schema version")
+    _validate_schema5_metadata(checkpoint)
     _stored_decision_threshold(checkpoint)
     expected_model = _serializable(asdict(config.model))
     expected_resolution = _serializable(asdict(config.resolution))
@@ -1348,8 +1432,8 @@ def resume_training(
                     **{
                         name: checkpoint[name]
                         for name in (
-                            "initialized_from",
-                            "initialized_from_sha256",
+                            "source_checkpoint",
+                            "source_checkpoint_sha256",
                         )
                         if name in checkpoint
                     },
