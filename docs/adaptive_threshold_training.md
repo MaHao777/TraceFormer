@@ -115,9 +115,11 @@ WINNER_MODE=hierarchical  # 替换为 frozen 消融胜出的 mode
 FROZEN="$ROOT/frozen_${WINNER_MODE}_seed37/best.pt"
 for SEED in 37 73 137; do
   JOINT_CONFIG="$ROOT/joint_${WINNER_MODE}_seed${SEED}.yaml"
-  cp "configs/huav_adaptive_${WINNER_MODE}_joint_autodl.yaml" "$JOINT_CONFIG"
-  sed -i "s|root: ../data/ev-uav|root: ${REPO_ROOT}/data/ev-uav|" "$JOINT_CONFIG"
-  sed -i "s/^  seed: 37$/  seed: ${SEED}/" "$JOINT_CONFIG"
+  python scripts/make_joint_config.py \
+    --template "configs/huav_adaptive_${WINNER_MODE}_joint_autodl.yaml" \
+    --output "$JOINT_CONFIG" \
+    --dataset-root "$REPO_ROOT/data/ev-uav" \
+    --seed "$SEED"
   RUN="$ROOT/joint_${WINNER_MODE}_seed${SEED}"
   python -m huav.cli.train \
     --config "$JOINT_CONFIG" \
