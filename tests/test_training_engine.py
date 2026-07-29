@@ -1001,6 +1001,26 @@ def test_schema5_metadata_is_strict_for_evaluate_predict_and_resume() -> None:
             value.numel() for value in checkpoint["model_state"].values()
         )
         variants.append(("full-with-provenance", full_with_provenance))
+        joint_without_lineage = dict(checkpoint)
+        joint_without_lineage["training_stage"] = "joint"
+        joint_without_lineage["trainable_parameter_count"] = sum(
+            value.numel() for value in checkpoint["model_state"].values()
+        )
+        variants.append(("joint-without-lineage", joint_without_lineage))
+        calibrator_with_lineage = dict(checkpoint)
+        calibrator_with_lineage["resumed_from_checkpoint"] = "parent.pt"
+        calibrator_with_lineage["resumed_from_sha256"] = "a" * 64
+        variants.append(("calibrator-with-lineage", calibrator_with_lineage))
+        full_with_lineage = dict(checkpoint)
+        full_with_lineage["training_stage"] = "full"
+        full_with_lineage["trainable_parameter_count"] = sum(
+            value.numel() for value in checkpoint["model_state"].values()
+        )
+        full_with_lineage.pop("source_checkpoint")
+        full_with_lineage.pop("source_checkpoint_sha256")
+        full_with_lineage["resumed_from_checkpoint"] = "parent.pt"
+        full_with_lineage["resumed_from_sha256"] = "b" * 64
+        variants.append(("full-with-lineage", full_with_lineage))
         missing_source = dict(checkpoint)
         missing_source.pop("source_checkpoint")
         variants.append(("missing-source", missing_source))

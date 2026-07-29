@@ -396,7 +396,7 @@ def _validate_schema5_metadata(checkpoint: dict[str, Any]) -> None:
         "source_checkpoint",
         "source_checkpoint_sha256",
     )
-    _validate_provenance_pair(
+    resume_present = _validate_provenance_pair(
         checkpoint,
         "resumed_from_checkpoint",
         "resumed_from_sha256",
@@ -408,6 +408,15 @@ def _validate_schema5_metadata(checkpoint: dict[str, Any]) -> None:
     if training_stage == "full" and source_present:
         raise ValueError(
             "full checkpoint must not contain source checkpoint provenance"
+        )
+    if training_stage == "joint" and not resume_present:
+        raise ValueError(
+            "joint checkpoint requires resumed checkpoint provenance"
+        )
+    if training_stage in {"full", "calibrator"} and resume_present:
+        raise ValueError(
+            "full/calibrator checkpoint must not contain resumed checkpoint "
+            "provenance"
         )
 
 
