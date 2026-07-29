@@ -127,4 +127,4 @@ total = focal
 
 ## 7. 评估与可复现性
 
-验证对全部事件预测，输出事件级 Pd/Fa/IoU/Acc 和单独命名的 EV-UAV-compatible 指标。训练时选出的事件 IoU 阈值随最佳 checkpoint 保存，复评不会再次使用标签调阈值。checkpoint 同时保存模型配置和验证集 manifest 摘要，配置或数据不匹配时拒绝复评。
+验证对全部事件预测，输出事件级 Pd/Fa/IoU/Acc 和单独命名的 EV-UAV-compatible 指标。每次训练内验证还使用独立固定种子的采样器，按与训练一致的正样本保留、hard-negative 背景采样、密集序列权重和完整事件 Fa 上下文计算 loss；五个分量写入 `history.json[*].validation_loss`，不会混入 `metrics.json`。训练时选出的事件 IoU 阈值随最佳 checkpoint 保存，复评不会再次使用标签调阈值。checkpoint 同时保存模型配置和验证集 manifest 摘要，配置或数据不匹配时拒绝复评。

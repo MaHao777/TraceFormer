@@ -97,7 +97,8 @@ python -m huav.cli.evaluate `
 - `best.pt`：比赛官网总分最优的权重、阈值和模型配置；
 - `config.yaml`：完整配置快照；
 - `dataset_manifest.json`：所有训练/验证 NPZ 的大小和 SHA-256；
-- `history.json`：逐 epoch 的 focal、Dice、总损失和验证指标；
+- `history.json`：逐 epoch 分开记录 `train_loss`、可复现的
+  `validation_loss`（total/focal/dice/object-frame/Fa）和阈值验证指标；
 - `metrics.json` / `metrics.md`：最佳 checkpoint 指标；
 - `summary.json`：设备、参数量、epoch 和最佳结果。
 
@@ -113,6 +114,8 @@ python -m huav.cli.evaluate `
 - `Score = 0.2 × IoU + 0.1 × SegAcc + 0.4 × Pd + 0.3 × ScoreFa`。
 
 目标级指标按 50 ms 等效帧计算。官网实际使用 `floor(t_ms)` 后的整数毫秒坐标，并以严格开区间划分帧；这是 NPZ 中 `ev_loc[:, 2]` 的时间口径。`event` 字段继续保留整体准确率、事件级虚警率和 precision 等诊断指标，但训练选择最佳 checkpoint 时以 `competition.score` 为主。验证集阈值只在训练阶段选择并写入 checkpoint；独立复评直接使用保存阈值。
+
+验证 loss 与训练 loss 使用相同的正样本保留、hard-negative 背景采样、密集序列权重和完整事件 Fa 上下文，但使用独立且固定种子的验证采样器。这样每轮 loss 可以横向比较，同时不会推进训练采样器状态；`metrics.json` 仍只保存阈值指标，不混入 loss。
 
 ## 官网分数优化实验
 

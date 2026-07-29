@@ -238,13 +238,65 @@ def evaluate_model(
     device: torch.device,
     progress: bool = False,
     threshold_override: float | None = None,
+    criterion: EventFocalDiceLoss | None = None,
 ) -> dict[str, Any]:
     model.eval()
     sequence_results: list[tuple[torch.Tensor, LoadedEventSequence]] = []
+    loss_totals = (
+        {
+            "total": 0.0,
+            "focal": 0.0,
+            "dice": 0.0,
+            "object_frame": 0.0,
+            "false_alarm": 0.0,
+        }
+        if criterion is not None
+        else None
+    )
+    validation_generator = torch.Generator(device=device.type).manual_seed(
+        config.training.seed
+    )
     for index in range(len(dataset)):
         sequence = dataset[index]
         events = sequence.events.to(device)
-        output = model(events)
+        labels = sequence.labels.to(device)
+        object_ids = sequence.object_ids.to(device)
+        timestamps_ms = sequence.timestamps_ms.to(device)
+        batch_indices = torch.zeros(
+            len(events), dtype=torch.long, device=device
+        )
+        output = model(events, batch_indices)
+        if criterion is not None and loss_totals is not None:
+            query_indices = sample_event_indices(
+                labels,
+                logits=output["event_logits"],
+                background_ratio=config.training.background_ratio,
+                hard_negative_fraction=config.training.hard_negative_fraction,
+                generator=validation_generator,
+                max_background_without_positive=(
+                    config.training.max_background_without_positive
+                ),
+            )
+            losses = criterion(
+                output["event_logits"][query_indices],
+                labels[query_indices],
+                batch_indices[query_indices],
+                object_ids=object_ids[query_indices],
+                timestamps_ms=timestamps_ms[query_indices],
+                frame_ms=config.evaluation.frame_ms,
+                full_logits=output["event_logits"],
+                full_targets=labels,
+                full_batch_indices=batch_indices,
+                full_timestamps_ms=timestamps_ms,
+                full_coordinates=events[:, :2],
+            )
+            losses["total"] = losses["total"] * _dense_sequence_loss_weight(
+                events,
+                labels,
+                config,
+            )
+            for name in loss_totals:
+                loss_totals[name] += float(losses[name].detach().item())
         logits = output["event_logits"].detach().cpu()
         sequence_results.append((logits, sequence))
         if progress:
@@ -259,13 +311,19 @@ def evaluate_model(
         else config.inference.sigmoid_threshold
     )
     if threshold_override is None and config.evaluation.optimize_threshold:
-        return _select_competition_threshold(
+        result = _select_competition_threshold(
             sequence_results,
             config,
             steps=config.evaluation.threshold_steps,
             fallback=threshold,
         )
-    return _metrics_at_threshold(sequence_results, config, threshold)
+    else:
+        result = _metrics_at_threshold(sequence_results, config, threshold)
+    if loss_totals is not None:
+        result["loss"] = {
+            name: total / len(dataset) for name, total in loss_totals.items()
+        }
+    return result
 
 
 def _metrics_markdown(metrics: dict[str, Any]) -> str:
@@ -545,17 +603,21 @@ def run_training(
 
         for name in totals:
             totals[name] /= len(train_dataset)
-        metrics = evaluate_model(
+        validation_result = evaluate_model(
             model,
             validation_dataset,
             config,
             device=torch_device,
             progress=progress,
+            criterion=criterion,
         )
+        validation_loss = validation_result.pop("loss")
+        metrics = validation_result
         epoch_record = {
             "epoch": epoch + 1,
             "learning_rate": learning_rate,
             "train_loss": totals,
+            "validation_loss": validation_loss,
             "validation": metrics,
         }
         history.append(epoch_record)
@@ -564,7 +626,8 @@ def run_training(
         score = float(competition["score"])
         print(
             f"epoch {epoch + 1}/{config.training.epochs}: "
-            f"loss={totals['total']:.6f} Score={score:.6f} "
+            f"train_loss={totals['total']:.6f} "
+            f"val_loss={validation_loss['total']:.6f} Score={score:.6f} "
             f"IoU={competition['iou']:.6f} SegAcc={competition['seg_acc']:.6f} "
             f"Pd={competition['pd']:.6f} Fa={competition['fa']:.3e} "
             f"threshold={metrics['threshold']:.3f}",
@@ -839,18 +902,22 @@ def resume_training(
 
         for name in totals:
             totals[name] /= len(train_dataset)
-        metrics = evaluate_model(
+        validation_result = evaluate_model(
             model,
             validation_dataset,
             config,
             device=torch_device,
             progress=progress,
+            criterion=criterion,
         )
+        validation_loss = validation_result.pop("loss")
+        metrics = validation_result
         epoch_record = {
             "epoch": source_epoch + epoch + 1,
             "resumed_epoch": epoch + 1,
             "learning_rate": learning_rate,
             "train_loss": totals,
+            "validation_loss": validation_loss,
             "validation": metrics,
         }
         history.append(epoch_record)
@@ -860,7 +927,8 @@ def resume_training(
         print(
             f"epoch {source_epoch + epoch + 1}/{total_epochs_display} "
             f"(resumed {epoch + 1}/{additional_epochs}): "
-            f"loss={totals['total']:.6f} Score={score:.6f} "
+            f"train_loss={totals['total']:.6f} "
+            f"val_loss={validation_loss['total']:.6f} Score={score:.6f} "
             f"IoU={competition['iou']:.6f} SegAcc={competition['seg_acc']:.6f} "
             f"Pd={competition['pd']:.6f} Fa={competition['fa']:.3e} "
             f"threshold={metrics['threshold']:.3f}",

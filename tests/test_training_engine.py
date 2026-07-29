@@ -26,6 +26,7 @@ from huav.training.engine import (
     _grad_scaler_is_enabled,
     _select_competition_threshold,
     evaluate_checkpoint,
+    resume_training,
     run_training,
 )
 from huav.training.losses import EventFocalDiceLoss
@@ -169,6 +170,18 @@ def test_cpu_training_writes_reproducible_metrics_and_checkpoint() -> None:
             (run_dir / "history.json").read_text(encoding="utf-8")
         )
         assert history[0]["train_loss"]["false_alarm"] >= 0.0
+        assert set(history[0]["validation_loss"]) == {
+            "total",
+            "focal",
+            "dice",
+            "object_frame",
+            "false_alarm",
+        }
+        assert all(
+            value >= 0.0 for value in history[0]["validation_loss"].values()
+        )
+        assert "loss" not in history[0]["validation"]
+        assert "loss" not in metrics
         checkpoint = __import__("torch").load(
             run_dir / "best.pt", map_location="cpu", weights_only=True
         )
@@ -207,6 +220,45 @@ def test_cpu_training_writes_reproducible_metrics_and_checkpoint() -> None:
             )
         with pytest.raises(FileExistsError, match="not empty"):
             run_training(_config(data_root, output_root), output_dir=run_dir)
+
+
+def test_resumed_training_records_validation_loss() -> None:
+    with TemporaryDirectory(dir=Path.cwd()) as directory:
+        temporary_root = Path(directory)
+        data_root = temporary_root / "data"
+        train_root = data_root / "train"
+        val_root = data_root / "val"
+        train_root.mkdir(parents=True)
+        val_root.mkdir(parents=True)
+        _write_sequence(train_root / "train_000.npz", 0)
+        _write_sequence(val_root / "val_000.npz", 1)
+        output_root = temporary_root / "outputs"
+        config = _config(data_root, output_root)
+        initial = run_training(config, output_dir=output_root / "initial")
+
+        resumed = resume_training(
+            config,
+            Path(initial["run_dir"]) / "best.pt",
+            additional_epochs=1,
+            output_dir=output_root / "resumed",
+        )
+
+        history = json.loads(
+            (Path(resumed["run_dir"]) / "history.json").read_text(encoding="utf-8")
+        )
+        assert history[0]["epoch"] == 2
+        assert history[0]["resumed_epoch"] == 1
+        assert set(history[0]["validation_loss"]) == {
+            "total",
+            "focal",
+            "dice",
+            "object_frame",
+            "false_alarm",
+        }
+        assert all(
+            value >= 0.0 for value in history[0]["validation_loss"].values()
+        )
+        assert "loss" not in history[0]["validation"]
 
 
 def test_amp_is_enabled_only_when_requested_on_cuda() -> None:
@@ -351,5 +403,5 @@ def test_training_forwards_all_events_before_sampling_loss(
 
         run_training(config, output_dir=temporary_root / "outputs" / "run")
 
-    assert model_event_counts[0] == 12
-    assert loss_event_counts == [4]
+    assert model_event_counts == [12, 4]
+    assert loss_event_counts == [4, 4]

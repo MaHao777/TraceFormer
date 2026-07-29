@@ -160,6 +160,7 @@ class EventTokenizer(nn.Module):
             raise ValueError("events must have shape [N,4] or [N,5]")
         if not events.is_floating_point():
             raise TypeError("events must have a floating dtype")
+        # 这儿数据处理是不是冗余了？怎么接受传入数据还要分两类处理？就固定为一种传入类型就行
         if events.shape[1] == 5:
             if batch_indices is not None:
                 raise ValueError("batch_indices must be omitted for [N,5] events")
@@ -205,6 +206,7 @@ class EventTokenizer(nn.Module):
             return self._empty(events)
 
         x, y, normalized_time, polarity = event_features.unbind(dim=1)
+        # 这后面也没必要接入数据安全检查啊，这个数据都经过处理了，有问题说明那块有问题，或者数据集就有问题（不可能，因为数据集是官方的）
         if (
             torch.any(x < 0)
             or torch.any(x >= self.width)
