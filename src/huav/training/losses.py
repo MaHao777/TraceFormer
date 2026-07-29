@@ -221,6 +221,41 @@ def false_alarm_pixel_loss(
     return torch.stack(frame_losses).mean()
 
 
+def _adaptive_threshold_magnitude(
+    global_event_offsets: torch.Tensor,
+    local_event_offsets: torch.Tensor,
+) -> torch.Tensor:
+    if not isinstance(global_event_offsets, torch.Tensor) or not isinstance(
+        local_event_offsets,
+        torch.Tensor,
+    ):
+        raise TypeError("adaptive-threshold event offsets must be tensors")
+    if global_event_offsets.ndim != 1:
+        raise ValueError("global_event_offsets must have shape [N]")
+    if local_event_offsets.ndim != 1:
+        raise ValueError("local_event_offsets must have shape [N]")
+    if not global_event_offsets.is_floating_point():
+        raise TypeError("global_event_offsets must have a floating dtype")
+    if not local_event_offsets.is_floating_point():
+        raise TypeError("local_event_offsets must have a floating dtype")
+    if len(global_event_offsets) != len(local_event_offsets):
+        raise ValueError("global and local event offsets must have matching length")
+    if global_event_offsets.device != local_event_offsets.device:
+        raise ValueError("adaptive-threshold event offsets must share a device")
+    if not torch.isfinite(global_event_offsets).all() or not torch.isfinite(
+        local_event_offsets
+    ).all():
+        raise ValueError("adaptive-threshold event offsets must be finite")
+    if len(local_event_offsets) == 0:
+        return (
+            global_event_offsets.sum() + local_event_offsets.sum()
+        ) * 0.0
+    return (
+        global_event_offsets.square().mean()
+        + local_event_offsets.square().mean()
+    )
+
+
 def adaptive_threshold_regularization(
     global_event_offsets: torch.Tensor,
     local_event_offsets: torch.Tensor,
@@ -230,26 +265,18 @@ def adaptive_threshold_regularization(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Return magnitude, per-sequence centering and neighbor smoothness terms."""
 
-    tensors = (
+    magnitude = _adaptive_threshold_magnitude(
         global_event_offsets,
         local_event_offsets,
-        event_group_indices,
-        group_batch_indices,
-        neighbor_edge_indices,
     )
-    if not all(isinstance(tensor, torch.Tensor) for tensor in tensors):
-        raise TypeError("adaptive-threshold regularization inputs must be tensors")
-    if global_event_offsets.ndim != 1:
-        raise ValueError("global_event_offsets must have shape [N]")
-    if local_event_offsets.ndim != 1:
-        raise ValueError("local_event_offsets must have shape [N]")
-    if not global_event_offsets.is_floating_point():
-        raise TypeError("global_event_offsets must have a floating dtype")
-    if not local_event_offsets.is_floating_point():
-        raise TypeError("local_event_offsets must have a floating dtype")
+    for tensor, name in (
+        (event_group_indices, "event_group_indices"),
+        (group_batch_indices, "group_batch_indices"),
+        (neighbor_edge_indices, "neighbor_edge_indices"),
+    ):
+        if not isinstance(tensor, torch.Tensor):
+            raise TypeError(f"{name} must be a tensor")
     event_count = len(local_event_offsets)
-    if len(global_event_offsets) != event_count:
-        raise ValueError("global and local event offsets must have matching length")
     if event_group_indices.shape != (event_count,):
         raise ValueError("event_group_indices must have shape [N]")
     if group_batch_indices.ndim != 1:
@@ -271,16 +298,11 @@ def adaptive_threshold_regularization(
         if tensor.dtype not in integer_dtypes:
             raise TypeError(f"{name} must have an integer dtype")
     if (
-        global_event_offsets.device != local_event_offsets.device
-        or event_group_indices.device != local_event_offsets.device
+        event_group_indices.device != local_event_offsets.device
         or group_batch_indices.device != local_event_offsets.device
         or neighbor_edge_indices.device != local_event_offsets.device
     ):
         raise ValueError("adaptive-threshold regularization inputs must share a device")
-    if not torch.isfinite(global_event_offsets).all() or not torch.isfinite(
-        local_event_offsets
-    ).all():
-        raise ValueError("adaptive-threshold event offsets must be finite")
     if torch.any(group_batch_indices < 0):
         raise ValueError("group_batch_indices must be non-negative")
 
@@ -292,7 +314,7 @@ def adaptive_threshold_regularization(
             raise ValueError("declared groups must contain at least one event")
         if neighbor_edge_indices.shape[1] != 0:
             raise ValueError("neighbor edges require declared groups")
-        return differentiable_zero, differentiable_zero, differentiable_zero
+        return magnitude, differentiable_zero, differentiable_zero
     if len(group_batch_indices) == 0:
         raise ValueError("group_batch_indices cannot be empty when events exist")
     event_groups = event_group_indices.long()
@@ -319,10 +341,6 @@ def adaptive_threshold_regularization(
         ):
             raise ValueError("neighbor edges cannot connect different batches")
 
-    magnitude = (
-        global_event_offsets.square().mean()
-        + local_event_offsets.square().mean()
-    )
     event_batches = group_batch_indices[event_groups]
     _, event_batch_inverse = torch.unique(
         event_batches,
@@ -482,30 +500,59 @@ class EventFocalDiceLoss(nn.Module):
         threshold_magnitude = threshold_zero
         threshold_center = threshold_zero
         threshold_smoothness = threshold_zero
-        threshold_enabled = (
-            self.lambda_threshold_magnitude
-            or self.lambda_threshold_center
+        group_regularization_enabled = (
+            self.lambda_threshold_center
             or self.lambda_threshold_smoothness
         )
-        if threshold_enabled:
-            required_inputs = (
-                global_threshold_offsets,
+        if self.lambda_threshold_magnitude and (
+            global_threshold_offsets is None
+            or local_threshold_offsets is None
+        ):
+            raise ValueError(
+                "adaptive-threshold global and local offsets are required "
+                "for magnitude regularization"
+            )
+        if group_regularization_enabled:
+            required_group_inputs = (
                 local_threshold_offsets,
                 threshold_group_indices,
                 threshold_group_batch_indices,
-                threshold_neighbor_edges,
             )
-            if any(value is None for value in required_inputs):
+            if any(value is None for value in required_group_inputs):
                 raise ValueError(
-                    "adaptive-threshold offsets, group indices, group batches "
-                    "and neighbor edges are required for threshold regularization"
+                    "adaptive-threshold local offsets, group indices and group "
+                    "batches are required for center or smoothness regularization"
                 )
+            if (
+                self.lambda_threshold_smoothness
+                and threshold_neighbor_edges is None
+            ):
+                raise ValueError(
+                    "adaptive-threshold neighbor edges are required for "
+                    "smoothness regularization"
+                )
+            if not isinstance(local_threshold_offsets, torch.Tensor):
+                raise TypeError("local_threshold_offsets must be a tensor")
+            helper_global_offsets = (
+                global_threshold_offsets
+                if self.lambda_threshold_magnitude
+                else torch.zeros_like(local_threshold_offsets)
+            )
+            helper_neighbor_edges = (
+                threshold_neighbor_edges
+                if self.lambda_threshold_smoothness
+                else torch.empty(
+                    (2, 0),
+                    dtype=torch.long,
+                    device=local_threshold_offsets.device,
+                )
+            )
             magnitude, center, smoothness = adaptive_threshold_regularization(
-                global_threshold_offsets,  # type: ignore[arg-type]
+                helper_global_offsets,  # type: ignore[arg-type]
                 local_threshold_offsets,  # type: ignore[arg-type]
                 threshold_group_indices,  # type: ignore[arg-type]
                 threshold_group_batch_indices,  # type: ignore[arg-type]
-                threshold_neighbor_edges,  # type: ignore[arg-type]
+                helper_neighbor_edges,  # type: ignore[arg-type]
             )
             if self.lambda_threshold_magnitude:
                 threshold_magnitude = magnitude
@@ -513,6 +560,11 @@ class EventFocalDiceLoss(nn.Module):
                 threshold_center = center
             if self.lambda_threshold_smoothness:
                 threshold_smoothness = smoothness
+        elif self.lambda_threshold_magnitude:
+            threshold_magnitude = _adaptive_threshold_magnitude(
+                global_threshold_offsets,  # type: ignore[arg-type]
+                local_threshold_offsets,  # type: ignore[arg-type]
+            )
         return {
             "total": (
                 focal

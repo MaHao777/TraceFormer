@@ -422,27 +422,140 @@ def test_threshold_regularized_loss_requires_calibration_tensors() -> None:
         criterion(torch.zeros(2), torch.zeros(2))
 
 
-def test_magnitude_only_threshold_loss_requires_all_calibration_metadata() -> None:
+def test_magnitude_only_threshold_loss_uses_only_event_offsets() -> None:
     criterion = EventFocalDiceLoss(lambda_threshold_magnitude=0.1)
-
-    with pytest.raises(ValueError, match="adaptive-threshold"):
-        criterion(
-            torch.zeros(2),
-            torch.zeros(2),
-            global_threshold_offsets=torch.tensor([0.1, 0.1]),
-            local_threshold_offsets=torch.tensor([0.2, -0.2]),
-        )
 
     losses = criterion(
         torch.zeros(2),
         torch.zeros(2),
         global_threshold_offsets=torch.tensor([0.1, 0.1]),
         local_threshold_offsets=torch.tensor([0.2, -0.2]),
-        threshold_group_indices=torch.tensor([0, 1]),
-        threshold_group_batch_indices=torch.tensor([0, 0]),
-        threshold_neighbor_edges=torch.empty((2, 0), dtype=torch.long),
     )
     torch.testing.assert_close(losses["threshold_magnitude"], torch.tensor(0.05))
+
+
+@pytest.mark.parametrize(
+    "offsets",
+    (
+        {"global_threshold_offsets": torch.zeros(2)},
+        {"local_threshold_offsets": torch.zeros(2)},
+    ),
+)
+def test_magnitude_only_threshold_loss_requires_both_offsets(
+    offsets: dict[str, torch.Tensor],
+) -> None:
+    criterion = EventFocalDiceLoss(lambda_threshold_magnitude=0.1)
+
+    with pytest.raises(ValueError, match="adaptive-threshold"):
+        criterion(torch.zeros(2), torch.zeros(2), **offsets)
+
+
+def test_center_only_threshold_loss_uses_local_group_metadata() -> None:
+    criterion = EventFocalDiceLoss(lambda_threshold_center=0.1)
+
+    losses = criterion(
+        torch.zeros(2),
+        torch.zeros(2),
+        local_threshold_offsets=torch.tensor([1.0, 3.0]),
+        threshold_group_indices=torch.tensor([0, 1]),
+        threshold_group_batch_indices=torch.tensor([0, 0]),
+    )
+
+    torch.testing.assert_close(losses["threshold_center"], torch.tensor(4.0))
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    (
+        {
+            "threshold_group_indices": torch.tensor([0, 1]),
+            "threshold_group_batch_indices": torch.tensor([0, 0]),
+        },
+        {
+            "local_threshold_offsets": torch.zeros(2),
+            "threshold_group_batch_indices": torch.tensor([0, 0]),
+        },
+        {
+            "local_threshold_offsets": torch.zeros(2),
+            "threshold_group_indices": torch.tensor([0, 1]),
+        },
+    ),
+)
+def test_center_only_threshold_loss_requires_local_group_metadata(
+    metadata: dict[str, torch.Tensor],
+) -> None:
+    criterion = EventFocalDiceLoss(lambda_threshold_center=0.1)
+
+    with pytest.raises(ValueError, match="adaptive-threshold"):
+        criterion(torch.zeros(2), torch.zeros(2), **metadata)
+
+
+def test_smoothness_only_threshold_loss_uses_local_edges() -> None:
+    criterion = EventFocalDiceLoss(lambda_threshold_smoothness=0.1)
+
+    losses = criterion(
+        torch.zeros(2),
+        torch.zeros(2),
+        local_threshold_offsets=torch.tensor([1.0, 3.0]),
+        threshold_group_indices=torch.tensor([0, 1]),
+        threshold_group_batch_indices=torch.tensor([0, 0]),
+        threshold_neighbor_edges=torch.tensor([[0], [1]]),
+    )
+
+    torch.testing.assert_close(losses["threshold_smoothness"], torch.tensor(4.0))
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    (
+        {
+            "threshold_group_indices": torch.tensor([0, 1]),
+            "threshold_group_batch_indices": torch.tensor([0, 0]),
+            "threshold_neighbor_edges": torch.tensor([[0], [1]]),
+        },
+        {
+            "local_threshold_offsets": torch.zeros(2),
+            "threshold_group_batch_indices": torch.tensor([0, 0]),
+            "threshold_neighbor_edges": torch.tensor([[0], [1]]),
+        },
+        {
+            "local_threshold_offsets": torch.zeros(2),
+            "threshold_group_indices": torch.tensor([0, 1]),
+            "threshold_neighbor_edges": torch.tensor([[0], [1]]),
+        },
+        {
+            "local_threshold_offsets": torch.zeros(2),
+            "threshold_group_indices": torch.tensor([0, 1]),
+            "threshold_group_batch_indices": torch.tensor([0, 0]),
+        },
+    ),
+)
+def test_smoothness_only_threshold_loss_requires_local_edge_metadata(
+    metadata: dict[str, torch.Tensor],
+) -> None:
+    criterion = EventFocalDiceLoss(lambda_threshold_smoothness=0.1)
+
+    with pytest.raises(ValueError, match="adaptive-threshold"):
+        criterion(torch.zeros(2), torch.zeros(2), **metadata)
+
+
+def test_magnitude_and_center_require_the_union_without_edges() -> None:
+    criterion = EventFocalDiceLoss(
+        lambda_threshold_magnitude=0.1,
+        lambda_threshold_center=0.1,
+    )
+
+    losses = criterion(
+        torch.zeros(2),
+        torch.zeros(2),
+        global_threshold_offsets=torch.tensor([0.1, 0.1]),
+        local_threshold_offsets=torch.tensor([1.0, 3.0]),
+        threshold_group_indices=torch.tensor([0, 1]),
+        threshold_group_batch_indices=torch.tensor([0, 0]),
+    )
+
+    assert losses["threshold_magnitude"].item() > 0
+    assert losses["threshold_center"].item() > 0
 
 
 def test_per_sample_dice_safely_penalizes_false_positives_without_targets() -> None:
