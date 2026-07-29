@@ -221,6 +221,84 @@ def false_alarm_pixel_loss(
     return torch.stack(frame_losses).mean()
 
 
+def adaptive_threshold_regularization(
+    global_event_offsets: torch.Tensor,
+    local_event_offsets: torch.Tensor,
+    event_group_indices: torch.Tensor,
+    group_batch_indices: torch.Tensor,
+    neighbor_edge_indices: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return magnitude, per-sequence centering and neighbor smoothness terms."""
+
+    event_count = len(local_event_offsets)
+    if global_event_offsets.shape != (event_count,):
+        raise ValueError("global_event_offsets must have shape [N]")
+    if event_group_indices.shape != (event_count,):
+        raise ValueError("event_group_indices must have shape [N]")
+    if group_batch_indices.ndim != 1:
+        raise ValueError("group_batch_indices must have shape [G]")
+    if neighbor_edge_indices.ndim != 2 or neighbor_edge_indices.shape[0] != 2:
+        raise ValueError("neighbor_edge_indices must have shape [2,E]")
+    if (
+        global_event_offsets.device != local_event_offsets.device
+        or event_group_indices.device != local_event_offsets.device
+        or group_batch_indices.device != local_event_offsets.device
+        or neighbor_edge_indices.device != local_event_offsets.device
+    ):
+        raise ValueError("adaptive-threshold regularization inputs must share a device")
+
+    differentiable_zero = (
+        global_event_offsets.sum() + local_event_offsets.sum()
+    ) * 0.0
+    if event_count == 0:
+        return differentiable_zero, differentiable_zero, differentiable_zero
+    if len(group_batch_indices) == 0:
+        raise ValueError("group_batch_indices cannot be empty when events exist")
+    if torch.any(event_group_indices < 0) or torch.any(
+        event_group_indices >= len(group_batch_indices)
+    ):
+        raise ValueError("event_group_indices contain an out-of-range group")
+
+    magnitude = (
+        global_event_offsets.square().mean()
+        + local_event_offsets.square().mean()
+    )
+    event_batches = group_batch_indices[event_group_indices]
+    _, event_batch_inverse = torch.unique(
+        event_batches,
+        sorted=True,
+        return_inverse=True,
+    )
+    batch_count = int(event_batch_inverse.max().item()) + 1
+    batch_sums = local_event_offsets.new_zeros(batch_count)
+    batch_sums.scatter_add_(0, event_batch_inverse, local_event_offsets)
+    batch_counts = torch.bincount(
+        event_batch_inverse,
+        minlength=batch_count,
+    ).to(local_event_offsets.dtype)
+    center = (batch_sums / batch_counts).square().mean()
+
+    if neighbor_edge_indices.shape[1] == 0:
+        smoothness = local_event_offsets.sum() * 0.0
+    else:
+        if torch.any(neighbor_edge_indices < 0) or torch.any(
+            neighbor_edge_indices >= len(group_batch_indices)
+        ):
+            raise ValueError("neighbor_edge_indices contain an out-of-range group")
+        group_sums = local_event_offsets.new_zeros(len(group_batch_indices))
+        group_sums.scatter_add_(0, event_group_indices, local_event_offsets)
+        group_counts = torch.bincount(
+            event_group_indices,
+            minlength=len(group_batch_indices),
+        ).to(local_event_offsets.dtype)
+        group_offsets = group_sums / group_counts.clamp_min(1)
+        targets, sources = neighbor_edge_indices
+        smoothness = (
+            group_offsets[targets] - group_offsets[sources]
+        ).square().mean()
+    return magnitude, center, smoothness
+
+
 class EventFocalDiceLoss(nn.Module):
     def __init__(
         self,
@@ -233,6 +311,9 @@ class EventFocalDiceLoss(nn.Module):
         lambda_false_alarm: float = 0.0,
         false_alarm_logit_margin: float = 0.0,
         false_alarm_topk_per_frame: int = 32,
+        lambda_threshold_magnitude: float = 0.0,
+        lambda_threshold_smoothness: float = 0.0,
+        lambda_threshold_center: float = 0.0,
     ) -> None:
         super().__init__()
         if not 0 <= focal_alpha <= 1:
@@ -245,6 +326,13 @@ class EventFocalDiceLoss(nn.Module):
             raise ValueError("lambda_object_frame must be non-negative")
         if lambda_false_alarm < 0:
             raise ValueError("lambda_false_alarm must be non-negative")
+        for value, name in (
+            (lambda_threshold_magnitude, "lambda_threshold_magnitude"),
+            (lambda_threshold_smoothness, "lambda_threshold_smoothness"),
+            (lambda_threshold_center, "lambda_threshold_center"),
+        ):
+            if not math.isfinite(value) or value < 0:
+                raise ValueError(f"{name} must be finite and non-negative")
         if not math.isfinite(object_frame_logit_margin):
             raise ValueError("object_frame_logit_margin must be finite")
         if not math.isfinite(false_alarm_logit_margin):
@@ -265,6 +353,9 @@ class EventFocalDiceLoss(nn.Module):
         self.lambda_false_alarm = float(lambda_false_alarm)
         self.false_alarm_logit_margin = float(false_alarm_logit_margin)
         self.false_alarm_topk_per_frame = int(false_alarm_topk_per_frame)
+        self.lambda_threshold_magnitude = float(lambda_threshold_magnitude)
+        self.lambda_threshold_smoothness = float(lambda_threshold_smoothness)
+        self.lambda_threshold_center = float(lambda_threshold_center)
 
     def forward(
         self,
@@ -280,6 +371,11 @@ class EventFocalDiceLoss(nn.Module):
         full_batch_indices: torch.Tensor | None = None,
         full_timestamps_ms: torch.Tensor | None = None,
         full_coordinates: torch.Tensor | None = None,
+        global_threshold_offsets: torch.Tensor | None = None,
+        local_threshold_offsets: torch.Tensor | None = None,
+        threshold_group_indices: torch.Tensor | None = None,
+        threshold_group_batch_indices: torch.Tensor | None = None,
+        threshold_neighbor_edges: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         focal = binary_focal_loss(
             logits,
@@ -328,22 +424,101 @@ class EventFocalDiceLoss(nn.Module):
             )
         else:
             false_alarm = logits.sum() * 0.0
+        threshold_zero = logits.sum() * 0.0
+        threshold_magnitude = threshold_zero
+        threshold_center = threshold_zero
+        threshold_smoothness = threshold_zero
+        if self.lambda_threshold_magnitude:
+            if (
+                global_threshold_offsets is None
+                or local_threshold_offsets is None
+            ):
+                raise ValueError(
+                    "adaptive-threshold global and local offsets are required "
+                    "for magnitude regularization"
+                )
+            if global_threshold_offsets.shape != local_threshold_offsets.shape:
+                raise ValueError(
+                    "adaptive-threshold global and local offsets must have "
+                    "matching shape [N]"
+                )
+            if len(local_threshold_offsets) == 0:
+                threshold_magnitude = (
+                    global_threshold_offsets.sum()
+                    + local_threshold_offsets.sum()
+                ) * 0.0
+            else:
+                threshold_magnitude = (
+                    global_threshold_offsets.square().mean()
+                    + local_threshold_offsets.square().mean()
+                )
+        if self.lambda_threshold_center or self.lambda_threshold_smoothness:
+            grouping_inputs = (
+                local_threshold_offsets,
+                threshold_group_indices,
+                threshold_group_batch_indices,
+            )
+            if any(value is None for value in grouping_inputs):
+                raise ValueError(
+                    "adaptive-threshold local offsets, group indices and group "
+                    "batches are required for center or smoothness regularization"
+                )
+            if (
+                self.lambda_threshold_smoothness
+                and threshold_neighbor_edges is None
+            ):
+                raise ValueError(
+                    "adaptive-threshold neighbor edges are required for "
+                    "smoothness regularization"
+                )
+            helper_global_offsets = (
+                global_threshold_offsets
+                if global_threshold_offsets is not None
+                else torch.zeros_like(local_threshold_offsets)
+            )
+            helper_neighbor_edges = (
+                threshold_neighbor_edges
+                if threshold_neighbor_edges is not None
+                else torch.empty(
+                    (2, 0),
+                    dtype=torch.long,
+                    device=local_threshold_offsets.device,
+                )
+            )
+            _, center, smoothness = adaptive_threshold_regularization(
+                helper_global_offsets,
+                local_threshold_offsets,  # type: ignore[arg-type]
+                threshold_group_indices,  # type: ignore[arg-type]
+                threshold_group_batch_indices,  # type: ignore[arg-type]
+                helper_neighbor_edges,
+            )
+            if self.lambda_threshold_center:
+                threshold_center = center
+            if self.lambda_threshold_smoothness:
+                threshold_smoothness = smoothness
         return {
             "total": (
                 focal
                 + self.lambda_dice * dice
                 + self.lambda_object_frame * object_frame
                 + self.lambda_false_alarm * false_alarm
+                + self.lambda_threshold_magnitude * threshold_magnitude
+                + self.lambda_threshold_center * threshold_center
+                + self.lambda_threshold_smoothness * threshold_smoothness
             ),
             "focal": focal,
             "dice": dice,
             "object_frame": object_frame,
             "false_alarm": false_alarm,
+            "threshold_magnitude": threshold_magnitude,
+            "threshold_center": threshold_center,
+            "threshold_smoothness": threshold_smoothness,
         }
 
 
 __all__ = [
     "EventFocalDiceLoss",
+    "adaptive_threshold_regularization",
     "binary_dice_loss",
     "binary_focal_loss",
     "false_alarm_pixel_loss",

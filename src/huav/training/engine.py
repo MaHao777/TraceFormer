@@ -57,6 +57,11 @@ def build_model(config: HUAVConfig) -> SpatioTemporalConeDetector:
         causal_mode=config.model.causal_mode,
         direction_dropout=config.model.direction_dropout,
         debug_attention_stats=config.model.debug_attention_stats,
+        adaptive_threshold_mode=config.model.adaptive_threshold_mode,
+        threshold_hidden_dim=config.model.threshold_hidden_dim,
+        threshold_time_bins=config.model.threshold_time_bins,
+        threshold_max_global_offset=config.model.threshold_max_global_offset,
+        threshold_max_local_offset=config.model.threshold_max_local_offset,
     )
 
 

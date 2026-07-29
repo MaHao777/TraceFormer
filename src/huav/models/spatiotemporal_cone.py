@@ -9,6 +9,7 @@ from torch import nn
 
 from huav.config import ConeHeadConfig
 
+from .adaptive_threshold import AdaptiveThresholdCalibrator
 from .cone_transformer import ConeTransformerEncoder
 from .event_decoder import EventDecoder
 from .event_tokenizer import EventTokenizer
@@ -19,6 +20,14 @@ class SpatioTemporalConeDetector(nn.Module):
 
     output_names = (
         "event_logits",
+        "base_event_logits",
+        "global_threshold_offsets",
+        "local_threshold_offsets",
+        "threshold_group_indices",
+        "threshold_group_coords",
+        "threshold_group_batch_indices",
+        "threshold_neighbor_edges",
+        "threshold_group_descriptors",
         "token_features",
         "token_coords",
         "token_batch_indices",
@@ -48,6 +57,11 @@ class SpatioTemporalConeDetector(nn.Module):
         direction_dropout: float,
         debug_attention_stats: bool,
         num_pool_queries: int = 4,
+        adaptive_threshold_mode: str = "none",
+        threshold_hidden_dim: int = 32,
+        threshold_time_bins: int = 160,
+        threshold_max_global_offset: float = 0.5,
+        threshold_max_local_offset: float = 0.75,
     ) -> None:
         super().__init__()
         if num_layers != len(layer_time_scales):
@@ -77,6 +91,20 @@ class SpatioTemporalConeDetector(nn.Module):
             debug_attention_stats=debug_attention_stats,
         )
         self.decoder = EventDecoder(token_dim=token_dim, dropout=dropout)
+        self.calibrator = AdaptiveThresholdCalibrator(
+            token_dim=token_dim,
+            width=width,
+            height=height,
+            spatial_block_size_x=spatial_block_size_x,
+            spatial_block_size_y=spatial_block_size_y,
+            threshold_time_bins=threshold_time_bins,
+            mode=adaptive_threshold_mode,
+            hidden_dim=threshold_hidden_dim,
+            max_global_offset=threshold_max_global_offset,
+            max_local_offset=threshold_max_local_offset,
+        )
+        if adaptive_threshold_mode == "none":
+            self.calibrator.requires_grad_(False)
 
     def forward(
         self,
@@ -89,13 +117,42 @@ class SpatioTemporalConeDetector(nn.Module):
             tokenized.token_coords,
             tokenized.token_batch_indices,
         )
-        event_logits = self.decoder(
+        base_event_logits = self.decoder(
             encoded.token_features,
             tokenized.event_token_indices,
             tokenized.event_local_features,
         )
+        if events.shape[1] == 5:
+            event_features = events[:, 1:]
+            event_batch_indices = events[:, 0].long()
+        else:
+            event_features = events
+            event_batch_indices = (
+                torch.zeros(
+                    len(events),
+                    dtype=torch.long,
+                    device=events.device,
+                )
+                if batch_indices is None
+                else batch_indices.long()
+            )
+        calibration = self.calibrator(
+            event_features,
+            encoded.token_features[tokenized.event_token_indices],
+            tokenized.token_statistics[tokenized.event_token_indices],
+            base_event_logits,
+            event_batch_indices,
+        )
         return {
-            "event_logits": event_logits,
+            "event_logits": calibration.final_logits,
+            "base_event_logits": calibration.base_event_logits,
+            "global_threshold_offsets": calibration.global_event_offsets,
+            "local_threshold_offsets": calibration.local_event_offsets,
+            "threshold_group_indices": calibration.event_group_indices,
+            "threshold_group_coords": calibration.group_coords,
+            "threshold_group_batch_indices": calibration.group_batch_indices,
+            "threshold_neighbor_edges": calibration.neighbor_edge_indices,
+            "threshold_group_descriptors": calibration.group_descriptors,
             "token_features": encoded.token_features,
             "token_coords": tokenized.token_coords,
             "token_batch_indices": tokenized.token_batch_indices,

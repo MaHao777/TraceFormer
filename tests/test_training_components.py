@@ -5,6 +5,7 @@ import torch
 
 from huav.training.losses import (
     EventFocalDiceLoss,
+    adaptive_threshold_regularization,
     binary_dice_loss,
     binary_focal_loss,
     false_alarm_pixel_loss,
@@ -70,6 +71,9 @@ def test_total_loss_is_focal_plus_configured_per_sample_dice() -> None:
     losses = criterion(logits, labels, batches)
     expected = losses["focal"] + 1.5 * losses["dice"]
     assert torch.allclose(losses["total"], expected)
+    assert losses["threshold_magnitude"].item() == 0.0
+    assert losses["threshold_center"].item() == 0.0
+    assert losses["threshold_smoothness"].item() == 0.0
     losses["total"].backward()
     assert torch.isfinite(logits.grad).all()
 
@@ -241,6 +245,136 @@ def test_total_loss_adds_full_event_false_alarm_objective() -> None:
     losses["total"].backward()
     assert torch.isfinite(sampled_logits.grad).all()
     assert torch.isfinite(full_logits.grad).all()
+
+
+def test_adaptive_threshold_regularization_matches_hand_computed_values() -> None:
+    global_offsets = torch.tensor([1.0, 1.0, 2.0, 3.0], requires_grad=True)
+    local_offsets = torch.tensor([1.0, 3.0, 5.0, 7.0], requires_grad=True)
+    group_indices = torch.tensor([0, 0, 1, 2])
+    group_batches = torch.tensor([0, 0, 1])
+    directed_edges = torch.tensor([[0, 1, 1], [1, 0, 2]])
+
+    magnitude, center, smoothness = adaptive_threshold_regularization(
+        global_offsets,
+        local_offsets,
+        group_indices,
+        group_batches,
+        directed_edges,
+    )
+
+    torch.testing.assert_close(magnitude, torch.tensor(24.75))
+    torch.testing.assert_close(center, torch.tensor(29.0))
+    torch.testing.assert_close(smoothness, torch.tensor(22.0 / 3.0))
+    (magnitude + center + smoothness).backward()
+    assert torch.isfinite(global_offsets.grad).all()
+    assert torch.isfinite(local_offsets.grad).all()
+
+
+def test_adaptive_threshold_regularization_empty_inputs_are_differentiable() -> None:
+    global_offsets = torch.empty(0, requires_grad=True)
+    local_offsets = torch.empty(0, requires_grad=True)
+
+    magnitude, center, smoothness = adaptive_threshold_regularization(
+        global_offsets,
+        local_offsets,
+        torch.empty(0, dtype=torch.long),
+        torch.empty(0, dtype=torch.long),
+        torch.empty((2, 0), dtype=torch.long),
+    )
+
+    assert magnitude.item() == center.item() == smoothness.item() == 0.0
+    (magnitude + center + smoothness).backward()
+    assert global_offsets.grad is not None
+    assert local_offsets.grad is not None
+
+
+def test_adaptive_threshold_regularization_no_edges_has_zero_smoothness() -> None:
+    local_offsets = torch.tensor([1.0, 3.0], requires_grad=True)
+
+    _, _, smoothness = adaptive_threshold_regularization(
+        torch.zeros(2, requires_grad=True),
+        local_offsets,
+        torch.tensor([0, 1]),
+        torch.tensor([0, 0]),
+        torch.empty((2, 0), dtype=torch.long),
+    )
+
+    assert smoothness.item() == 0.0
+    smoothness.backward()
+    assert local_offsets.grad is not None
+
+
+def test_total_loss_adds_configured_adaptive_threshold_regularizers() -> None:
+    logits = torch.tensor([0.2, -0.1], requires_grad=True)
+    labels = torch.tensor([1.0, 0.0])
+    global_offsets = torch.tensor([0.1, 0.1], requires_grad=True)
+    local_offsets = torch.tensor([0.2, -0.2], requires_grad=True)
+    criterion = EventFocalDiceLoss(
+        lambda_threshold_magnitude=0.5,
+        lambda_threshold_center=0.25,
+        lambda_threshold_smoothness=0.75,
+    )
+
+    losses = criterion(
+        logits,
+        labels,
+        global_threshold_offsets=global_offsets,
+        local_threshold_offsets=local_offsets,
+        threshold_group_indices=torch.tensor([0, 1]),
+        threshold_group_batch_indices=torch.tensor([0, 0]),
+        threshold_neighbor_edges=torch.tensor([[0], [1]]),
+    )
+
+    expected = (
+        losses["focal"]
+        + losses["dice"]
+        + 0.5 * losses["threshold_magnitude"]
+        + 0.25 * losses["threshold_center"]
+        + 0.75 * losses["threshold_smoothness"]
+    )
+    torch.testing.assert_close(losses["total"], expected)
+    losses["total"].backward()
+    assert torch.isfinite(global_offsets.grad).all()
+    assert torch.isfinite(local_offsets.grad).all()
+
+
+def test_threshold_regularized_loss_requires_calibration_tensors() -> None:
+    criterion = EventFocalDiceLoss(lambda_threshold_magnitude=0.1)
+
+    with pytest.raises(ValueError, match="adaptive-threshold"):
+        criterion(torch.zeros(2), torch.zeros(2))
+
+
+def test_magnitude_only_threshold_loss_requires_only_event_offsets() -> None:
+    criterion = EventFocalDiceLoss(lambda_threshold_magnitude=0.1)
+
+    losses = criterion(
+        torch.zeros(2),
+        torch.zeros(2),
+        global_threshold_offsets=torch.tensor([0.1, 0.1]),
+        local_threshold_offsets=torch.tensor([0.2, -0.2]),
+    )
+
+    torch.testing.assert_close(
+        losses["threshold_magnitude"],
+        torch.tensor(0.05),
+    )
+
+
+def test_magnitude_only_threshold_loss_handles_empty_events() -> None:
+    empty_offsets = torch.empty(0, requires_grad=True)
+    criterion = EventFocalDiceLoss(lambda_threshold_magnitude=0.1)
+
+    losses = criterion(
+        torch.empty(0, requires_grad=True),
+        torch.empty(0),
+        global_threshold_offsets=empty_offsets,
+        local_threshold_offsets=empty_offsets,
+    )
+
+    assert losses["threshold_magnitude"].item() == 0.0
+    losses["total"].backward()
+    assert empty_offsets.grad is not None
 
 
 def test_per_sample_dice_safely_penalizes_false_positives_without_targets() -> None:

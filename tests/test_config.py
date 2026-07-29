@@ -43,6 +43,11 @@ def test_base_yaml_exposes_cone_training_and_loss_configuration() -> None:
     assert config.model.max_neighbors_per_cone == 8
     assert config.model.causal_mode is False
     assert config.model.direction_dropout == 0.0
+    assert config.model.adaptive_threshold_mode == "none"
+    assert config.model.threshold_hidden_dim == 32
+    assert config.model.threshold_time_bins == 160
+    assert config.model.threshold_max_global_offset == 0.5
+    assert config.model.threshold_max_local_offset == 0.75
     assert config.dataset.duration_ms == 8000
     assert config.training.device == "cpu"
     assert config.training.background_ratio == 10
@@ -57,6 +62,9 @@ def test_base_yaml_exposes_cone_training_and_loss_configuration() -> None:
     assert config.loss.lambda_object_frame == 0.0
     assert config.loss.lambda_false_alarm == 0.0
     assert config.loss.false_alarm_topk_per_frame == 32
+    assert config.loss.lambda_threshold_magnitude == 0.0
+    assert config.loss.lambda_threshold_smoothness == 0.0
+    assert config.loss.lambda_threshold_center == 0.0
     assert config.evaluation.frame_ms == 50
 
 
@@ -205,6 +213,77 @@ def test_cross_field_config_validation_rejects_inconsistent_values() -> None:
             loss=replace(valid.loss, false_alarm_topk_per_frame=0),
         ).validate(),
     )
+
+
+def test_adaptive_threshold_configuration_accepts_aligned_valid_values() -> None:
+    valid = HUAVConfig.default()
+
+    configured = replace(
+        valid,
+        model=replace(
+            valid.model,
+            adaptive_threshold_mode="hierarchical",
+            threshold_hidden_dim=16,
+            threshold_time_bins=80,
+            threshold_max_global_offset=0.25,
+            threshold_max_local_offset=1.0,
+        ),
+        evaluation=replace(valid.evaluation, frame_ms=100.0),
+        loss=replace(
+            valid.loss,
+            lambda_threshold_magnitude=0.1,
+            lambda_threshold_smoothness=0.2,
+            lambda_threshold_center=0.3,
+        ),
+    ).validate()
+
+    assert configured.model.adaptive_threshold_mode == "hierarchical"
+
+
+def test_adaptive_threshold_configuration_rejects_invalid_fields() -> None:
+    valid = HUAVConfig.default()
+    invalid_models = (
+        replace(valid.model, adaptive_threshold_mode="invalid"),
+        replace(valid.model, adaptive_threshold_mode=[]),  # type: ignore[arg-type]
+        replace(valid.model, threshold_hidden_dim=0),
+        replace(valid.model, threshold_time_bins=True),
+        replace(valid.model, threshold_max_global_offset=-0.1),
+        replace(valid.model, threshold_max_local_offset=float("nan")),
+    )
+    for model in invalid_models:
+        raises(ValueError, lambda model=model: replace(valid, model=model).validate())
+
+    for field in (
+        "lambda_threshold_magnitude",
+        "lambda_threshold_smoothness",
+        "lambda_threshold_center",
+    ):
+        for invalid_value in (-0.1, float("nan")):
+            invalid_loss = replace(valid.loss, **{field: invalid_value})
+            raises(
+                ValueError,
+                lambda invalid_loss=invalid_loss: replace(
+                    valid, loss=invalid_loss
+                ).validate(),
+            )
+
+
+def test_adaptive_threshold_requires_evaluation_frame_alignment() -> None:
+    valid = HUAVConfig.default()
+    adaptive_model = replace(
+        valid.model,
+        adaptive_threshold_mode="local",
+        threshold_time_bins=159,
+    )
+
+    raises(
+        ValueError,
+        lambda: replace(valid, model=adaptive_model).validate(),
+    )
+    replace(
+        valid,
+        model=replace(valid.model, threshold_time_bins=159),
+    ).validate()
 
 
 def test_config_overrides_reject_unknown_keys_including_mixed_valid_invalid_values() -> None:
