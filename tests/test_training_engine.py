@@ -20,12 +20,18 @@ from huav.config import (
 from huav.data import LoadedEventSequence
 from huav.models import SpatioTemporalConeDetector
 from huav.training.engine import (
+    CHECKPOINT_SCHEMA_VERSION,
     _amp_is_enabled,
     _autocast_dtype,
+    _configure_training_stage,
     _dense_sequence_loss_weight,
     _grad_scaler_is_enabled,
+    _make_optimizer,
+    _make_scheduler,
     _select_competition_threshold,
+    build_model,
     evaluate_checkpoint,
+    generate_submission_package,
     resume_training,
     run_training,
 )
@@ -127,6 +133,253 @@ def _config(data_root: Path, output_root: Path) -> HUAVConfig:
     ).validate()
 
 
+def _adaptive_config(
+    data_root: Path,
+    output_root: Path,
+    *,
+    stage: str = "calibrator",
+) -> HUAVConfig:
+    base = _config(data_root, output_root)
+    return replace(
+        base,
+        model=replace(
+            base.model,
+            adaptive_threshold_mode="hierarchical",
+        ),
+        training=replace(
+            base.training,
+            training_stage=stage,
+            detector_learning_rate=(2e-4 if stage == "joint" else None),
+        ),
+        loss=replace(
+            base.loss,
+            lambda_threshold_magnitude=0.1,
+            lambda_threshold_center=0.1,
+            lambda_threshold_smoothness=0.1,
+        ),
+    ).validate()
+
+
+@pytest.mark.parametrize(
+    ("stage", "mode", "detector_lr"),
+    (
+        ("full", "none", None),
+        ("full", "hierarchical", None),
+        ("calibrator", "hierarchical", None),
+        ("joint", "hierarchical", 1e-4),
+    ),
+)
+def test_training_stage_configuration_accepts_valid_combinations(
+    stage: str,
+    mode: str,
+    detector_lr: float | None,
+) -> None:
+    config = replace(
+        HUAVConfig.default(),
+        model=replace(
+            HUAVConfig.default().model,
+            adaptive_threshold_mode=mode,
+        ),
+        training=replace(
+            HUAVConfig.default().training,
+            training_stage=stage,
+            detector_learning_rate=detector_lr,
+        ),
+    )
+
+    assert config.validate() is config
+
+
+@pytest.mark.parametrize(
+    ("stage", "mode", "detector_lr", "message"),
+    (
+        ("unknown", "none", None, "training_stage"),
+        ("calibrator", "none", None, "adaptive"),
+        ("joint", "none", 1e-4, "adaptive"),
+        ("joint", "hierarchical", None, "detector_learning_rate"),
+        ("joint", "hierarchical", 0.0, "detector_learning_rate"),
+        ("full", "none", 1e-4, "detector_learning_rate"),
+        ("calibrator", "hierarchical", 1e-4, "detector_learning_rate"),
+    ),
+)
+def test_training_stage_configuration_rejects_invalid_combinations(
+    stage: str,
+    mode: str,
+    detector_lr: float | None,
+    message: str,
+) -> None:
+    config = replace(
+        HUAVConfig.default(),
+        model=replace(
+            HUAVConfig.default().model,
+            adaptive_threshold_mode=mode,
+        ),
+        training=replace(
+            HUAVConfig.default().training,
+            training_stage=stage,
+            detector_learning_rate=detector_lr,
+        ),
+    )
+
+    with pytest.raises(ValueError, match=message):
+        config.validate()
+
+
+def test_calibrator_stage_freezes_detector_and_optimizer_contains_only_head() -> None:
+    config = replace(
+        HUAVConfig.default(),
+        model=replace(
+            HUAVConfig.default().model,
+            adaptive_threshold_mode="hierarchical",
+        ),
+        training=replace(
+            HUAVConfig.default().training,
+            training_stage="calibrator",
+        ),
+    ).validate()
+    model = __import__("huav.training.engine", fromlist=["build_model"]).build_model(
+        config
+    )
+
+    trainable = _configure_training_stage(model, config.training.training_stage)
+    optimizer = _make_optimizer(model, config)
+
+    assert not model.tokenizer.training
+    assert not model.encoder.training
+    assert not model.decoder.training
+    assert model.calibrator is not None and model.calibrator.training
+    assert all(not parameter.requires_grad for parameter in model.tokenizer.parameters())
+    assert all(not parameter.requires_grad for parameter in model.encoder.parameters())
+    assert all(not parameter.requires_grad for parameter in model.decoder.parameters())
+    assert all(parameter.requires_grad for parameter in model.calibrator.parameters())
+    assert trainable == sum(
+        parameter.numel() for parameter in model.calibrator.parameters()
+    )
+    assert len(optimizer.param_groups) == 1
+    assert optimizer.param_groups[0]["lr"] == pytest.approx(
+        config.training.learning_rate
+    )
+
+
+def test_joint_stage_builds_detector_and_calibrator_optimizer_groups() -> None:
+    config = replace(
+        HUAVConfig.default(),
+        model=replace(
+            HUAVConfig.default().model,
+            adaptive_threshold_mode="hierarchical",
+        ),
+        training=replace(
+            HUAVConfig.default().training,
+            training_stage="joint",
+            detector_learning_rate=2e-4,
+            learning_rate=7e-4,
+        ),
+    ).validate()
+    model = __import__("huav.training.engine", fromlist=["build_model"]).build_model(
+        config
+    )
+
+    _configure_training_stage(model, config.training.training_stage)
+    optimizer = _make_optimizer(model, config)
+
+    assert all(parameter.requires_grad for parameter in model.parameters())
+    assert [group["name"] for group in optimizer.param_groups] == [
+        "detector",
+        "calibrator",
+    ]
+    assert [group["lr"] for group in optimizer.param_groups] == pytest.approx(
+        [2e-4, 7e-4]
+    )
+
+
+def test_joint_stage_optimizer_updates_detector_and_calibrator() -> None:
+    config = replace(
+        HUAVConfig.default(),
+        resolution=replace(HUAVConfig.default().resolution, width=8, height=6),
+        model=replace(
+            _config(Path("data"), Path("outputs")).model,
+            adaptive_threshold_mode="hierarchical",
+        ),
+        training=replace(
+            HUAVConfig.default().training,
+            training_stage="joint",
+            detector_learning_rate=2e-4,
+            learning_rate=7e-4,
+        ),
+    ).validate()
+    model = build_model(config)
+    _configure_training_stage(model, "joint")
+    optimizer = _make_optimizer(model, config)
+    detector_before = {
+        name: parameter.detach().clone()
+        for name, parameter in model.named_parameters()
+        if not name.startswith("calibrator.")
+    }
+    calibrator_before = {
+        name: parameter.detach().clone()
+        for name, parameter in model.named_parameters()
+        if name.startswith("calibrator.")
+    }
+    events = torch.tensor(
+        [
+            [1.0, 1.0, 0.0, 1.0],
+            [5.0, 1.0, 0.01, 0.0],
+            [2.0, 2.0, 0.1, 1.0],
+            [6.0, 2.0, 0.11, 0.0],
+        ]
+    )
+    labels = torch.tensor([1.0, 0.0, 1.0, 0.0])
+
+    output = model(events)
+    loss = torch.nn.functional.binary_cross_entropy_with_logits(
+        output["event_logits"], labels
+    )
+    loss.backward()
+    optimizer.step()
+
+    assert any(
+        not torch.equal(detector_before[name], parameter)
+        for name, parameter in model.named_parameters()
+        if name in detector_before
+    )
+    assert any(
+        not torch.equal(calibrator_before[name], parameter)
+        for name, parameter in model.named_parameters()
+        if name in calibrator_before
+    )
+
+
+def test_joint_scheduler_preserves_group_ratio_and_reaches_minimum_ratio() -> None:
+    config = replace(
+        HUAVConfig.default(),
+        model=replace(
+            HUAVConfig.default().model,
+            adaptive_threshold_mode="hierarchical",
+        ),
+        training=replace(
+            HUAVConfig.default().training,
+            training_stage="joint",
+            detector_learning_rate=2e-4,
+            learning_rate=8e-4,
+        ),
+    ).validate()
+    model = build_model(config)
+    _configure_training_stage(model, "joint")
+    optimizer = _make_optimizer(model, config)
+    scheduler = _make_scheduler(optimizer, epochs=4, minimum_ratio=0.1)
+
+    for _ in range(4):
+        optimizer.step()
+        scheduler.step()
+
+    assert [group["lr"] for group in optimizer.param_groups] == pytest.approx(
+        [2e-5, 8e-5]
+    )
+    assert (
+        optimizer.param_groups[1]["lr"] / optimizer.param_groups[0]["lr"]
+    ) == pytest.approx(4.0)
+
+
 def test_cpu_training_writes_reproducible_metrics_and_checkpoint() -> None:
     with TemporaryDirectory(dir=Path.cwd()) as directory:
         temporary_root = Path(directory)
@@ -176,6 +429,9 @@ def test_cpu_training_writes_reproducible_metrics_and_checkpoint() -> None:
             "dice",
             "object_frame",
             "false_alarm",
+            "threshold_magnitude",
+            "threshold_center",
+            "threshold_smoothness",
         }
         assert all(
             value >= 0.0 for value in history[0]["validation_loss"].values()
@@ -185,8 +441,33 @@ def test_cpu_training_writes_reproducible_metrics_and_checkpoint() -> None:
         checkpoint = __import__("torch").load(
             run_dir / "best.pt", map_location="cpu", weights_only=True
         )
-        assert checkpoint["schema_version"] == 4
+        assert checkpoint["schema_version"] == CHECKPOINT_SCHEMA_VERSION
+        assert checkpoint["training_stage"] == "full"
+        assert checkpoint["trainable_parameter_count"] == summary[
+            "trainable_parameter_count"
+        ]
         assert checkpoint["decision_threshold"] == metrics["threshold"]
+        for index, invalid_threshold in enumerate((None, float("nan"), -0.1, 1.1)):
+            invalid_checkpoint = dict(checkpoint)
+            if invalid_threshold is None:
+                invalid_checkpoint.pop("decision_threshold")
+            else:
+                invalid_checkpoint["decision_threshold"] = invalid_threshold
+            invalid_path = run_dir / f"invalid-threshold-{index}.pt"
+            torch.save(invalid_checkpoint, invalid_path)
+            with pytest.raises(ValueError, match="decision_threshold"):
+                evaluate_checkpoint(
+                    _config(data_root, output_root),
+                    invalid_path,
+                    device="cpu",
+                    reoptimize_threshold=True,
+                )
+            with pytest.raises(ValueError, match="decision_threshold"):
+                generate_submission_package(
+                    _config(data_root, output_root),
+                    invalid_path,
+                    output_root / f"invalid-submission-{index}",
+                )
         changed_config = replace(
             _config(data_root, output_root),
             inference=replace(
@@ -198,6 +479,7 @@ def test_cpu_training_writes_reproducible_metrics_and_checkpoint() -> None:
             ),
         )
         reproduced = evaluate_checkpoint(changed_config, run_dir / "best.pt", device="cpu")
+        assert reproduced == metrics
         assert reproduced["threshold"] == metrics["threshold"]
         assert reproduced["event"] == metrics["event"]
         incompatible_config = replace(
@@ -210,7 +492,7 @@ def test_cpu_training_writes_reproducible_metrics_and_checkpoint() -> None:
         with pytest.raises(ValueError, match="model configuration"):
             evaluate_checkpoint(incompatible_config, run_dir / "best.pt", device="cpu")
         unsupported_checkpoint = run_dir / "unsupported-schema.pt"
-        checkpoint["schema_version"] = 999
+        checkpoint["schema_version"] = 3
         torch.save(checkpoint, unsupported_checkpoint)
         with pytest.raises(ValueError, match="schema version"):
             evaluate_checkpoint(
@@ -254,11 +536,22 @@ def test_resumed_training_records_validation_loss() -> None:
             "dice",
             "object_frame",
             "false_alarm",
+            "threshold_magnitude",
+            "threshold_center",
+            "threshold_smoothness",
         }
         assert all(
             value >= 0.0 for value in history[0]["validation_loss"].values()
         )
         assert "loss" not in history[0]["validation"]
+        for invalid_epochs in (0, -1):
+            with pytest.raises(ValueError, match="positive"):
+                resume_training(
+                    config,
+                    Path(initial["run_dir"]) / "best.pt",
+                    additional_epochs=invalid_epochs,
+                    output_dir=output_root / f"invalid-{invalid_epochs}",
+                )
 
 
 def test_amp_is_enabled_only_when_requested_on_cuda() -> None:
@@ -357,6 +650,7 @@ def test_training_forwards_all_events_before_sampling_loss(
 ) -> None:
     model_event_counts: list[int] = []
     loss_event_counts: list[int] = []
+    calibration_argument_sets: list[set[str]] = []
     original_model_forward = SpatioTemporalConeDetector.forward
     original_loss_forward = EventFocalDiceLoss.forward
 
@@ -376,6 +670,19 @@ def test_training_forwards_all_events_before_sampling_loss(
         **kwargs: object,
     ) -> dict[str, torch.Tensor]:
         loss_event_counts.append(len(logits))
+        calibration_argument_sets.append(
+            {
+                name
+                for name in (
+                    "global_threshold_offsets",
+                    "local_threshold_offsets",
+                    "threshold_group_indices",
+                    "threshold_group_batch_indices",
+                    "threshold_neighbor_edges",
+                )
+                if name in kwargs
+            }
+        )
         return original_loss_forward(
             self,
             logits,
@@ -405,3 +712,330 @@ def test_training_forwards_all_events_before_sampling_loss(
 
     assert model_event_counts == [12, 4]
     assert loss_event_counts == [4, 4]
+    assert calibration_argument_sets == [
+        {
+            "global_threshold_offsets",
+            "local_threshold_offsets",
+            "threshold_group_indices",
+            "threshold_group_batch_indices",
+            "threshold_neighbor_edges",
+        },
+        {
+            "global_threshold_offsets",
+            "local_threshold_offsets",
+            "threshold_group_indices",
+            "threshold_group_batch_indices",
+            "threshold_neighbor_edges",
+        },
+    ]
+
+
+def test_schema4_detector_initialization_records_provenance_and_trains_calibrator() -> None:
+    with TemporaryDirectory(dir=Path.cwd()) as directory:
+        temporary_root = Path(directory)
+        data_root = temporary_root / "data"
+        train_root = data_root / "train"
+        val_root = data_root / "val"
+        train_root.mkdir(parents=True)
+        val_root.mkdir(parents=True)
+        _write_sequence(train_root / "train_000.npz", 0)
+        _write_sequence(val_root / "val_000.npz", 1)
+        output_root = temporary_root / "outputs"
+
+        control = run_training(
+            _config(data_root, output_root),
+            output_dir=output_root / "control",
+        )
+        control_checkpoint = Path(control["run_dir"]) / "best.pt"
+        legacy_checkpoint = output_root / "legacy-schema4.pt"
+        legacy = torch.load(
+            control_checkpoint, map_location="cpu", weights_only=True
+        )
+        legacy["schema_version"] = 4
+        for name in (
+            "adaptive_threshold_mode",
+            "threshold_hidden_dim",
+            "threshold_time_bins",
+            "threshold_max_global_offset",
+            "threshold_max_local_offset",
+        ):
+            legacy["model_config"].pop(name)
+        torch.save(legacy, legacy_checkpoint)
+
+        adaptive = _adaptive_config(data_root, output_root)
+        trained = run_training(
+            adaptive,
+            output_dir=output_root / "adaptive",
+            initialize_detector=legacy_checkpoint,
+        )
+        run_dir = Path(trained["run_dir"])
+        checkpoint = torch.load(
+            run_dir / "best.pt", map_location="cpu", weights_only=True
+        )
+        history = json.loads(
+            (run_dir / "history.json").read_text(encoding="utf-8")
+        )
+
+        assert trained["training_stage"] == "calibrator"
+        assert trained["trainable_parameter_count"] < trained["parameter_count"]
+        assert checkpoint["schema_version"] == 5
+        assert checkpoint["initialized_from"] == str(legacy_checkpoint.resolve())
+        assert checkpoint["initialized_from_sha256"] == __import__(
+            "hashlib"
+        ).sha256(legacy_checkpoint.read_bytes()).hexdigest()
+        assert (run_dir / "initialized_from.txt").read_text(
+            encoding="utf-8"
+        ).startswith(f"checkpoint: {legacy_checkpoint.resolve()}\nsha256: ")
+        assert set(history[0]["train_loss"]).issuperset(
+            {
+                "threshold_magnitude",
+                "threshold_center",
+                "threshold_smoothness",
+            }
+        )
+        assert history[0]["learning_rates"] == {
+            "calibrator": pytest.approx(adaptive.training.learning_rate)
+        }
+        assert history[0]["validation_loss"]["threshold_magnitude"] > 0.0
+        assert all(
+            torch.equal(checkpoint["model_state"][name], value)
+            for name, value in legacy["model_state"].items()
+        )
+        assert any(
+            bool(value.abs().max() > 0)
+            for name, value in checkpoint["model_state"].items()
+            if name.startswith("calibrator.")
+        )
+        assert "calibration" in history[0]["validation"]
+        assert set(history[0]["validation"]["calibration"]) == {
+            "global",
+            "local",
+            "per_sequence_global_mean",
+        }
+        first = evaluate_checkpoint(adaptive, run_dir / "best.pt")
+        second = evaluate_checkpoint(adaptive, run_dir / "best.pt")
+        assert first["calibration"] == second["calibration"]
+        assert first == json.loads(
+            (run_dir / "metrics.json").read_text(encoding="utf-8")
+        )
+        submission = generate_submission_package(
+            adaptive,
+            run_dir / "best.pt",
+            output_root / "submission",
+        )
+        assert submission.is_file()
+
+        resumed = resume_training(
+            adaptive,
+            run_dir / "best.pt",
+            additional_epochs=1,
+            output_dir=output_root / "resumed",
+        )
+        assert Path(resumed["run_dir"]).joinpath("best.pt").is_file()
+
+        schema5_initialized = run_training(
+            adaptive,
+            output_dir=output_root / "adaptive-schema5-source",
+            initialize_detector=control_checkpoint,
+        )
+        assert Path(schema5_initialized["run_dir"]).joinpath("best.pt").is_file()
+
+
+def test_schema4_none_checkpoint_supports_control_evaluation_and_reoptimization() -> None:
+    with TemporaryDirectory(dir=Path.cwd()) as directory:
+        temporary_root = Path(directory)
+        data_root = temporary_root / "data"
+        train_root = data_root / "train"
+        val_root = data_root / "val"
+        train_root.mkdir(parents=True)
+        val_root.mkdir(parents=True)
+        _write_sequence(train_root / "train_000.npz", 0)
+        _write_sequence(val_root / "val_000.npz", 1)
+        output_root = temporary_root / "outputs"
+        base_config = _config(data_root, output_root)
+        config = replace(
+            base_config,
+            evaluation=replace(
+                base_config.evaluation,
+                optimize_threshold=False,
+            ),
+        )
+        summary = run_training(config, output_dir=output_root / "control")
+        checkpoint_path = Path(summary["run_dir"]) / "best.pt"
+        checkpoint = torch.load(
+            checkpoint_path, map_location="cpu", weights_only=True
+        )
+        checkpoint["schema_version"] = 4
+        checkpoint["decision_threshold"] = 0.99
+        for name in (
+            "adaptive_threshold_mode",
+            "threshold_hidden_dim",
+            "threshold_time_bins",
+            "threshold_max_global_offset",
+            "threshold_max_local_offset",
+        ):
+            checkpoint["model_config"].pop(name)
+        torch.save(checkpoint, checkpoint_path)
+
+        stored = evaluate_checkpoint(config, checkpoint_path)
+        optimized = evaluate_checkpoint(
+            config,
+            checkpoint_path,
+            reoptimize_threshold=True,
+        )
+
+        assert stored["threshold"] == pytest.approx(0.99)
+        assert optimized["threshold"] != pytest.approx(0.99)
+        assert optimized["threshold"] != pytest.approx(
+            config.inference.sigmoid_threshold
+        )
+        assert stored["calibration"]["global"]["max_abs"] == 0.0
+        assert optimized["calibration"]["local"]["p95_abs"] == 0.0
+        submission = generate_submission_package(
+            config,
+            checkpoint_path,
+            output_root / "legacy-submission",
+        )
+        assert submission.is_file()
+
+
+def test_joint_history_records_head_learning_rate_and_both_groups() -> None:
+    with TemporaryDirectory(dir=Path.cwd()) as directory:
+        temporary_root = Path(directory)
+        data_root = temporary_root / "data"
+        (data_root / "train").mkdir(parents=True)
+        (data_root / "val").mkdir(parents=True)
+        _write_sequence(data_root / "train" / "train_000.npz", 0)
+        _write_sequence(data_root / "val" / "val_000.npz", 1)
+        config = _adaptive_config(
+            data_root,
+            temporary_root / "outputs",
+            stage="joint",
+        )
+
+        summary = run_training(
+            config,
+            output_dir=temporary_root / "outputs" / "joint",
+        )
+        history = json.loads(
+            Path(summary["run_dir"])
+            .joinpath("history.json")
+            .read_text(encoding="utf-8")
+        )
+
+        assert history[0]["learning_rate"] == pytest.approx(
+            config.training.learning_rate
+        )
+        assert history[0]["learning_rates"] == {
+            "detector": pytest.approx(config.training.detector_learning_rate),
+            "calibrator": pytest.approx(config.training.learning_rate),
+        }
+
+
+def test_calibrator_training_requires_detector_initialization() -> None:
+    with TemporaryDirectory(dir=Path.cwd()) as directory:
+        temporary_root = Path(directory)
+        data_root = temporary_root / "data"
+        (data_root / "train").mkdir(parents=True)
+        (data_root / "val").mkdir(parents=True)
+        _write_sequence(data_root / "train" / "train_000.npz", 0)
+        _write_sequence(data_root / "val" / "val_000.npz", 1)
+        config = _adaptive_config(data_root, temporary_root / "outputs")
+
+        with pytest.raises(ValueError, match="initialize_detector"):
+            run_training(config, output_dir=temporary_root / "outputs" / "run")
+
+
+@pytest.mark.parametrize("stage", ("full", "joint"))
+def test_detector_initialization_is_restricted_to_calibrator_stage(
+    stage: str,
+) -> None:
+    with TemporaryDirectory(dir=Path.cwd()) as directory:
+        temporary_root = Path(directory)
+        data_root = temporary_root / "data"
+        (data_root / "train").mkdir(parents=True)
+        (data_root / "val").mkdir(parents=True)
+        _write_sequence(data_root / "train" / "train_000.npz", 0)
+        _write_sequence(data_root / "val" / "val_000.npz", 1)
+        config = _adaptive_config(
+            data_root,
+            temporary_root / "outputs",
+            stage=stage,
+        )
+
+        with pytest.raises(ValueError, match="calibrator training stage"):
+            run_training(
+                config,
+                output_dir=temporary_root / "outputs" / stage,
+                initialize_detector=temporary_root / "detector.pt",
+            )
+
+
+def test_detector_initialization_rejects_schema3() -> None:
+    with TemporaryDirectory(dir=Path.cwd()) as directory:
+        temporary_root = Path(directory)
+        data_root = temporary_root / "data"
+        (data_root / "train").mkdir(parents=True)
+        (data_root / "val").mkdir(parents=True)
+        _write_sequence(data_root / "train" / "train_000.npz", 0)
+        _write_sequence(data_root / "val" / "val_000.npz", 1)
+        config = _adaptive_config(data_root, temporary_root / "outputs")
+        checkpoint = temporary_root / "schema3.pt"
+        torch.save({"schema_version": 3}, checkpoint)
+
+        with pytest.raises(ValueError, match="schema version"):
+            run_training(
+                config,
+                output_dir=temporary_root / "outputs" / "run",
+                initialize_detector=checkpoint,
+            )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    (
+        ("config", "model configuration"),
+        ("shape", "shape mismatch"),
+        ("missing", "missing="),
+        ("unexpected", "unexpected="),
+    ),
+)
+def test_detector_initialization_rejects_incompatible_detector_state(
+    mutation: str,
+    message: str,
+) -> None:
+    with TemporaryDirectory(dir=Path.cwd()) as directory:
+        temporary_root = Path(directory)
+        data_root = temporary_root / "data"
+        (data_root / "train").mkdir(parents=True)
+        (data_root / "val").mkdir(parents=True)
+        _write_sequence(data_root / "train" / "train_000.npz", 0)
+        _write_sequence(data_root / "val" / "val_000.npz", 1)
+        output_root = temporary_root / "outputs"
+        control = run_training(
+            _config(data_root, output_root),
+            output_dir=output_root / "control",
+        )
+        source_path = Path(control["run_dir"]) / "best.pt"
+        checkpoint = torch.load(
+            source_path, map_location="cpu", weights_only=True
+        )
+        detector_key = next(iter(checkpoint["model_state"]))
+        if mutation == "config":
+            checkpoint["model_config"]["max_neighbors_per_cone"] += 1
+        elif mutation == "shape":
+            value = checkpoint["model_state"][detector_key]
+            checkpoint["model_state"][detector_key] = value.reshape(-1)[:1]
+        elif mutation == "missing":
+            checkpoint["model_state"].pop(detector_key)
+        else:
+            checkpoint["model_state"]["detector.unexpected"] = torch.zeros(1)
+        incompatible = output_root / f"{mutation}.pt"
+        torch.save(checkpoint, incompatible)
+
+        with pytest.raises(ValueError, match=message):
+            run_training(
+                _adaptive_config(data_root, output_root),
+                output_dir=output_root / f"adaptive-{mutation}",
+                initialize_detector=incompatible,
+            )

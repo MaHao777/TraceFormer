@@ -28,12 +28,20 @@ def main() -> None:
     parser.add_argument(
         "--quiet", action="store_true", help="hide per-file progress messages"
     )
-    parser.add_argument(
+    checkpoint_group = parser.add_mutually_exclusive_group()
+    checkpoint_group.add_argument(
         "--resume",
         type=str,
         default=None,
         metavar="BEST_PT",
         help="resume training from a best.pt checkpoint",
+    )
+    checkpoint_group.add_argument(
+        "--initialize-detector",
+        type=str,
+        default=None,
+        metavar="BEST_PT",
+        help="initialize detector weights without resuming training",
     )
     parser.add_argument(
         "--additional-epochs",
@@ -44,6 +52,13 @@ def main() -> None:
     )
     arguments = parser.parse_args()
     try:
+        if arguments.additional_epochs is not None and not arguments.resume:
+            parser.error("--additional-epochs is only valid with --resume")
+        if (
+            arguments.additional_epochs is not None
+            and arguments.additional_epochs <= 0
+        ):
+            parser.error("--additional-epochs must be positive")
         config = load_config(arguments.config)
         if arguments.resume:
             additional_epochs = (
@@ -65,6 +80,7 @@ def main() -> None:
                 output_dir=arguments.output_dir,
                 device=arguments.device,
                 progress=not arguments.quiet,
+                initialize_detector=arguments.initialize_detector,
             )
     except (OSError, RuntimeError, ValueError) as error:
         parser.error(str(error))

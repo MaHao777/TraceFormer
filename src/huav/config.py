@@ -71,8 +71,10 @@ class DatasetConfig:
 @dataclass(frozen=True)
 class TrainingConfig:
     device: str = "cpu"
+    training_stage: str = "full"
     epochs: int = 3
     learning_rate: float = 0.001
+    detector_learning_rate: float | None = None
     weight_decay: float = 0.0001
     seed: int = 37
     background_ratio: int = 10
@@ -233,9 +235,36 @@ class HUAVConfig:
             raise ValueError("duration_ms must be positive")
         if self.training.device not in {"cpu", "cuda"}:
             raise ValueError("training device must be 'cpu' or 'cuda'")
+        if self.training.training_stage not in {"full", "calibrator", "joint"}:
+            raise ValueError(
+                "training_stage must be one of ['calibrator', 'full', 'joint']"
+            )
+        if (
+            self.training.training_stage in {"calibrator", "joint"}
+            and self.model.adaptive_threshold_mode == "none"
+        ):
+            raise ValueError(
+                "calibrator and joint training stages require adaptive thresholding"
+            )
         _positive_integer(self.training.epochs, "epochs")
         if _finite_real(self.training.learning_rate, "learning_rate") <= 0:
             raise ValueError("learning_rate must be positive")
+        detector_learning_rate = self.training.detector_learning_rate
+        if self.training.training_stage == "joint":
+            if (
+                detector_learning_rate is None
+                or _finite_real(
+                    detector_learning_rate, "detector_learning_rate"
+                )
+                <= 0
+            ):
+                raise ValueError(
+                    "joint training requires a positive detector_learning_rate"
+                )
+        elif detector_learning_rate is not None:
+            raise ValueError(
+                "detector_learning_rate is only valid for joint training"
+            )
         if _finite_real(self.training.weight_decay, "weight_decay") < 0:
             raise ValueError("weight_decay must be non-negative")
         if isinstance(self.training.seed, bool) or not isinstance(self.training.seed, Integral):

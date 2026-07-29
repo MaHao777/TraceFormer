@@ -27,6 +27,11 @@ def main() -> None:
     parser.add_argument(
         "--quiet", action="store_true", help="hide per-file progress messages"
     )
+    parser.add_argument(
+        "--reoptimize-threshold",
+        action="store_true",
+        help="ignore the stored threshold and run configured threshold search",
+    )
     arguments = parser.parse_args()
     try:
         config = load_config(arguments.config)
@@ -35,6 +40,7 @@ def main() -> None:
             arguments.checkpoint,
             device=arguments.device,
             progress=not arguments.quiet,
+            reoptimize_threshold=arguments.reoptimize_threshold,
         )
     except (OSError, RuntimeError, ValueError) as error:
         parser.error(str(error))

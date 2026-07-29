@@ -6,6 +6,9 @@ import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from huav.cli import train as train_cli
+from huav.config import HUAVConfig
+
 COMMANDS = ("inspect", "train", "evaluate", "predict", "package", "check_gpu")
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -48,10 +51,65 @@ def test_train_and_evaluate_expose_runtime_arguments() -> None:
     assert train_help.returncode == 0
     assert "--device" in train_help.stdout
     assert "--output-dir" in train_help.stdout
+    assert "--initialize-detector" in train_help.stdout
 
     evaluate_help = run("evaluate", "--help")
     assert evaluate_help.returncode == 0
     assert "--checkpoint" in evaluate_help.stdout
+    assert "--reoptimize-threshold" in evaluate_help.stdout
+
+
+def test_train_rejects_resume_with_detector_initialization() -> None:
+    result = run(
+        "train",
+        "--resume",
+        "resume.pt",
+        "--initialize-detector",
+        "detector.pt",
+    )
+    assert result.returncode != 0
+    assert "not allowed with argument" in result.stderr
+
+
+def test_train_rejects_additional_epochs_without_resume() -> None:
+    result = run("train", "--additional-epochs", "2")
+    assert result.returncode != 0
+    assert "--additional-epochs is only valid with --resume" in result.stderr
+
+
+def test_train_rejects_non_positive_additional_epochs() -> None:
+    for value in ("0", "-1"):
+        result = run(
+            "train",
+            "--resume",
+            "checkpoint.pt",
+            "--additional-epochs",
+            value,
+        )
+        assert result.returncode != 0
+        assert "--additional-epochs must be positive" in result.stderr
+
+
+def test_train_dispatches_detector_initialization_to_new_training(
+    monkeypatch,
+) -> None:
+    received: dict[str, object] = {}
+
+    def fake_run_training(config: HUAVConfig, **kwargs: object) -> dict[str, str]:
+        received.update(kwargs)
+        return {"run_dir": "run"}
+
+    monkeypatch.setattr(train_cli, "load_config", lambda _: HUAVConfig.default())
+    monkeypatch.setattr(train_cli, "run_training", fake_run_training)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["huav-train", "--initialize-detector", "detector.pt", "--quiet"],
+    )
+
+    train_cli.main()
+
+    assert received["initialize_detector"] == "detector.pt"
 
 
 def test_malformed_yaml_is_a_concise_cli_parser_error_without_traceback() -> None:
