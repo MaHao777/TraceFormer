@@ -36,6 +36,13 @@ class AdaptiveThresholdCalibrator(nn.Module):
     statistic_dim = 7
     summary_dim = 5
     coordinate_dim = 3
+    neighbor_delta_values = tuple(
+        (delta_x, delta_y, delta_time)
+        for delta_time in (-1, 0, 1)
+        for delta_y in (-1, 0, 1)
+        for delta_x in (-1, 0, 1)
+        if (delta_x, delta_y, delta_time) != (0, 0, 0)
+    )
 
     def __init__(
         self,
@@ -111,6 +118,11 @@ class AdaptiveThresholdCalibrator(nn.Module):
             nn.GELU(),
             nn.Linear(hidden_dim, hidden_dim, bias=False),
         )
+        self.register_buffer(
+            "neighbor_deltas",
+            torch.tensor(self.neighbor_delta_values, dtype=torch.long),
+            persistent=False,
+        )
 
         nn.init.zeros_(self.local_head[-1].weight)
         nn.init.zeros_(self.local_head[-1].bias)
@@ -156,8 +168,6 @@ class AdaptiveThresholdCalibrator(nn.Module):
         ):
             if not tensor.is_floating_point():
                 raise TypeError(f"{name} must have a floating dtype")
-            if tensor.dtype != events.dtype:
-                raise TypeError("all floating calibrator inputs must have the same dtype")
         integer_dtypes = {
             torch.uint8,
             torch.int8,
@@ -198,8 +208,9 @@ class AdaptiveThresholdCalibrator(nn.Module):
         base_logits: torch.Tensor,
     ) -> AdaptiveThresholdResult:
         device = events.device
-        dtype = events.dtype
-        empty_events = torch.empty((0,), dtype=dtype, device=device)
+        empty_events = torch.empty(
+            (0,), dtype=base_logits.dtype, device=device
+        )
         return AdaptiveThresholdResult(
             final_logits=base_logits,
             base_event_logits=base_logits,
@@ -209,7 +220,7 @@ class AdaptiveThresholdCalibrator(nn.Module):
             group_coords=torch.empty((0, 3), dtype=torch.long, device=device),
             group_batch_indices=torch.empty((0,), dtype=torch.long, device=device),
             group_descriptors=torch.empty(
-                (0, self.descriptor_dim), dtype=dtype, device=device
+                (0, self.descriptor_dim), dtype=torch.float32, device=device
             ),
             neighbor_edge_indices=torch.empty(
                 (2, 0), dtype=torch.long, device=device
@@ -289,10 +300,10 @@ class AdaptiveThresholdCalibrator(nn.Module):
         group_coords: torch.Tensor,
     ) -> torch.Tensor:
         group_count = len(counts)
-        dtype = events.dtype
-        detached_features = encoded_parent_features.detach()
-        detached_statistics = event_token_statistics.detach()
-        detached_logits = base_logits.detach()
+        dtype = torch.float32
+        detached_features = encoded_parent_features.detach().to(dtype)
+        detached_statistics = event_token_statistics.detach().to(dtype)
+        detached_logits = base_logits.detach().to(dtype)
         float_counts = counts.to(dtype)
         feature_mean = self._group_sum(
             detached_features, inverse, group_count
@@ -371,7 +382,7 @@ class AdaptiveThresholdCalibrator(nn.Module):
             dim=1,
         )
 
-    def _neighbor_edges(
+    def _neighbor_source_table(
         self,
         group_keys: torch.Tensor,
         group_coords: torch.Tensor,
@@ -380,95 +391,117 @@ class AdaptiveThresholdCalibrator(nn.Module):
         group_count = len(group_keys)
         device = group_keys.device
         all_groups = torch.arange(group_count, dtype=torch.long, device=device)
-        targets: list[torch.Tensor] = []
-        sources: list[torch.Tensor] = []
+        source_table = torch.full(
+            (group_count, len(self.neighbor_delta_values)),
+            -1,
+            dtype=torch.long,
+            device=device,
+        )
         groups_per_batch = (
             self.threshold_time_bins * self.num_y_blocks * self.num_x_blocks
         )
-        for delta_time in (-1, 0, 1):
-            for delta_y in (-1, 0, 1):
-                for delta_x in (-1, 0, 1):
-                    if delta_x == delta_y == delta_time == 0:
-                        continue
-                    candidate_x = group_coords[:, 0] + delta_x
-                    candidate_y = group_coords[:, 1] + delta_y
-                    candidate_time = group_coords[:, 2] + delta_time
-                    valid = (
-                        (candidate_x >= 0)
-                        & (candidate_x < self.num_x_blocks)
-                        & (candidate_y >= 0)
-                        & (candidate_y < self.num_y_blocks)
-                        & (candidate_time >= 0)
-                        & (candidate_time < self.threshold_time_bins)
-                    )
-                    valid_targets = all_groups[valid]
-                    if len(valid_targets) == 0:
-                        continue
-                    candidate_spatial_keys = (
-                        (
-                            candidate_time[valid] * self.num_y_blocks
-                            + candidate_y[valid]
-                        )
-                        * self.num_x_blocks
-                        + candidate_x[valid]
-                    )
-                    candidate_keys = (
-                        group_batch_indices[valid] * groups_per_batch
-                        + candidate_spatial_keys
-                    )
-                    positions = torch.searchsorted(group_keys, candidate_keys)
-                    safe_positions = positions.clamp(max=group_count - 1)
-                    found = (positions < group_count) & (
-                        group_keys[safe_positions] == candidate_keys
-                    )
-                    if torch.any(found):
-                        targets.append(valid_targets[found])
-                        sources.append(positions[found])
-        if not targets:
-            return torch.empty((2, 0), dtype=torch.long, device=device)
-        return torch.stack((torch.cat(targets), torch.cat(sources)), dim=0)
+        for direction, (delta_x, delta_y, delta_time) in enumerate(
+            self.neighbor_delta_values
+        ):
+            candidate_x = group_coords[:, 0] + delta_x
+            candidate_y = group_coords[:, 1] + delta_y
+            candidate_time = group_coords[:, 2] + delta_time
+            valid = (
+                (candidate_x >= 0)
+                & (candidate_x < self.num_x_blocks)
+                & (candidate_y >= 0)
+                & (candidate_y < self.num_y_blocks)
+                & (candidate_time >= 0)
+                & (candidate_time < self.threshold_time_bins)
+            )
+            valid_targets = all_groups[valid]
+            if len(valid_targets) == 0:
+                continue
+            candidate_spatial_keys = (
+                (candidate_time[valid] * self.num_y_blocks + candidate_y[valid])
+                * self.num_x_blocks
+                + candidate_x[valid]
+            )
+            candidate_keys = (
+                group_batch_indices[valid] * groups_per_batch
+                + candidate_spatial_keys
+            )
+            positions = torch.searchsorted(group_keys, candidate_keys)
+            safe_positions = positions.clamp(max=group_count - 1)
+            found = (positions < group_count) & (
+                group_keys[safe_positions] == candidate_keys
+            )
+            if torch.any(found):
+                source_table[valid_targets[found], direction] = positions[found]
+        return source_table
+
+    @staticmethod
+    def _edges_from_neighbor_table(source_table: torch.Tensor) -> torch.Tensor:
+        valid = source_table >= 0
+        if not torch.any(valid):
+            return torch.empty(
+                (2, 0), dtype=torch.long, device=source_table.device
+            )
+        targets = torch.arange(
+            len(source_table), dtype=torch.long, device=source_table.device
+        )[:, None].expand_as(source_table)
+        return torch.stack((targets[valid], source_table[valid]), dim=0)
 
     def _neighbor_context(
         self,
         group_embeddings: torch.Tensor,
-        group_coords: torch.Tensor,
-        edge_indices: torch.Tensor,
+        source_table: torch.Tensor,
     ) -> torch.Tensor:
-        if edge_indices.shape[1] == 0:
+        valid_table = source_table >= 0
+        if not torch.any(valid_table):
             return torch.zeros_like(group_embeddings)
-        targets, sources = edge_indices
-        relative_coords = (
-            group_coords[sources] - group_coords[targets]
-        ).to(group_embeddings.dtype)
-        relative_features = self.relative_encoder(relative_coords)
-        queries = self.neighbor_query(group_embeddings[targets])
-        keys = self.neighbor_key(group_embeddings[sources]) + relative_features
-        scores = torch.sum(queries * keys, dim=1) / math.sqrt(self.hidden_dim)
-
-        group_count = len(group_embeddings)
-        maximum = torch.full(
-            (group_count,),
-            -torch.inf,
-            dtype=scores.dtype,
-            device=scores.device,
+        queries = self.neighbor_query(group_embeddings)
+        keys = self.neighbor_key(group_embeddings)
+        values = self.neighbor_value(group_embeddings)
+        relative_features = self.relative_encoder(
+            self.neighbor_deltas.to(group_embeddings.dtype)
         )
-        maximum.scatter_reduce_(
-            0, targets, scores, reduce="amax", include_self=True
+        score_columns = []
+        for direction in range(source_table.shape[1]):
+            sources = source_table[:, direction]
+            valid = sources >= 0
+            safe_sources = sources.clamp_min(0)
+            direction_scores = torch.sum(
+                queries
+                * (keys[safe_sources] + relative_features[direction]),
+                dim=1,
+            ) / math.sqrt(self.hidden_dim)
+            score_columns.append(
+                torch.where(
+                    valid,
+                    direction_scores,
+                    torch.full_like(direction_scores, -torch.inf),
+                )
+            )
+        scores = torch.stack(score_columns, dim=1)
+        row_maximum = scores.amax(dim=1)
+        row_maximum = torch.where(
+            valid_table.any(dim=1),
+            row_maximum,
+            torch.zeros_like(row_maximum),
         )
-        unnormalized = torch.exp(scores - maximum[targets])
-        normalizers = scores.new_zeros(group_count)
-        normalizers.scatter_add_(0, targets, unnormalized)
-        weights = unnormalized / normalizers[targets].clamp_min(
+        unnormalized = torch.exp(scores - row_maximum[:, None])
+        normalizers = unnormalized.sum(dim=1, keepdim=True)
+        weights = unnormalized / normalizers.clamp_min(
             torch.finfo(scores.dtype).tiny
         )
-        values = self.neighbor_value(group_embeddings[sources]) + relative_features
-        weighted_values = values * weights[:, None]
         context = torch.zeros_like(group_embeddings)
-        context.scatter_add_(
-            0,
-            targets[:, None].expand(-1, self.hidden_dim),
-            weighted_values,
+        all_targets = torch.arange(
+            len(source_table), dtype=torch.long, device=source_table.device
         )
+        for direction in range(source_table.shape[1]):
+            sources = source_table[:, direction]
+            valid = sources >= 0
+            targets = all_targets[valid]
+            weighted_values = (
+                values[sources[valid]] + relative_features[direction]
+            ) * weights[valid, direction, None]
+            context.index_add_(0, targets, weighted_values)
         return context
 
     def _global_offsets(
@@ -538,19 +571,42 @@ class AdaptiveThresholdCalibrator(nn.Module):
             counts,
             group_coords,
         )
+        empty_edges = torch.empty(
+            (2, 0), dtype=torch.long, device=events.device
+        )
+        if self.mode == "none":
+            zero_event_offsets = torch.zeros_like(base_logits)
+            return AdaptiveThresholdResult(
+                final_logits=base_logits,
+                base_event_logits=base_logits,
+                global_event_offsets=zero_event_offsets,
+                local_event_offsets=zero_event_offsets.clone(),
+                event_group_indices=inverse,
+                group_coords=group_coords,
+                group_batch_indices=group_batches,
+                group_descriptors=descriptors,
+                neighbor_edge_indices=empty_edges,
+            )
+
         projection_descriptors = descriptors.clamp(
             min=-self.projection_input_bound,
             max=self.projection_input_bound,
-        )
+        ).to(self.descriptor_projection[0].weight.dtype)
         group_embeddings = self.descriptor_projection(projection_descriptors)
         if not torch.isfinite(group_embeddings).all():
             raise FloatingPointError(
                 "adaptive threshold descriptor projection produced "
                 "a non-finite learned embedding"
             )
-        neighbor_edges = self._neighbor_edges(
-            group_keys, group_coords, group_batches
-        )
+        neighbor_source_table: torch.Tensor | None = None
+        neighbor_edges = empty_edges
+        if self.mode in {"local_neighbor", "hierarchical"}:
+            neighbor_source_table = self._neighbor_source_table(
+                group_keys, group_coords, group_batches
+            )
+            neighbor_edges = self._edges_from_neighbor_table(
+                neighbor_source_table
+            )
         zero_group_offsets = base_logits.new_zeros(len(group_coords))
 
         if self.mode in {"global", "hierarchical"}:
@@ -563,8 +619,9 @@ class AdaptiveThresholdCalibrator(nn.Module):
         if self.mode in {"local", "local_neighbor", "hierarchical"}:
             local_input = group_embeddings
             if self.mode in {"local_neighbor", "hierarchical"}:
+                assert neighbor_source_table is not None
                 local_input = local_input + self._neighbor_context(
-                    group_embeddings, group_coords, neighbor_edges
+                    group_embeddings, neighbor_source_table
                 )
             local_group_offsets = self.max_local_offset * torch.tanh(
                 self.local_head(local_input).squeeze(1)
@@ -572,14 +629,11 @@ class AdaptiveThresholdCalibrator(nn.Module):
         else:
             local_group_offsets = zero_group_offsets
 
-        global_event_offsets = global_group_offsets[inverse]
-        local_event_offsets = local_group_offsets[inverse]
-        if self.mode == "none":
-            final_logits = base_logits
-        else:
-            final_logits = (
-                base_logits - global_event_offsets - local_event_offsets
-            )
+        global_event_offsets = global_group_offsets[inverse].to(base_logits.dtype)
+        local_event_offsets = local_group_offsets[inverse].to(base_logits.dtype)
+        final_logits = (
+            base_logits - global_event_offsets - local_event_offsets
+        )
         return AdaptiveThresholdResult(
             final_logits=final_logits,
             base_event_logits=base_logits,
