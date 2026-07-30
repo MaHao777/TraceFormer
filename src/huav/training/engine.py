@@ -3,13 +3,10 @@
 from __future__ import annotations
 
 import json
-import math
 import random
-from collections.abc import Mapping
 from dataclasses import asdict
 from datetime import datetime
 from hashlib import sha256
-from numbers import Integral, Real
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -19,7 +16,7 @@ import torch
 import yaml
 from torch.nn.utils import clip_grad_norm_
 
-from huav.config import HUAVConfig, ModelConfig
+from huav.config import HUAVConfig
 from huav.data import EventSequence, LoadedEventSequence, NPZEventDataset
 from huav.inference import (
     generate_submission_rows,
@@ -37,25 +34,7 @@ from .metrics import (
 from .runtime import prepare_device
 from .sampling import sample_event_indices
 
-CHECKPOINT_SCHEMA_VERSION = 5
-LEGACY_READ_ONLY_SCHEMA_VERSION = 4
-ADAPTIVE_MODEL_FIELDS = {
-    "adaptive_threshold_mode",
-    "threshold_hidden_dim",
-    "threshold_time_bins",
-    "threshold_max_global_offset",
-    "threshold_max_local_offset",
-}
-LOSS_NAMES = (
-    "total",
-    "focal",
-    "dice",
-    "object_frame",
-    "false_alarm",
-    "threshold_magnitude",
-    "threshold_center",
-    "threshold_smoothness",
-)
+CHECKPOINT_SCHEMA_VERSION = 4
 
 
 def build_model(config: HUAVConfig) -> SpatioTemporalConeDetector:
@@ -78,478 +57,7 @@ def build_model(config: HUAVConfig) -> SpatioTemporalConeDetector:
         causal_mode=config.model.causal_mode,
         direction_dropout=config.model.direction_dropout,
         debug_attention_stats=config.model.debug_attention_stats,
-        adaptive_threshold_mode=config.model.adaptive_threshold_mode,
-        threshold_hidden_dim=config.model.threshold_hidden_dim,
-        threshold_time_bins=config.model.threshold_time_bins,
-        threshold_max_global_offset=config.model.threshold_max_global_offset,
-        threshold_max_local_offset=config.model.threshold_max_local_offset,
     )
-
-
-def _configure_training_stage(
-    model: SpatioTemporalConeDetector,
-    training_stage: str,
-) -> int:
-    """Set module modes and gradients for one training epoch."""
-    model.train()
-    if training_stage == "full":
-        for parameter in model.parameters():
-            parameter.requires_grad_(True)
-    elif training_stage == "calibrator":
-        if model.calibrator is None:
-            raise ValueError("calibrator training requires an adaptive calibrator")
-        for module in (model.tokenizer, model.encoder, model.decoder):
-            module.eval()
-            for parameter in module.parameters():
-                parameter.requires_grad_(False)
-        model.calibrator.train()
-        for parameter in model.calibrator.parameters():
-            parameter.requires_grad_(True)
-    elif training_stage == "joint":
-        if model.calibrator is None:
-            raise ValueError("joint training requires an adaptive calibrator")
-        for parameter in model.parameters():
-            parameter.requires_grad_(True)
-    else:
-        raise ValueError(f"unsupported training stage: {training_stage}")
-    return sum(
-        parameter.numel()
-        for parameter in model.parameters()
-        if parameter.requires_grad
-    )
-
-
-def _make_optimizer(
-    model: SpatioTemporalConeDetector,
-    config: HUAVConfig,
-) -> torch.optim.AdamW:
-    training = config.training
-    if training.training_stage == "joint":
-        if model.calibrator is None or training.detector_learning_rate is None:
-            raise ValueError("joint training requires detector and calibrator")
-        detector_parameters = [
-            parameter
-            for name, parameter in model.named_parameters()
-            if not name.startswith("calibrator.") and parameter.requires_grad
-        ]
-        calibrator_parameters = [
-            parameter
-            for name, parameter in model.named_parameters()
-            if name.startswith("calibrator.") and parameter.requires_grad
-        ]
-        groups = [
-            {
-                "params": detector_parameters,
-                "lr": training.detector_learning_rate,
-                "name": "detector",
-            },
-            {
-                "params": calibrator_parameters,
-                "lr": training.learning_rate,
-                "name": "calibrator",
-            },
-        ]
-    else:
-        groups = [
-            {
-                "params": [
-                    parameter
-                    for parameter in model.parameters()
-                    if parameter.requires_grad
-                ],
-                "lr": training.learning_rate,
-                "name": training.training_stage,
-            }
-        ]
-    return torch.optim.AdamW(
-        groups,
-        weight_decay=training.weight_decay,
-    )
-
-
-def _make_scheduler(
-    optimizer: torch.optim.Optimizer,
-    *,
-    epochs: int,
-    minimum_ratio: float,
-) -> torch.optim.lr_scheduler.LambdaLR:
-    def multiplier(step: int) -> float:
-        progress = min(step, epochs) / max(1, epochs)
-        return minimum_ratio + (1.0 - minimum_ratio) * (
-            1.0 + math.cos(math.pi * progress)
-        ) / 2.0
-
-    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=multiplier)
-
-
-def _criterion(config: HUAVConfig) -> EventFocalDiceLoss:
-    return EventFocalDiceLoss(
-        focal_alpha=config.loss.focal_alpha,
-        focal_gamma=config.loss.focal_gamma,
-        lambda_dice=config.loss.lambda_dice,
-        lambda_object_frame=config.loss.lambda_object_frame,
-        object_frame_logit_margin=config.loss.object_frame_logit_margin,
-        lambda_false_alarm=config.loss.lambda_false_alarm,
-        false_alarm_logit_margin=config.loss.false_alarm_logit_margin,
-        false_alarm_topk_per_frame=config.loss.false_alarm_topk_per_frame,
-        lambda_threshold_magnitude=config.loss.lambda_threshold_magnitude,
-        lambda_threshold_smoothness=config.loss.lambda_threshold_smoothness,
-        lambda_threshold_center=config.loss.lambda_threshold_center,
-    )
-
-
-def _threshold_loss_inputs(output: dict[str, Any]) -> dict[str, torch.Tensor]:
-    return {
-        "global_threshold_offsets": output["global_threshold_offsets"],
-        "local_threshold_offsets": output["local_threshold_offsets"],
-        "threshold_group_indices": output["threshold_group_indices"],
-        "threshold_group_batch_indices": output[
-            "threshold_group_batch_indices"
-        ],
-        "threshold_neighbor_edges": output["threshold_neighbor_edges"],
-    }
-
-
-def _file_sha256(path: Path) -> str:
-    digest = sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
-def _load_checkpoint(path: str | Path, device: torch.device) -> dict[str, Any]:
-    loaded = torch.load(path, map_location=device, weights_only=True)
-    if not isinstance(loaded, Mapping):
-        raise ValueError("checkpoint must be a mapping")
-    return dict(loaded)
-
-
-def _checkpoint_model_state(
-    checkpoint: Mapping[str, Any],
-) -> dict[str, torch.Tensor]:
-    state = checkpoint.get("model_state")
-    if not isinstance(state, Mapping):
-        raise ValueError("checkpoint model_state must be a mapping")
-    if any(
-        not isinstance(name, str) or not isinstance(value, torch.Tensor)
-        for name, value in state.items()
-    ):
-        raise ValueError(
-            "checkpoint model_state must map string names to tensors"
-        )
-    return dict(state)
-
-
-def _normalized_legacy_model_config(model_config: object) -> dict[str, Any]:
-    if not isinstance(model_config, dict):
-        raise ValueError("checkpoint model configuration is invalid")
-    normalized = dict(model_config)
-    defaults = _serializable(asdict(ModelConfig()))
-    for name in ADAPTIVE_MODEL_FIELDS:
-        normalized.setdefault(name, defaults[name])
-    return normalized
-
-
-def _validate_checkpoint_metadata(
-    checkpoint: dict[str, Any],
-    config: HUAVConfig,
-    validation_manifest_digest: str,
-    *,
-    allow_legacy_read_only: bool,
-) -> None:
-    schema = checkpoint.get("schema_version")
-    expected_model = _serializable(asdict(config.model))
-    if schema == CHECKPOINT_SCHEMA_VERSION:
-        _validate_schema5_metadata(checkpoint)
-        actual_model = checkpoint.get("model_config")
-    elif schema == LEGACY_READ_ONLY_SCHEMA_VERSION and allow_legacy_read_only:
-        if config.model.adaptive_threshold_mode != "none":
-            raise ValueError(
-                "schema 4 checkpoints are supported read-only only in none mode"
-            )
-        actual_model = _normalized_legacy_model_config(
-            checkpoint.get("model_config")
-        )
-    else:
-        raise ValueError("unsupported checkpoint schema version")
-    if schema == LEGACY_READ_ONLY_SCHEMA_VERSION:
-        _checkpoint_model_state(checkpoint)
-    _stored_decision_threshold(checkpoint)
-    if actual_model != expected_model:
-        raise ValueError(
-            "checkpoint model configuration does not match the supplied config"
-        )
-    if checkpoint.get("resolution") != _serializable(asdict(config.resolution)):
-        raise ValueError(
-            "checkpoint resolution does not match the supplied config"
-        )
-    if checkpoint.get("validation_manifest_sha256") != validation_manifest_digest:
-        raise ValueError(
-            "checkpoint validation dataset manifest does not match current data"
-        )
-
-
-def _stored_decision_threshold(checkpoint: dict[str, Any]) -> float:
-    threshold = checkpoint.get("decision_threshold")
-    if (
-        isinstance(threshold, bool)
-        or not isinstance(threshold, Real)
-        or not math.isfinite(float(threshold))
-        or not 0.0 <= float(threshold) <= 1.0
-    ):
-        raise ValueError(
-            "checkpoint decision_threshold must be finite and in [0,1]"
-        )
-    return float(threshold)
-
-
-def _validate_provenance_pair(
-    checkpoint: Mapping[str, Any],
-    path_key: str,
-    hash_key: str,
-) -> bool:
-    path_present = path_key in checkpoint
-    hash_present = hash_key in checkpoint
-    if path_present != hash_present:
-        raise ValueError(
-            f"checkpoint {path_key} and {hash_key} must appear together"
-        )
-    if not path_present:
-        return False
-    source = checkpoint[path_key]
-    source_hash = checkpoint[hash_key]
-    if not isinstance(source, str) or not source.strip():
-        raise ValueError(f"checkpoint {path_key} must be non-empty")
-    if (
-        not isinstance(source_hash, str)
-        or len(source_hash) != 64
-        or any(
-            character not in "0123456789abcdefABCDEF"
-            for character in source_hash
-        )
-    ):
-        raise ValueError(f"checkpoint {hash_key} must be 64 hex characters")
-    return True
-
-
-def _expected_trainable_state_count(
-    state: Mapping[str, torch.Tensor],
-    training_stage: str,
-) -> int:
-    if training_stage == "calibrator":
-        return sum(
-            value.numel()
-            for name, value in state.items()
-            if name.startswith("calibrator.")
-        )
-    return sum(value.numel() for value in state.values())
-
-
-def _validate_schema5_metadata(checkpoint: dict[str, Any]) -> None:
-    state = _checkpoint_model_state(checkpoint)
-    training_stage = checkpoint.get("training_stage")
-    if (
-        not isinstance(training_stage, str)
-        or training_stage not in {"full", "calibrator", "joint"}
-    ):
-        raise ValueError(
-            "checkpoint training_stage must be full, calibrator, or joint"
-        )
-    model_config = checkpoint.get("model_config")
-    if not isinstance(model_config, dict):
-        raise ValueError("checkpoint model_config must be a mapping")
-    adaptive_mode = model_config.get("adaptive_threshold_mode")
-    if adaptive_mode not in {
-        "none",
-        "global",
-        "local",
-        "local_neighbor",
-        "hierarchical",
-    }:
-        raise ValueError(
-            "checkpoint adaptive_threshold_mode is missing or invalid"
-        )
-    if (
-        training_stage in {"calibrator", "joint"}
-        and adaptive_mode == "none"
-    ):
-        raise ValueError(
-            "checkpoint calibrator/joint stage requires adaptive thresholding"
-        )
-    trainable_count = checkpoint.get("trainable_parameter_count")
-    if (
-        isinstance(trainable_count, bool)
-        or not isinstance(trainable_count, Integral)
-        or int(trainable_count) <= 0
-    ):
-        raise ValueError(
-            "checkpoint trainable_parameter_count must be a positive integer"
-        )
-    expected_count = _expected_trainable_state_count(state, training_stage)
-    if int(trainable_count) != expected_count:
-        raise ValueError(
-            "checkpoint trainable_parameter_count does not match model_state"
-        )
-    source_present = _validate_provenance_pair(
-        checkpoint,
-        "source_checkpoint",
-        "source_checkpoint_sha256",
-    )
-    resume_present = _validate_provenance_pair(
-        checkpoint,
-        "resumed_from_checkpoint",
-        "resumed_from_sha256",
-    )
-    if training_stage in {"calibrator", "joint"} and not source_present:
-        raise ValueError(
-            "calibrator/joint checkpoint requires source checkpoint provenance"
-        )
-    if training_stage == "full" and source_present:
-        raise ValueError(
-            "full checkpoint must not contain source checkpoint provenance"
-        )
-    if training_stage == "joint" and not resume_present:
-        raise ValueError(
-            "joint checkpoint requires resumed checkpoint provenance"
-        )
-    if training_stage in {"full", "calibrator"} and resume_present:
-        raise ValueError(
-            "full/calibrator checkpoint must not contain resumed checkpoint "
-            "provenance"
-        )
-
-
-def _base_model_config(model_config: object) -> dict[str, Any]:
-    if not isinstance(model_config, dict):
-        raise ValueError("checkpoint model configuration is invalid")
-    return {
-        key: value
-        for key, value in model_config.items()
-        if key not in ADAPTIVE_MODEL_FIELDS
-    }
-
-
-def _initialize_detector_weights(
-    model: SpatioTemporalConeDetector,
-    config: HUAVConfig,
-    checkpoint_path: Path,
-    validation_manifest_digest: str,
-    *,
-    device: torch.device,
-) -> dict[str, str]:
-    if model.calibrator is None:
-        raise ValueError(
-            "initialize_detector requires an adaptive target model"
-        )
-    checkpoint = _load_checkpoint(checkpoint_path, device)
-    if checkpoint.get("schema_version") not in {
-        LEGACY_READ_ONLY_SCHEMA_VERSION,
-        CHECKPOINT_SCHEMA_VERSION,
-    }:
-        raise ValueError("unsupported checkpoint schema version")
-    if checkpoint.get("schema_version") == CHECKPOINT_SCHEMA_VERSION:
-        _validate_schema5_metadata(checkpoint)
-        _stored_decision_threshold(checkpoint)
-    source_model_config = _normalized_legacy_model_config(
-        checkpoint.get("model_config")
-    )
-    if source_model_config["adaptive_threshold_mode"] != "none":
-        raise ValueError(
-            "detector initialization requires a non-adaptive source checkpoint"
-        )
-    if (
-        _base_model_config(checkpoint.get("model_config"))
-        != _base_model_config(_serializable(asdict(config.model)))
-    ):
-        raise ValueError(
-            "detector checkpoint model configuration does not match target"
-        )
-    if checkpoint.get("resolution") != _serializable(asdict(config.resolution)):
-        raise ValueError("detector checkpoint resolution does not match target")
-    if checkpoint.get("validation_manifest_sha256") != validation_manifest_digest:
-        raise ValueError(
-            "detector checkpoint validation dataset manifest does not match target"
-        )
-    source_state = _checkpoint_model_state(checkpoint)
-    if any(name.startswith("calibrator.") for name in source_state):
-        raise ValueError(
-            "detector initialization requires a non-adaptive source state"
-        )
-    target_state = model.state_dict()
-    target_detector_keys = {
-        name for name in target_state if not name.startswith("calibrator.")
-    }
-    source_detector_state = {
-        name: value
-        for name, value in source_state.items()
-        if not name.startswith("calibrator.")
-    }
-    source_detector_keys = set(source_detector_state)
-    if source_detector_keys != target_detector_keys:
-        missing = sorted(target_detector_keys - source_detector_keys)
-        unexpected = sorted(source_detector_keys - target_detector_keys)
-        raise ValueError(
-            "detector checkpoint keys do not match target: "
-            f"missing={missing}, unexpected={unexpected}"
-        )
-    mismatched_shapes = sorted(
-        name
-        for name, value in source_detector_state.items()
-        if not isinstance(value, torch.Tensor)
-        or value.shape != target_state[name].shape
-    )
-    if mismatched_shapes:
-        raise ValueError(
-            "detector checkpoint tensor shape mismatch: "
-            f"{mismatched_shapes}"
-        )
-    incompatible = model.load_state_dict(source_detector_state, strict=False)
-    expected_missing = sorted(
-        name for name in target_state if name.startswith("calibrator.")
-    )
-    if (
-        sorted(incompatible.missing_keys) != expected_missing
-        or incompatible.unexpected_keys
-    ):
-        raise ValueError(
-            "detector initialization must leave exactly calibrator parameters "
-            "uninitialized"
-        )
-    return {
-        "source_checkpoint": str(checkpoint_path.resolve()),
-        "source_checkpoint_sha256": _file_sha256(checkpoint_path),
-    }
-
-
-CALIBRATION_DIAGNOSTIC_DECIMALS = 4
-
-
-def _canonical_calibration_diagnostic(value: float) -> float:
-    canonical = round(float(value), CALIBRATION_DIAGNOSTIC_DECIMALS)
-    return 0.0 if canonical == 0.0 else canonical
-
-
-def _offset_statistics(values: torch.Tensor) -> dict[str, float]:
-    flattened = values.detach().to(device="cpu", dtype=torch.float64).reshape(-1)
-    if flattened.numel() == 0:
-        return {
-            "mean": 0.0,
-            "std": 0.0,
-            "p95_abs": 0.0,
-            "max_abs": 0.0,
-        }
-    absolute = flattened.abs()
-    return {
-        "mean": _canonical_calibration_diagnostic(flattened.mean().item()),
-        "std": _canonical_calibration_diagnostic(
-            flattened.std(unbiased=False).item()
-        ),
-        "p95_abs": _canonical_calibration_diagnostic(
-            torch.quantile(absolute, 0.95).item()
-        ),
-        "max_abs": _canonical_calibration_diagnostic(absolute.max().item()),
-    }
 
 
 def _dataset(config: HUAVConfig, split: str) -> NPZEventDataset:
@@ -731,15 +239,17 @@ def evaluate_model(
     progress: bool = False,
     threshold_override: float | None = None,
     criterion: EventFocalDiceLoss | None = None,
-    force_threshold_search: bool = False,
 ) -> dict[str, Any]:
     model.eval()
     sequence_results: list[tuple[torch.Tensor, LoadedEventSequence]] = []
-    global_offsets: list[torch.Tensor] = []
-    local_offsets: list[torch.Tensor] = []
-    per_sequence_global_mean: list[dict[str, Any]] = []
     loss_totals = (
-        {name: 0.0 for name in LOSS_NAMES}
+        {
+            "total": 0.0,
+            "focal": 0.0,
+            "dice": 0.0,
+            "object_frame": 0.0,
+            "false_alarm": 0.0,
+        }
         if criterion is not None
         else None
     )
@@ -779,7 +289,6 @@ def evaluate_model(
                 full_batch_indices=batch_indices,
                 full_timestamps_ms=timestamps_ms,
                 full_coordinates=events[:, :2],
-                **_threshold_loss_inputs(output),
             )
             losses["total"] = losses["total"] * _dense_sequence_loss_weight(
                 events,
@@ -789,26 +298,6 @@ def evaluate_model(
             for name in loss_totals:
                 loss_totals[name] += float(losses[name].detach().item())
         logits = output["event_logits"].detach().cpu()
-        sequence_global_offsets = (
-            output["global_threshold_offsets"].detach().cpu()
-        )
-        sequence_local_offsets = (
-            output["local_threshold_offsets"].detach().cpu()
-        )
-        global_offsets.append(sequence_global_offsets)
-        local_offsets.append(sequence_local_offsets)
-        per_sequence_global_mean.append(
-            {
-                "source": sequence.source_path.name,
-                "mean": (
-                    _canonical_calibration_diagnostic(
-                        sequence_global_offsets.double().mean().item()
-                    )
-                    if sequence_global_offsets.numel()
-                    else 0.0
-                ),
-            }
-        )
         sequence_results.append((logits, sequence))
         if progress:
             print(
@@ -821,9 +310,7 @@ def evaluate_model(
         if threshold_override is not None
         else config.inference.sigmoid_threshold
     )
-    if threshold_override is None and (
-        config.evaluation.optimize_threshold or force_threshold_search
-    ):
+    if threshold_override is None and config.evaluation.optimize_threshold:
         result = _select_competition_threshold(
             sequence_results,
             config,
@@ -832,11 +319,6 @@ def evaluate_model(
         )
     else:
         result = _metrics_at_threshold(sequence_results, config, threshold)
-    result["calibration"] = {
-        "global": _offset_statistics(torch.cat(global_offsets)),
-        "local": _offset_statistics(torch.cat(local_offsets)),
-        "per_sequence_global_mean": per_sequence_global_mean,
-    }
     if loss_totals is not None:
         result["loss"] = {
             name: total / len(dataset) for name, total in loss_totals.items()
@@ -849,14 +331,6 @@ def _metrics_markdown(metrics: dict[str, Any]) -> str:
     counts = competition["counts"]
     event = metrics["event"]
     official = metrics["ev_uav_compatible"]
-    calibration = metrics["calibration"]
-    per_sequence_rows = [
-        f"| {item['source']} | {item['mean']:.8f} |"
-        for item in sorted(
-            calibration["per_sequence_global_mean"],
-            key=lambda item: item["source"],
-        )
-    ]
     return "\n".join(
         (
             "# HUAV Spatiotemporal-Cone Validation Metrics",
@@ -903,25 +377,6 @@ def _metrics_markdown(metrics: dict[str, Any]) -> str:
             f"`{official['detected_objects']}/{official['object_instances']}`",
             f"- False components / equivalent frames: "
             f"`{official['false_components']}/{official['frame_count']}`",
-            "",
-            "## Adaptive-threshold calibration",
-            "",
-            "| Offset | Mean | Std | P95 absolute | Max absolute |",
-            "|---|---:|---:|---:|---:|",
-            f"| Global | {calibration['global']['mean']:.8f} | "
-            f"{calibration['global']['std']:.8f} | "
-            f"{calibration['global']['p95_abs']:.8f} | "
-            f"{calibration['global']['max_abs']:.8f} |",
-            f"| Local | {calibration['local']['mean']:.8f} | "
-            f"{calibration['local']['std']:.8f} | "
-            f"{calibration['local']['p95_abs']:.8f} | "
-            f"{calibration['local']['max_abs']:.8f} |",
-            "",
-            "### Per-sequence global mean",
-            "",
-            "| File | Global mean |",
-            "|---|---:|",
-            *per_sequence_rows,
             "",
             "The compatibility values follow the sibling EV-UAV reference: "
             "50 ms temporal frames, object-level Pd, and false connected components "
@@ -991,28 +446,8 @@ def run_training(
     output_dir: str | Path | None = None,
     device: str | None = None,
     progress: bool = False,
-    initialize_detector: str | Path | None = None,
 ) -> dict[str, Any]:
     config.validate()
-    if config.training.training_stage == "joint":
-        raise ValueError(
-            "run_training does not accept the joint training stage; "
-            "use resume_training"
-        )
-    if (
-        config.training.training_stage == "calibrator"
-        and initialize_detector is None
-    ):
-        raise ValueError(
-            "calibrator training requires initialize_detector"
-        )
-    if (
-        initialize_detector is not None
-        and config.training.training_stage != "calibrator"
-    ):
-        raise ValueError(
-            "initialize_detector is only valid for the calibrator training stage"
-        )
     device_name = device or config.training.device
     runtime = prepare_device(device_name, num_threads=config.training.num_threads)
     torch_device = runtime.device
@@ -1020,7 +455,12 @@ def run_training(
     np.random.seed(config.training.seed)
     torch.manual_seed(config.training.seed)
 
+    run_dir = _run_directory(config, output_dir, device_name=torch_device.type)
     configuration = _serializable(asdict(config))
+    _atomic_write_text(
+        run_dir / "config.yaml",
+        yaml.safe_dump(configuration, allow_unicode=True, sort_keys=False),
+    )
     train_dataset = _dataset(config, "train")
     validation_dataset = _dataset(config, "val")
     manifest = _dataset_manifest(train_dataset, validation_dataset)
@@ -1033,42 +473,31 @@ def run_training(
         ],
     }
     validation_manifest_digest = _manifest_identity_digest(validation_manifest)
-    model = build_model(config).to(torch_device)
-    initialization_metadata: dict[str, str] = {}
-    if initialize_detector is not None:
-        initialization_metadata = _initialize_detector_weights(
-            model,
-            config,
-            Path(initialize_detector),
-            validation_manifest_digest,
-            device=torch_device,
-        )
-    _configure_training_stage(
-        model, config.training.training_stage
-    )
-    trainable_parameter_count = _expected_trainable_state_count(
-        model.state_dict(), config.training.training_stage
-    )
-    criterion = _criterion(config)
-    optimizer = _make_optimizer(model, config)
-    scheduler = _make_scheduler(
-        optimizer,
-        epochs=config.training.epochs,
-        minimum_ratio=config.training.min_learning_rate_ratio,
-    )
-    run_dir = _run_directory(config, output_dir, device_name=torch_device.type)
-    _atomic_write_text(
-        run_dir / "config.yaml",
-        yaml.safe_dump(configuration, allow_unicode=True, sort_keys=False),
-    )
     _write_json(run_dir / "dataset_manifest.json", manifest)
-    if initialization_metadata:
-        _atomic_write_text(
-            run_dir / "initialized_from.txt",
-            f"checkpoint: {initialization_metadata['source_checkpoint']}\n"
-            f"sha256: "
-            f"{initialization_metadata['source_checkpoint_sha256']}\n",
-        )
+    model = build_model(config).to(torch_device)
+    criterion = EventFocalDiceLoss(
+        focal_alpha=config.loss.focal_alpha,
+        focal_gamma=config.loss.focal_gamma,
+        lambda_dice=config.loss.lambda_dice,
+        lambda_object_frame=config.loss.lambda_object_frame,
+        object_frame_logit_margin=config.loss.object_frame_logit_margin,
+        lambda_false_alarm=config.loss.lambda_false_alarm,
+        false_alarm_logit_margin=config.loss.false_alarm_logit_margin,
+        false_alarm_topk_per_frame=config.loss.false_alarm_topk_per_frame,
+    )
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=config.training.learning_rate,
+        weight_decay=config.training.weight_decay,
+    )
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=max(1, config.training.epochs),
+        eta_min=(
+            config.training.learning_rate
+            * config.training.min_learning_rate_ratio
+        ),
+    )
     order_generator = torch.Generator().manual_seed(config.training.seed)
     sampling_generator = torch.Generator(device=torch_device.type).manual_seed(
         config.training.seed
@@ -1087,20 +516,15 @@ def run_training(
         flush=True,
     )
     for epoch in range(config.training.epochs):
-        _configure_training_stage(model, config.training.training_stage)
-        trainable_parameters = [
-            parameter
-            for parameter in model.parameters()
-            if parameter.requires_grad
-        ]
-        totals = {name: 0.0 for name in LOSS_NAMES}
-        learning_rates = {
-            str(group["name"]): float(group["lr"])
-            for group in optimizer.param_groups
+        model.train()
+        totals = {
+            "total": 0.0,
+            "focal": 0.0,
+            "dice": 0.0,
+            "object_frame": 0.0,
+            "false_alarm": 0.0,
         }
-        learning_rate = learning_rates.get(
-            "calibrator", next(iter(learning_rates.values()))
-        )
+        learning_rate = float(optimizer.param_groups[0]["lr"])
         order = torch.randperm(
             len(train_dataset), generator=order_generator
         ).tolist()
@@ -1144,7 +568,6 @@ def run_training(
                     full_batch_indices=batch_indices,
                     full_timestamps_ms=timestamps_ms,
                     full_coordinates=events[:, :2],
-                    **_threshold_loss_inputs(output),
                 )
                 sequence_weight = _dense_sequence_loss_weight(
                     events,
@@ -1156,14 +579,14 @@ def run_training(
                 scaler.scale(losses["total"]).backward()
                 scaler.unscale_(optimizer)
                 clip_grad_norm_(
-                    trainable_parameters, config.training.gradient_clip_norm
+                    model.parameters(), config.training.gradient_clip_norm
                 )
                 scaler.step(optimizer)
                 scaler.update()
             else:
                 losses["total"].backward()
                 clip_grad_norm_(
-                    trainable_parameters, config.training.gradient_clip_norm
+                    model.parameters(), config.training.gradient_clip_norm
                 )
                 optimizer.step()
             for name in totals:
@@ -1193,7 +616,6 @@ def run_training(
         epoch_record = {
             "epoch": epoch + 1,
             "learning_rate": learning_rate,
-            "learning_rates": learning_rates,
             "train_loss": totals,
             "validation_loss": validation_loss,
             "validation": metrics,
@@ -1214,19 +636,18 @@ def run_training(
         if score > best_score:
             best_score = score
             best_metrics = metrics
-            checkpoint_payload = {
-                "schema_version": CHECKPOINT_SCHEMA_VERSION,
-                "model_state": model.state_dict(),
-                "epoch": epoch + 1,
-                "decision_threshold": float(metrics["threshold"]),
-                "model_config": configuration["model"],
-                "resolution": configuration["resolution"],
-                "validation_manifest_sha256": validation_manifest_digest,
-                "training_stage": config.training.training_stage,
-                "trainable_parameter_count": trainable_parameter_count,
-                **initialization_metadata,
-            }
-            _atomic_torch_save(checkpoint_payload, run_dir / "best.pt")
+            _atomic_torch_save(
+                {
+                    "schema_version": CHECKPOINT_SCHEMA_VERSION,
+                    "model_state": model.state_dict(),
+                    "epoch": epoch + 1,
+                    "decision_threshold": float(metrics["threshold"]),
+                    "model_config": configuration["model"],
+                    "resolution": configuration["resolution"],
+                    "validation_manifest_sha256": validation_manifest_digest,
+                },
+                run_dir / "best.pt",
+            )
             _write_json(run_dir / "metrics.json", best_metrics)
             _atomic_write_text(
                 run_dir / "metrics.md", _metrics_markdown(best_metrics)
@@ -1246,9 +667,6 @@ def run_training(
         "gradient_scaling": scaler_enabled,
         "runtime": runtime.metadata,
         "parameter_count": sum(parameter.numel() for parameter in model.parameters()),
-        "training_stage": config.training.training_stage,
-        "trainable_parameter_count": trainable_parameter_count,
-        **initialization_metadata,
         "best_score": best_score,
         "best_iou": float(best_metrics["competition"]["iou"]),
         "metrics": best_metrics,
@@ -1290,14 +708,6 @@ def resume_training(
         A summary dict with keys ``run_dir``, ``best_score``, etc.
     """
     config.validate()
-    if config.training.training_stage != "joint":
-        raise ValueError("resume_training requires the joint training stage")
-    if (
-        isinstance(additional_epochs, bool)
-        or not isinstance(additional_epochs, Integral)
-        or int(additional_epochs) <= 0
-    ):
-        raise ValueError("additional_epochs must be a positive integer")
     device_name = device or config.training.device
     runtime = prepare_device(device_name, num_threads=config.training.num_threads)
     torch_device = runtime.device
@@ -1307,15 +717,11 @@ def resume_training(
 
     # ── Validate checkpoint compatibility ──────────────────────────────
     checkpoint_path = Path(checkpoint_path)
-    checkpoint = _load_checkpoint(checkpoint_path, torch_device)
+    checkpoint = torch.load(
+        checkpoint_path, map_location=torch_device, weights_only=True
+    )
     if checkpoint.get("schema_version") != CHECKPOINT_SCHEMA_VERSION:
         raise ValueError("unsupported checkpoint schema version")
-    _validate_schema5_metadata(checkpoint)
-    if checkpoint["training_stage"] not in {"calibrator", "joint"}:
-        raise ValueError(
-            "resume_training requires a calibrator or joint checkpoint"
-        )
-    _stored_decision_threshold(checkpoint)
     expected_model = _serializable(asdict(config.model))
     expected_resolution = _serializable(asdict(config.resolution))
     if checkpoint.get("model_config") != expected_model:
@@ -1328,11 +734,17 @@ def resume_training(
         )
 
     # ── Run directory ───────────────────────────────────────────────────
+    run_dir = _run_directory(config, output_dir, device_name=torch_device.type)
     configuration = _serializable(asdict(config))
-    resume_lineage = {
-        "resumed_from_checkpoint": str(checkpoint_path.resolve()),
-        "resumed_from_sha256": _file_sha256(checkpoint_path),
-    }
+    _atomic_write_text(
+        run_dir / "config.yaml",
+        yaml.safe_dump(configuration, allow_unicode=True, sort_keys=False),
+    )
+    _atomic_write_text(
+        run_dir / "resumed_from.txt",
+        f"checkpoint: {checkpoint_path.resolve()}\n"
+        f"source_epoch: {checkpoint.get('epoch', 'unknown')}\n",
+    )
 
     # ── Datasets & manifest ─────────────────────────────────────────────
     train_dataset = _dataset(config, "train")
@@ -1347,39 +759,36 @@ def resume_training(
         ],
     }
     validation_manifest_digest = _manifest_identity_digest(validation_manifest)
-    if checkpoint.get("validation_manifest_sha256") != validation_manifest_digest:
-        raise ValueError(
-            "checkpoint validation dataset manifest does not match current data"
-        )
+    _write_json(run_dir / "dataset_manifest.json", manifest)
+
     # ── Build model & load weights ──────────────────────────────────────
     model = build_model(config).to(torch_device)
-    model.load_state_dict(_checkpoint_model_state(checkpoint))
-    _configure_training_stage(
-        model, config.training.training_stage
-    )
-    trainable_parameter_count = _expected_trainable_state_count(
-        model.state_dict(), config.training.training_stage
-    )
+    model.load_state_dict(checkpoint["model_state"])
 
     # ── Loss, optimiser, scheduler ──────────────────────────────────────
-    criterion = _criterion(config)
-    optimizer = _make_optimizer(model, config)
-    scheduler = _make_scheduler(
+    criterion = EventFocalDiceLoss(
+        focal_alpha=config.loss.focal_alpha,
+        focal_gamma=config.loss.focal_gamma,
+        lambda_dice=config.loss.lambda_dice,
+        lambda_object_frame=config.loss.lambda_object_frame,
+        object_frame_logit_margin=config.loss.object_frame_logit_margin,
+        lambda_false_alarm=config.loss.lambda_false_alarm,
+        false_alarm_logit_margin=config.loss.false_alarm_logit_margin,
+        false_alarm_topk_per_frame=config.loss.false_alarm_topk_per_frame,
+    )
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=config.training.learning_rate,
+        weight_decay=config.training.weight_decay,
+    )
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
-        epochs=additional_epochs,
-        minimum_ratio=config.training.min_learning_rate_ratio,
+        T_max=max(1, additional_epochs),
+        eta_min=(
+            config.training.learning_rate
+            * config.training.min_learning_rate_ratio
+        ),
     )
-    run_dir = _run_directory(config, output_dir, device_name=torch_device.type)
-    _atomic_write_text(
-        run_dir / "config.yaml",
-        yaml.safe_dump(configuration, allow_unicode=True, sort_keys=False),
-    )
-    _atomic_write_text(
-        run_dir / "resumed_from.txt",
-        f"checkpoint: {checkpoint_path.resolve()}\n"
-        f"source_epoch: {checkpoint.get('epoch', 'unknown')}\n",
-    )
-    _write_json(run_dir / "dataset_manifest.json", manifest)
     order_generator = torch.Generator().manual_seed(config.training.seed)
     sampling_generator = torch.Generator(device=torch_device.type).manual_seed(
         config.training.seed
@@ -1405,20 +814,15 @@ def resume_training(
     )
 
     for epoch in range(additional_epochs):
-        _configure_training_stage(model, config.training.training_stage)
-        trainable_parameters = [
-            parameter
-            for parameter in model.parameters()
-            if parameter.requires_grad
-        ]
-        totals = {name: 0.0 for name in LOSS_NAMES}
-        learning_rates = {
-            str(group["name"]): float(group["lr"])
-            for group in optimizer.param_groups
+        model.train()
+        totals = {
+            "total": 0.0,
+            "focal": 0.0,
+            "dice": 0.0,
+            "object_frame": 0.0,
+            "false_alarm": 0.0,
         }
-        learning_rate = learning_rates.get(
-            "calibrator", next(iter(learning_rates.values()))
-        )
+        learning_rate = float(optimizer.param_groups[0]["lr"])
         order = torch.randperm(
             len(train_dataset), generator=order_generator
         ).tolist()
@@ -1462,7 +866,6 @@ def resume_training(
                     full_batch_indices=batch_indices,
                     full_timestamps_ms=timestamps_ms,
                     full_coordinates=events[:, :2],
-                    **_threshold_loss_inputs(output),
                 )
                 sequence_weight = _dense_sequence_loss_weight(
                     events,
@@ -1474,14 +877,14 @@ def resume_training(
                 scaler.scale(losses["total"]).backward()
                 scaler.unscale_(optimizer)
                 clip_grad_norm_(
-                    trainable_parameters, config.training.gradient_clip_norm
+                    model.parameters(), config.training.gradient_clip_norm
                 )
                 scaler.step(optimizer)
                 scaler.update()
             else:
                 losses["total"].backward()
                 clip_grad_norm_(
-                    trainable_parameters, config.training.gradient_clip_norm
+                    model.parameters(), config.training.gradient_clip_norm
                 )
                 optimizer.step()
             for name in totals:
@@ -1513,7 +916,6 @@ def resume_training(
             "epoch": source_epoch + epoch + 1,
             "resumed_epoch": epoch + 1,
             "learning_rate": learning_rate,
-            "learning_rates": learning_rates,
             "train_loss": totals,
             "validation_loss": validation_loss,
             "validation": metrics,
@@ -1544,17 +946,6 @@ def resume_training(
                     "model_config": configuration["model"],
                     "resolution": configuration["resolution"],
                     "validation_manifest_sha256": validation_manifest_digest,
-                    "training_stage": config.training.training_stage,
-                    "trainable_parameter_count": trainable_parameter_count,
-                    **resume_lineage,
-                    **{
-                        name: checkpoint[name]
-                        for name in (
-                            "source_checkpoint",
-                            "source_checkpoint_sha256",
-                        )
-                        if name in checkpoint
-                    },
                 },
                 run_dir / "best.pt",
             )
@@ -1583,9 +974,6 @@ def resume_training(
         "parameter_count": sum(
             parameter.numel() for parameter in model.parameters()
         ),
-        "training_stage": config.training.training_stage,
-        "trainable_parameter_count": trainable_parameter_count,
-        **resume_lineage,
         "best_score": best_score,
         "best_iou": float(best_metrics["competition"]["iou"]),
         "metrics": best_metrics,
@@ -1600,30 +988,30 @@ def evaluate_checkpoint(
     *,
     device: str = "cpu",
     progress: bool = False,
-    reoptimize_threshold: bool = False,
 ) -> dict[str, Any]:
     config.validate()
     runtime = prepare_device(device, num_threads=config.training.num_threads)
     torch_device = runtime.device
-    checkpoint = _load_checkpoint(checkpoint_path, torch_device)
+    checkpoint = torch.load(
+        checkpoint_path, map_location=torch_device, weights_only=True
+    )
+    if checkpoint.get("schema_version") != CHECKPOINT_SCHEMA_VERSION:
+        raise ValueError("unsupported checkpoint schema version")
+    expected_model = _serializable(asdict(config.model))
+    expected_resolution = _serializable(asdict(config.resolution))
+    if checkpoint.get("model_config") != expected_model:
+        raise ValueError("checkpoint model configuration does not match the supplied config")
+    if checkpoint.get("resolution") != expected_resolution:
+        raise ValueError("checkpoint resolution does not match the supplied config")
     validation_dataset = _dataset(config, "val")
     actual_validation_digest = _manifest_identity_digest(
         _dataset_manifest(validation_dataset)
     )
-    _validate_checkpoint_metadata(
-        checkpoint,
-        config,
-        actual_validation_digest,
-        allow_legacy_read_only=True,
-    )
+    if checkpoint.get("validation_manifest_sha256") != actual_validation_digest:
+        raise ValueError("checkpoint validation dataset manifest does not match current data")
     model = build_model(config).to(torch_device)
-    try:
-        model.load_state_dict(_checkpoint_model_state(checkpoint))
-    except RuntimeError as error:
-        raise ValueError("checkpoint model state does not match model") from error
-    threshold = (
-        None if reoptimize_threshold else _stored_decision_threshold(checkpoint)
-    )
+    model.load_state_dict(checkpoint["model_state"])
+    threshold = checkpoint.get("decision_threshold")
     return evaluate_model(
         model,
         validation_dataset,
@@ -1631,7 +1019,6 @@ def evaluate_checkpoint(
         device=torch_device,
         progress=progress,
         threshold_override=threshold,
-        force_threshold_search=reoptimize_threshold,
     )
 
 
@@ -1674,23 +1061,26 @@ def generate_submission_package(
     config.validate()
     runtime = prepare_device(device, num_threads=config.training.num_threads)
     torch_device = runtime.device
-    checkpoint = _load_checkpoint(checkpoint_path, torch_device)
+    checkpoint = torch.load(
+        checkpoint_path, map_location=torch_device, weights_only=True
+    )
+    if checkpoint.get("schema_version") != CHECKPOINT_SCHEMA_VERSION:
+        raise ValueError("unsupported checkpoint schema version")
+    expected_model = _serializable(asdict(config.model))
+    expected_resolution = _serializable(asdict(config.resolution))
+    if checkpoint.get("model_config") != expected_model:
+        raise ValueError("checkpoint model configuration does not match the supplied config")
+    if checkpoint.get("resolution") != expected_resolution:
+        raise ValueError("checkpoint resolution does not match the supplied config")
     validation_dataset = _dataset(config, "val")
     actual_validation_digest = _manifest_identity_digest(
         _dataset_manifest(validation_dataset)
     )
-    _validate_checkpoint_metadata(
-        checkpoint,
-        config,
-        actual_validation_digest,
-        allow_legacy_read_only=True,
-    )
+    if checkpoint.get("validation_manifest_sha256") != actual_validation_digest:
+        raise ValueError("checkpoint validation dataset manifest does not match current data")
     model = build_model(config).to(torch_device)
-    try:
-        model.load_state_dict(_checkpoint_model_state(checkpoint))
-    except RuntimeError as error:
-        raise ValueError("checkpoint model state does not match model") from error
-    threshold = _stored_decision_threshold(checkpoint)
+    model.load_state_dict(checkpoint["model_state"])
+    threshold = float(checkpoint.get("decision_threshold", config.inference.sigmoid_threshold))
     model.eval()
 
     output_dir = Path(output_dir)

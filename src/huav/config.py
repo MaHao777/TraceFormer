@@ -50,11 +50,6 @@ class ModelConfig:
     causal_mode: bool = False
     direction_dropout: float = 0.0
     debug_attention_stats: bool = False
-    adaptive_threshold_mode: str = "none"
-    threshold_hidden_dim: int = 32
-    threshold_time_bins: int = 160
-    threshold_max_global_offset: float = 0.5
-    threshold_max_local_offset: float = 0.75
 
 
 @dataclass(frozen=True)
@@ -71,10 +66,8 @@ class DatasetConfig:
 @dataclass(frozen=True)
 class TrainingConfig:
     device: str = "cpu"
-    training_stage: str = "full"
     epochs: int = 3
     learning_rate: float = 0.001
-    detector_learning_rate: float | None = None
     weight_decay: float = 0.0001
     seed: int = 37
     background_ratio: int = 10
@@ -103,9 +96,6 @@ class LossConfig:
     lambda_false_alarm: float = 0.0
     false_alarm_logit_margin: float = 0.0
     false_alarm_topk_per_frame: int = 32
-    lambda_threshold_magnitude: float = 0.0
-    lambda_threshold_smoothness: float = 0.0
-    lambda_threshold_center: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -161,31 +151,8 @@ class HUAVConfig:
             "num_layers",
             "num_heads",
             "max_neighbors_per_cone",
-            "threshold_hidden_dim",
-            "threshold_time_bins",
         ):
             _positive_integer(getattr(self.model, name), f"model {name}")
-        allowed_threshold_modes = {
-            "none",
-            "global",
-            "local",
-            "local_neighbor",
-            "hierarchical",
-        }
-        if (
-            not isinstance(self.model.adaptive_threshold_mode, str)
-            or self.model.adaptive_threshold_mode not in allowed_threshold_modes
-        ):
-            raise ValueError(
-                "adaptive_threshold_mode must be one of "
-                f"{sorted(allowed_threshold_modes)}"
-            )
-        for name in (
-            "threshold_max_global_offset",
-            "threshold_max_local_offset",
-        ):
-            if _finite_real(getattr(self.model, name), name) < 0:
-                raise ValueError(f"{name} must be non-negative")
         if self.model.token_dim % self.model.num_heads:
             raise ValueError("token_dim must be divisible by num_heads")
         if _finite_real(self.model.mlp_ratio, "mlp_ratio") <= 0:
@@ -235,36 +202,9 @@ class HUAVConfig:
             raise ValueError("duration_ms must be positive")
         if self.training.device not in {"cpu", "cuda"}:
             raise ValueError("training device must be 'cpu' or 'cuda'")
-        if self.training.training_stage not in {"full", "calibrator", "joint"}:
-            raise ValueError(
-                "training_stage must be one of ['calibrator', 'full', 'joint']"
-            )
-        if (
-            self.training.training_stage in {"calibrator", "joint"}
-            and self.model.adaptive_threshold_mode == "none"
-        ):
-            raise ValueError(
-                "calibrator and joint training stages require adaptive thresholding"
-            )
         _positive_integer(self.training.epochs, "epochs")
         if _finite_real(self.training.learning_rate, "learning_rate") <= 0:
             raise ValueError("learning_rate must be positive")
-        detector_learning_rate = self.training.detector_learning_rate
-        if self.training.training_stage == "joint":
-            if (
-                detector_learning_rate is None
-                or _finite_real(
-                    detector_learning_rate, "detector_learning_rate"
-                )
-                <= 0
-            ):
-                raise ValueError(
-                    "joint training requires a positive detector_learning_rate"
-                )
-        elif detector_learning_rate is not None:
-            raise ValueError(
-                "detector_learning_rate is only valid for joint training"
-            )
         if _finite_real(self.training.weight_decay, "weight_decay") < 0:
             raise ValueError("weight_decay must be non-negative")
         if isinstance(self.training.seed, bool) or not isinstance(self.training.seed, Integral):
@@ -336,37 +276,6 @@ class HUAVConfig:
             raise ValueError("lambda_object_frame must be non-negative")
         if _finite_real(self.loss.lambda_false_alarm, "lambda_false_alarm") < 0:
             raise ValueError("lambda_false_alarm must be non-negative")
-        for name in (
-            "lambda_threshold_magnitude",
-            "lambda_threshold_smoothness",
-            "lambda_threshold_center",
-        ):
-            if _finite_real(getattr(self.loss, name), name) < 0:
-                raise ValueError(f"{name} must be non-negative")
-        threshold_mode = self.model.adaptive_threshold_mode
-        threshold_lambdas = (
-            self.loss.lambda_threshold_magnitude,
-            self.loss.lambda_threshold_smoothness,
-            self.loss.lambda_threshold_center,
-        )
-        if any(value > 0 for value in threshold_lambdas) and threshold_mode == "none":
-            raise ValueError(
-                "adaptive-threshold regularizers require adaptive thresholding"
-            )
-        if (
-            self.loss.lambda_threshold_center > 0
-            and threshold_mode not in {"local", "local_neighbor", "hierarchical"}
-        ):
-            raise ValueError(
-                "lambda_threshold_center requires a local adaptive threshold mode"
-            )
-        if (
-            self.loss.lambda_threshold_smoothness > 0
-            and threshold_mode not in {"local_neighbor", "hierarchical"}
-        ):
-            raise ValueError(
-                "lambda_threshold_smoothness requires a neighbor threshold mode"
-            )
         _finite_real(
             self.loss.object_frame_logit_margin,
             "object_frame_logit_margin",
@@ -382,25 +291,8 @@ class HUAVConfig:
         if not isinstance(self.evaluation.optimize_threshold, bool):
             raise ValueError("optimize_threshold must be boolean")
         _positive_integer(self.evaluation.threshold_steps, "threshold_steps")
-        frame_ms = _finite_real(self.evaluation.frame_ms, "frame_ms")
-        if frame_ms <= 0:
+        if _finite_real(self.evaluation.frame_ms, "frame_ms") <= 0:
             raise ValueError("frame_ms must be positive")
-        if self.model.adaptive_threshold_mode != "none":
-            threshold_frame_ms = (
-                float(self.dataset.duration_ms)
-                / self.model.threshold_time_bins
-            )
-            if not math.isclose(
-                threshold_frame_ms,
-                frame_ms,
-                rel_tol=1e-9,
-                abs_tol=1e-9,
-            ):
-                raise ValueError(
-                    "dataset.duration_ms / model.threshold_time_bins must "
-                    "equal evaluation.frame_ms when adaptive thresholding "
-                    "is enabled"
-                )
         fraction = _finite_real(
             self.evaluation.object_correct_fraction, "object_correct_fraction"
         )

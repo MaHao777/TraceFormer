@@ -17,7 +17,7 @@
 
 - 开始前先运行 `git status --short`，保留用户已有改动，不覆盖历史 `outputs/` 结果。
 - 每轮使用新的时间戳目录；全量训练、独立复评、提交 TXT 和 ZIP 必须能够对应到同一个 `best.pt`。
-- 当前生产配置使用 checkpoint schema `5`。schema `4` 仅允许非自适应检测器只读评估或作为 `--initialize-detector` 的初始化来源；schema `3` 及更早版本只作为历史产物保留，当前代码必须拒绝加载。
+- 当前生产配置使用 checkpoint schema `3`。旧 schema `2` 只作为历史产物保留，不能用当前模型代码直接加载。
 - 始终保持每个原始事件及其 `x y t p` 顺序不变，模型输出必须对应每个原始事件。背景采样只能影响损失样本选择，不能删减前向上下文或提交事件。
 - 新的锥体几何或邻域尺度必须先基于真实训练数据统计确定，不能根据单个极端样本拍脑袋设置。
 - 默认使用当前分数优化配置完成 CPU 全量流程。若任务明确要求 CUDA，可将下列命令中的设备统一改为 `cuda`，但必须记录设备，且不能减少训练/验证数据。
@@ -54,17 +54,7 @@ python -m huav.analysis.cone_slopes data/ev-uav/train `
 
 ### 2. 真实数据烟雾训练与复评
 
-若修改了分块、邻域、Token 数量、注意力图规模或自适应阈值结构，先对事件数最大的训练序列（当前重点为 `train_094.npz`）完成一次 forward、当前生产总 loss 和 backward 资源复现。自适应阈值实验必须使用待训练的 adaptive 配置及其 schema `4`/`5` 非自适应基线权重运行：
-
-```powershell
-python scripts/check_largest_sequence.py `
-  --config configs/huav_adaptive_hierarchical_autodl.yaml `
-  --initialize-detector outputs/<baseline>/best.pt `
-  --sequence train_094.npz `
-  --device cuda
-```
-
-结果必须确认每个原始事件都有 logit、loss 和校准器梯度有限、检测器参数全部冻结，并保存 token/group/neighbor 数量、checkpoint SHA-256、运行时间及 CUDA allocated/reserved 峰值。任一检查失败时不得开始 smoke 或全量训练。除非新的实测分析证明更细网格安全，否则沿用已验证可完成全量训练的 `8x8` 空间分块和 64 时间分块；不得把曾触发 Windows `c10.dll` `0xc0000005` 的 `4x4/128` 大图直接投入全量训练。
+若修改了分块、邻域、Token 数量或注意力图规模，先对事件数最大的训练序列（当前重点为 `train_094.npz`）完成一次 forward、loss 和 backward 资源复现。除非新的实测分析证明更细网格安全，否则沿用已验证可完成全量训练的 `8x8` 空间分块和 64 时间分块；不得把曾触发 Windows `c10.dll` `0xc0000005` 的 `4x4/128` 大图直接投入全量训练。
 
 然后建立本轮唯一目录名，并跑通训练和验证链路：
 

@@ -7,7 +7,6 @@ from typing import Protocol
 
 from .losses import (
     EventFocalDiceLoss,
-    adaptive_threshold_regularization,
     binary_dice_loss,
     binary_focal_loss,
     false_alarm_pixel_loss,
@@ -46,7 +45,6 @@ __all__ = [
     "EVUAVMetricAccumulator",
     "EventMetricAccumulator",
     "Trainer",
-    "adaptive_threshold_regularization",
     "binary_dice_loss",
     "binary_focal_loss",
     "competition_metrics",

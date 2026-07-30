@@ -1,17 +1,13 @@
 from __future__ import annotations
 
 import sys
-from dataclasses import asdict, replace
+from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
-
-import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from huav.config import ConeHeadConfig, HUAVConfig, load_config
-
-ROOT = Path(__file__).resolve().parents[1]
 
 
 def raises(exc_type: type[Exception], fn: object) -> None:
@@ -47,11 +43,6 @@ def test_base_yaml_exposes_cone_training_and_loss_configuration() -> None:
     assert config.model.max_neighbors_per_cone == 8
     assert config.model.causal_mode is False
     assert config.model.direction_dropout == 0.0
-    assert config.model.adaptive_threshold_mode == "none"
-    assert config.model.threshold_hidden_dim == 32
-    assert config.model.threshold_time_bins == 160
-    assert config.model.threshold_max_global_offset == 0.5
-    assert config.model.threshold_max_local_offset == 0.75
     assert config.dataset.duration_ms == 8000
     assert config.training.device == "cpu"
     assert config.training.background_ratio == 10
@@ -66,9 +57,6 @@ def test_base_yaml_exposes_cone_training_and_loss_configuration() -> None:
     assert config.loss.lambda_object_frame == 0.0
     assert config.loss.lambda_false_alarm == 0.0
     assert config.loss.false_alarm_topk_per_frame == 32
-    assert config.loss.lambda_threshold_magnitude == 0.0
-    assert config.loss.lambda_threshold_smoothness == 0.0
-    assert config.loss.lambda_threshold_center == 0.0
     assert config.evaluation.frame_ms == 50
 
 
@@ -219,120 +207,6 @@ def test_cross_field_config_validation_rejects_inconsistent_values() -> None:
     )
 
 
-def test_adaptive_threshold_configuration_accepts_aligned_valid_values() -> None:
-    valid = HUAVConfig.default()
-
-    configured = replace(
-        valid,
-        model=replace(
-            valid.model,
-            adaptive_threshold_mode="hierarchical",
-            threshold_hidden_dim=16,
-            threshold_time_bins=80,
-            threshold_max_global_offset=0.25,
-            threshold_max_local_offset=1.0,
-        ),
-        evaluation=replace(valid.evaluation, frame_ms=100.0),
-        loss=replace(
-            valid.loss,
-            lambda_threshold_magnitude=0.1,
-            lambda_threshold_smoothness=0.2,
-            lambda_threshold_center=0.3,
-        ),
-    ).validate()
-
-    assert configured.model.adaptive_threshold_mode == "hierarchical"
-
-
-def test_adaptive_threshold_configuration_rejects_invalid_fields() -> None:
-    valid = HUAVConfig.default()
-    invalid_models = (
-        replace(valid.model, adaptive_threshold_mode="invalid"),
-        replace(valid.model, adaptive_threshold_mode=[]),  # type: ignore[arg-type]
-        replace(valid.model, threshold_hidden_dim=0),
-        replace(valid.model, threshold_time_bins=True),
-        replace(valid.model, threshold_max_global_offset=-0.1),
-        replace(valid.model, threshold_max_local_offset=float("nan")),
-    )
-    for model in invalid_models:
-        raises(ValueError, lambda model=model: replace(valid, model=model).validate())
-
-    for field in (
-        "lambda_threshold_magnitude",
-        "lambda_threshold_smoothness",
-        "lambda_threshold_center",
-    ):
-        for invalid_value in (-0.1, float("nan")):
-            invalid_loss = replace(valid.loss, **{field: invalid_value})
-            raises(
-                ValueError,
-                lambda invalid_loss=invalid_loss: replace(
-                    valid, loss=invalid_loss
-                ).validate(),
-            )
-
-
-def test_adaptive_threshold_requires_evaluation_frame_alignment() -> None:
-    valid = HUAVConfig.default()
-    adaptive_model = replace(
-        valid.model,
-        adaptive_threshold_mode="local",
-        threshold_time_bins=159,
-    )
-
-    raises(
-        ValueError,
-        lambda: replace(valid, model=adaptive_model).validate(),
-    )
-    replace(
-        valid,
-        model=replace(valid.model, threshold_time_bins=159),
-    ).validate()
-
-
-def test_threshold_regularizers_require_compatible_adaptive_modes() -> None:
-    valid = HUAVConfig.default()
-    raises(
-        ValueError,
-        lambda: replace(
-            valid,
-            loss=replace(valid.loss, lambda_threshold_magnitude=0.1),
-        ).validate(),
-    )
-    raises(
-        ValueError,
-        lambda: replace(
-            valid,
-            model=replace(valid.model, adaptive_threshold_mode="global"),
-            loss=replace(valid.loss, lambda_threshold_center=0.1),
-        ).validate(),
-    )
-    raises(
-        ValueError,
-        lambda: replace(
-            valid,
-            model=replace(valid.model, adaptive_threshold_mode="local"),
-            loss=replace(valid.loss, lambda_threshold_smoothness=0.1),
-        ).validate(),
-    )
-
-    replace(
-        valid,
-        model=replace(valid.model, adaptive_threshold_mode="global"),
-        loss=replace(valid.loss, lambda_threshold_magnitude=0.1),
-    ).validate()
-    replace(
-        valid,
-        model=replace(valid.model, adaptive_threshold_mode="local"),
-        loss=replace(valid.loss, lambda_threshold_center=0.1),
-    ).validate()
-    replace(
-        valid,
-        model=replace(valid.model, adaptive_threshold_mode="local_neighbor"),
-        loss=replace(valid.loss, lambda_threshold_smoothness=0.1),
-    ).validate()
-
-
 def test_config_overrides_reject_unknown_keys_including_mixed_valid_invalid_values() -> None:
     valid = HUAVConfig.default()
     raises(ValueError, lambda: valid.with_overrides(widht=346))
@@ -373,111 +247,3 @@ def test_yaml_loader_rejects_non_mapping_unknown_and_syntactically_invalid_docum
             path = Path(directory) / f"document-{index}.yaml"
             path.write_text(contents, encoding="utf-8")
             raises(ValueError, lambda path=path: load_config(path))
-
-
-@pytest.mark.parametrize(
-    ("mode", "center", "smoothness"),
-    (
-        ("global", 0.0, 0.0),
-        ("local", 0.05, 0.0),
-        ("local_neighbor", 0.05, 0.01),
-        ("hierarchical", 0.05, 0.01),
-    ),
-)
-def test_adaptive_threshold_autodl_ablation_configs_are_production_aligned(
-    mode: str,
-    center: float,
-    smoothness: float,
-) -> None:
-    production = load_config(
-        ROOT / "configs" / "huav_score_optimized_autodl.yaml"
-    )
-    frozen = load_config(
-        ROOT / "configs" / f"huav_adaptive_{mode}_autodl.yaml"
-    )
-    joint = load_config(
-        ROOT / "configs" / f"huav_adaptive_{mode}_joint_autodl.yaml"
-    )
-
-    for config in (frozen, joint):
-        assert config.model.adaptive_threshold_mode == mode
-        assert config.model.spatial_block_size_x == 8
-        assert config.model.spatial_block_size_y == 8
-        assert config.model.num_time_blocks == 64
-        assert config.model.threshold_hidden_dim == 32
-        assert config.model.threshold_time_bins == 160
-        assert config.model.threshold_max_global_offset == pytest.approx(0.5)
-        assert config.model.threshold_max_local_offset == pytest.approx(0.75)
-        assert config.training.device == "cuda"
-        assert config.training.mixed_precision is True
-        assert config.training.mixed_precision_dtype == "bfloat16"
-        assert config.training.weight_decay == pytest.approx(2e-4)
-        assert config.training.seed == 37
-        assert config.training.min_learning_rate_ratio == pytest.approx(0.1)
-        assert config.training.max_train_files is None
-        assert config.training.max_val_files is None
-        assert config.loss.lambda_threshold_magnitude == pytest.approx(0.01)
-        assert config.loss.lambda_threshold_center == pytest.approx(center)
-        assert config.loss.lambda_threshold_smoothness == pytest.approx(
-            smoothness
-        )
-        assert config.evaluation.threshold_steps == 61
-        unchanged_fields = {
-            "resolution": set(),
-            "model": {
-                "adaptive_threshold_mode",
-                "threshold_hidden_dim",
-                "threshold_time_bins",
-                "threshold_max_global_offset",
-                "threshold_max_local_offset",
-            },
-            "inference": set(),
-            "dataset": set(),
-            "training": {
-                "training_stage",
-                "epochs",
-                "learning_rate",
-                "detector_learning_rate",
-            },
-            "loss": {
-                "lambda_threshold_magnitude",
-                "lambda_threshold_center",
-                "lambda_threshold_smoothness",
-            },
-            "evaluation": {"threshold_steps"},
-        }
-        for section, allowed_changes in unchanged_fields.items():
-            expected = asdict(getattr(production, section))
-            actual = asdict(getattr(config, section))
-            for field in expected.keys() - allowed_changes:
-                assert actual[field] == expected[field], (
-                    f"{section}.{field} drifted from production"
-                )
-
-    assert frozen.training.training_stage == "calibrator"
-    assert frozen.training.epochs == 6
-    assert frozen.training.learning_rate == pytest.approx(3e-4)
-    assert frozen.training.detector_learning_rate is None
-    assert joint.training.training_stage == "joint"
-    assert joint.training.epochs == 8
-    assert joint.training.learning_rate == pytest.approx(1e-4)
-    assert joint.training.detector_learning_rate == pytest.approx(3e-5)
-
-
-def test_adaptive_threshold_autodl_smoke_config_has_explicit_limits() -> None:
-    config = load_config(
-        ROOT
-        / "configs"
-        / "huav_adaptive_hierarchical_autodl_smoke.yaml"
-    )
-
-    assert config.model.adaptive_threshold_mode == "hierarchical"
-    assert config.model.spatial_block_size_x == 8
-    assert config.model.spatial_block_size_y == 8
-    assert config.model.num_time_blocks == 64
-    assert config.training.training_stage == "calibrator"
-    assert config.training.epochs == 1
-    assert config.training.max_train_files == 4
-    assert config.training.max_val_files is None
-    assert config.training.mixed_precision is True
-    assert config.training.mixed_precision_dtype == "bfloat16"
