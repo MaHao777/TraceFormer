@@ -51,9 +51,11 @@ def test_largest_sequence_check_runs_forward_loss_backward_and_reports_memory() 
     contents = checker.read_text(encoding="utf-8")
     assert "train_094.npz" in contents
     assert "model(events, batch_indices)" in contents
-    assert "lambda_false_alarm=config.loss.lambda_false_alarm" in contents
+    assert "lambda_fa=config.loss.lambda_fa" in contents
+    assert "events[query_indices, :2]" in contents
     assert 'full_logits=output["event_logits"]' in contents
     assert "full_coordinates=events[:, :2]" in contents
     assert 'losses["total"].backward()' in contents
+    assert '"stc_focal"' in contents
     assert '"false_alarm"' in contents
     assert "max_memory_allocated" in contents

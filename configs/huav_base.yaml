@@ -43,9 +43,21 @@ training:
   max_train_files:
   max_val_files:
 loss:
-  focal_alpha: 0.75
-  focal_gamma: 2.0
-  lambda_dice: 1.0
+  alpha: 0.55
+  gamma_focal: 2.0
+  gamma_stc: 2.0
+  eta_pos: 0.5
+  eta_neg: 0.5
+  tau: 50.0
+  r0: 8.0
+  vmax: 0.128
+  sigma_xy: 8.0
+  sigma_t: 25.0
+  max_neighbors: 32
+  lambda_fa: 0.5
+  fa_top_k: 32
+  fa_negative_margin: -1.0
+  fa_temperature: 0.25
 evaluation:
   optimize_threshold: true
   threshold_steps: 19

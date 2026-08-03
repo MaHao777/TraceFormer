@@ -6,11 +6,9 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from .losses import (
-    EventFocalDiceLoss,
-    binary_dice_loss,
-    binary_focal_loss,
-    false_alarm_pixel_loss,
-    object_frame_recall_loss,
+    EventSpatiotemporalLoss,
+    margin_false_alarm_loss,
+    spatiotemporal_focal_loss,
 )
 from .metrics import EventMetricAccumulator, EVUAVMetricAccumulator, competition_metrics
 from .sampling import sample_event_indices
@@ -39,16 +37,14 @@ class Evaluator(Protocol):
 
 
 __all__ = [
-    "EventFocalDiceLoss",
+    "EventSpatiotemporalLoss",
     "EvaluationResult",
     "Evaluator",
     "EVUAVMetricAccumulator",
     "EventMetricAccumulator",
     "Trainer",
-    "binary_dice_loss",
-    "binary_focal_loss",
     "competition_metrics",
-    "false_alarm_pixel_loss",
-    "object_frame_recall_loss",
+    "margin_false_alarm_loss",
     "sample_event_indices",
+    "spatiotemporal_focal_loss",
 ]

@@ -51,13 +51,11 @@ CPU 完整训练配置使用 `8×8` 像素、64 个时间块；时间和空间�
 训练只使用：
 
 ```text
-Total Loss = Focal Loss
-           + lambda_dice × per-sample Dice Loss
-           + lambda_object_frame × Object-frame Recall Loss
-           + lambda_false_alarm × Background-pixel Fa Loss
+Total Loss = STC-Focal Loss
+           + lambda_fa × Margin False-alarm Loss
 ```
 
-训练时保留全部正事件，并为 Focal、Dice 和目标帧召回项最多选择 10 倍背景事件。Fa 代理损失使用完整前向结果，按 `(batch, 50 ms 帧, x, y)` 将背景事件聚合成像素，每个像素只保留最高 logit，再对每帧最高的 32 个背景像素施加 margin-softplus，避免重复事件和海量低分背景稀释真正的高分假警报。所有原始事件始终参与 Token 生成、锥上下文建模和事件解码；验证始终使用全部事件。
+训练时保留全部正事件，并为 STC-Focal 分类项采样背景事件。STC 邻域使用原始像素 `x/y` 和保留的毫秒时间，按双向时空锥进行稀疏体素查找；邻居概率会 `detach()`，仅作为当前事件的损失权重。Fa margin 损失使用完整前向结果，按 `(batch, 50 ms 帧, x, y)` 将背景事件聚合成像素，每个像素只保留最高 logit，再把每帧最高的 32 个背景像素压到 logit `-1` 以下。所有原始事件始终参与 Token 生成、锥上下文建模和事件解码；验证始终使用全部事件。公式、单位和全部超参数见 [docs/stc_focal_loss.md](docs/stc_focal_loss.md)。
 
 ## 安装、分析与训练
 
@@ -98,7 +96,7 @@ python -m huav.cli.evaluate `
 - `config.yaml`：完整配置快照；
 - `dataset_manifest.json`：所有训练/验证 NPZ 的大小和 SHA-256；
 - `history.json`：逐 epoch 分开记录 `train_loss`、可复现的
-  `validation_loss`（total/focal/dice/object-frame/Fa）和阈值验证指标；
+  `validation_loss`（total/STC-Focal/Fa）和阈值验证指标；
 - `metrics.json` / `metrics.md`：最佳 checkpoint 指标；
 - `summary.json`：设备、参数量、epoch 和最佳结果。
 
@@ -125,11 +123,11 @@ python -m huav.cli.evaluate `
 - 将 Token 维度提升到 48，使用 3 层锥 Transformer 和每头 8 个邻居；
 - 事件和 Token 同时编码相对全序列的极性偏差，减少绝对极性捷径；
 - 邻居上限按时间距离交错分配，避免近时间片占满全部名额；
-- 训练损失加入目标帧召回项、完整事件背景像素 Fa 抑制项，并结合高置信硬负样本；
+- 训练损失使用 STC-Focal 和完整事件背景像素 margin Fa 抑制项，并结合高置信硬负样本；
 - 对事件数不少于 300,000 且背景极性均值位于 `[0.35, 0.65]` 的序列使用 3 倍损失权重；
 - 验证阈值按官网总分进行粗到细搜索，而不是只按事件 IoU 搜索。
 
-对应烟雾配置为 `configs/huav_score_optimized_smoke.yaml`。当前事件解码器不再重复拼接块统计量，首层权重形状随之变化，因此 checkpoint schema 为 `4`；schema `2/3` 结果继续保留为历史产物，但不能用当前模型代码直接加载。
+对应烟雾配置为 `configs/huav_score_optimized_smoke.yaml`。本轮损失及配置契约已移除 Dice 和 object-frame recall，并增加 STC 邻域参数，因此 checkpoint schema 为 `5`；schema `2/3/4` 结果继续保留为历史产物，不能直接用于本轮续训或复评。
 
 ## 完整训练结果
 
@@ -191,4 +189,4 @@ python -m pytest
 python -m ruff check src tests
 ```
 
-测试覆盖真实 NPZ 契约、斜率分析、稀疏 Token 映射、batch 隔离、过去/未来锥、多锥头、空锥、因果模式、事件级解码、Focal/Dice 反向传播、训练产物和 checkpoint 独立复评。
+测试覆盖真实 NPZ 契约、斜率分析、稀疏 Token 映射、batch 隔离、过去/未来锥、多锥头、空锥、因果模式、事件级解码、STC-Focal/Fa margin 反向传播、训练产物和 checkpoint 独立复评。

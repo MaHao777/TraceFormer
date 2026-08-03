@@ -29,7 +29,7 @@ from huav.training.engine import (
     resume_training,
     run_training,
 )
-from huav.training.losses import EventFocalDiceLoss
+from huav.training.losses import EventSpatiotemporalLoss
 
 
 def _write_sequence(path: Path, offset: int) -> None:
@@ -122,7 +122,7 @@ def _config(data_root: Path, output_root: Path) -> HUAVConfig:
         ),
         loss=replace(
             HUAVConfig.default().loss,
-            lambda_false_alarm=0.05,
+            lambda_fa=0.05,
         ),
     ).validate()
 
@@ -172,9 +172,7 @@ def test_cpu_training_writes_reproducible_metrics_and_checkpoint() -> None:
         assert history[0]["train_loss"]["false_alarm"] >= 0.0
         assert set(history[0]["validation_loss"]) == {
             "total",
-            "focal",
-            "dice",
-            "object_frame",
+            "stc_focal",
             "false_alarm",
         }
         assert all(
@@ -185,7 +183,7 @@ def test_cpu_training_writes_reproducible_metrics_and_checkpoint() -> None:
         checkpoint = __import__("torch").load(
             run_dir / "best.pt", map_location="cpu", weights_only=True
         )
-        assert checkpoint["schema_version"] == 4
+        assert checkpoint["schema_version"] == 5
         assert checkpoint["decision_threshold"] == metrics["threshold"]
         changed_config = replace(
             _config(data_root, output_root),
@@ -250,9 +248,7 @@ def test_resumed_training_records_validation_loss() -> None:
         assert history[0]["resumed_epoch"] == 1
         assert set(history[0]["validation_loss"]) == {
             "total",
-            "focal",
-            "dice",
-            "object_frame",
+            "stc_focal",
             "false_alarm",
         }
         assert all(
@@ -358,7 +354,7 @@ def test_training_forwards_all_events_before_sampling_loss(
     model_event_counts: list[int] = []
     loss_event_counts: list[int] = []
     original_model_forward = SpatioTemporalConeDetector.forward
-    original_loss_forward = EventFocalDiceLoss.forward
+    original_loss_forward = EventSpatiotemporalLoss.forward
 
     def record_model_forward(
         self: SpatioTemporalConeDetector,
@@ -369,10 +365,12 @@ def test_training_forwards_all_events_before_sampling_loss(
         return original_model_forward(self, events, batch_indices)
 
     def record_loss_forward(
-        self: EventFocalDiceLoss,
+        self: EventSpatiotemporalLoss,
         logits: torch.Tensor,
         targets: torch.Tensor,
-        batch_indices: torch.Tensor | None = None,
+        coordinates: torch.Tensor,
+        timestamps_ms: torch.Tensor,
+        batch_indices: torch.Tensor,
         **kwargs: object,
     ) -> dict[str, torch.Tensor]:
         loss_event_counts.append(len(logits))
@@ -380,12 +378,14 @@ def test_training_forwards_all_events_before_sampling_loss(
             self,
             logits,
             targets,
+            coordinates,
+            timestamps_ms,
             batch_indices,
             **kwargs,
         )
 
     monkeypatch.setattr(SpatioTemporalConeDetector, "forward", record_model_forward)
-    monkeypatch.setattr(EventFocalDiceLoss, "forward", record_loss_forward)
+    monkeypatch.setattr(EventSpatiotemporalLoss, "forward", record_loss_forward)
     with TemporaryDirectory(dir=Path.cwd()) as directory:
         temporary_root = Path(directory)
         data_root = temporary_root / "data"

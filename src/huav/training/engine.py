@@ -25,7 +25,7 @@ from huav.inference import (
 )
 from huav.models import SpatioTemporalConeDetector
 
-from .losses import EventFocalDiceLoss
+from .losses import EventSpatiotemporalLoss
 from .metrics import (
     EventMetricAccumulator,
     EVUAVMetricAccumulator,
@@ -34,7 +34,7 @@ from .metrics import (
 from .runtime import prepare_device
 from .sampling import sample_event_indices
 
-CHECKPOINT_SCHEMA_VERSION = 4
+CHECKPOINT_SCHEMA_VERSION = 5
 
 
 def build_model(config: HUAVConfig) -> SpatioTemporalConeDetector:
@@ -238,16 +238,14 @@ def evaluate_model(
     device: torch.device,
     progress: bool = False,
     threshold_override: float | None = None,
-    criterion: EventFocalDiceLoss | None = None,
+    criterion: EventSpatiotemporalLoss | None = None,
 ) -> dict[str, Any]:
     model.eval()
     sequence_results: list[tuple[torch.Tensor, LoadedEventSequence]] = []
     loss_totals = (
         {
             "total": 0.0,
-            "focal": 0.0,
-            "dice": 0.0,
-            "object_frame": 0.0,
+            "stc_focal": 0.0,
             "false_alarm": 0.0,
         }
         if criterion is not None
@@ -260,7 +258,6 @@ def evaluate_model(
         sequence = dataset[index]
         events = sequence.events.to(device)
         labels = sequence.labels.to(device)
-        object_ids = sequence.object_ids.to(device)
         timestamps_ms = sequence.timestamps_ms.to(device)
         batch_indices = torch.zeros(
             len(events), dtype=torch.long, device=device
@@ -280,9 +277,9 @@ def evaluate_model(
             losses = criterion(
                 output["event_logits"][query_indices],
                 labels[query_indices],
+                events[query_indices, :2],
+                timestamps_ms[query_indices],
                 batch_indices[query_indices],
-                object_ids=object_ids[query_indices],
-                timestamps_ms=timestamps_ms[query_indices],
                 frame_ms=config.evaluation.frame_ms,
                 full_logits=output["event_logits"],
                 full_targets=labels,
@@ -475,15 +472,22 @@ def run_training(
     validation_manifest_digest = _manifest_identity_digest(validation_manifest)
     _write_json(run_dir / "dataset_manifest.json", manifest)
     model = build_model(config).to(torch_device)
-    criterion = EventFocalDiceLoss(
-        focal_alpha=config.loss.focal_alpha,
-        focal_gamma=config.loss.focal_gamma,
-        lambda_dice=config.loss.lambda_dice,
-        lambda_object_frame=config.loss.lambda_object_frame,
-        object_frame_logit_margin=config.loss.object_frame_logit_margin,
-        lambda_false_alarm=config.loss.lambda_false_alarm,
-        false_alarm_logit_margin=config.loss.false_alarm_logit_margin,
-        false_alarm_topk_per_frame=config.loss.false_alarm_topk_per_frame,
+    criterion = EventSpatiotemporalLoss(
+        alpha=config.loss.alpha,
+        gamma_focal=config.loss.gamma_focal,
+        gamma_stc=config.loss.gamma_stc,
+        eta_pos=config.loss.eta_pos,
+        eta_neg=config.loss.eta_neg,
+        tau=config.loss.tau,
+        r0=config.loss.r0,
+        vmax=config.loss.vmax,
+        sigma_xy=config.loss.sigma_xy,
+        sigma_t=config.loss.sigma_t,
+        max_neighbors=config.loss.max_neighbors,
+        lambda_fa=config.loss.lambda_fa,
+        fa_top_k=config.loss.fa_top_k,
+        fa_negative_margin=config.loss.fa_negative_margin,
+        fa_temperature=config.loss.fa_temperature,
     )
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -519,9 +523,7 @@ def run_training(
         model.train()
         totals = {
             "total": 0.0,
-            "focal": 0.0,
-            "dice": 0.0,
-            "object_frame": 0.0,
+            "stc_focal": 0.0,
             "false_alarm": 0.0,
         }
         learning_rate = float(optimizer.param_groups[0]["lr"])
@@ -532,7 +534,6 @@ def run_training(
             sequence = train_dataset[dataset_index]
             events = sequence.events.to(torch_device)
             labels = sequence.labels.to(torch_device)
-            object_ids = sequence.object_ids.to(torch_device)
             timestamps_ms = sequence.timestamps_ms.to(torch_device)
             batch_indices = torch.zeros(
                 len(events), dtype=torch.long, device=torch_device
@@ -559,9 +560,9 @@ def run_training(
                 losses = criterion(
                     output["event_logits"][query_indices],
                     labels[query_indices],
+                    events[query_indices, :2],
+                    timestamps_ms[query_indices],
                     batch_indices[query_indices],
-                    object_ids=object_ids[query_indices],
-                    timestamps_ms=timestamps_ms[query_indices],
                     frame_ms=config.evaluation.frame_ms,
                     full_logits=output["event_logits"],
                     full_targets=labels,
@@ -766,15 +767,22 @@ def resume_training(
     model.load_state_dict(checkpoint["model_state"])
 
     # ── Loss, optimiser, scheduler ──────────────────────────────────────
-    criterion = EventFocalDiceLoss(
-        focal_alpha=config.loss.focal_alpha,
-        focal_gamma=config.loss.focal_gamma,
-        lambda_dice=config.loss.lambda_dice,
-        lambda_object_frame=config.loss.lambda_object_frame,
-        object_frame_logit_margin=config.loss.object_frame_logit_margin,
-        lambda_false_alarm=config.loss.lambda_false_alarm,
-        false_alarm_logit_margin=config.loss.false_alarm_logit_margin,
-        false_alarm_topk_per_frame=config.loss.false_alarm_topk_per_frame,
+    criterion = EventSpatiotemporalLoss(
+        alpha=config.loss.alpha,
+        gamma_focal=config.loss.gamma_focal,
+        gamma_stc=config.loss.gamma_stc,
+        eta_pos=config.loss.eta_pos,
+        eta_neg=config.loss.eta_neg,
+        tau=config.loss.tau,
+        r0=config.loss.r0,
+        vmax=config.loss.vmax,
+        sigma_xy=config.loss.sigma_xy,
+        sigma_t=config.loss.sigma_t,
+        max_neighbors=config.loss.max_neighbors,
+        lambda_fa=config.loss.lambda_fa,
+        fa_top_k=config.loss.fa_top_k,
+        fa_negative_margin=config.loss.fa_negative_margin,
+        fa_temperature=config.loss.fa_temperature,
     )
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -817,9 +825,7 @@ def resume_training(
         model.train()
         totals = {
             "total": 0.0,
-            "focal": 0.0,
-            "dice": 0.0,
-            "object_frame": 0.0,
+            "stc_focal": 0.0,
             "false_alarm": 0.0,
         }
         learning_rate = float(optimizer.param_groups[0]["lr"])
@@ -830,7 +836,6 @@ def resume_training(
             sequence = train_dataset[dataset_index]
             events = sequence.events.to(torch_device)
             labels = sequence.labels.to(torch_device)
-            object_ids = sequence.object_ids.to(torch_device)
             timestamps_ms = sequence.timestamps_ms.to(torch_device)
             batch_indices = torch.zeros(
                 len(events), dtype=torch.long, device=torch_device
@@ -857,9 +862,9 @@ def resume_training(
                 losses = criterion(
                     output["event_logits"][query_indices],
                     labels[query_indices],
+                    events[query_indices, :2],
+                    timestamps_ms[query_indices],
                     batch_indices[query_indices],
-                    object_ids=object_ids[query_indices],
-                    timestamps_ms=timestamps_ms[query_indices],
                     frame_ms=config.evaluation.frame_ms,
                     full_logits=output["event_logits"],
                     full_targets=labels,

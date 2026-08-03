@@ -88,14 +88,22 @@ class TrainingConfig:
 
 @dataclass(frozen=True)
 class LossConfig:
-    focal_alpha: float = 0.75
-    focal_gamma: float = 2.0
-    lambda_dice: float = 1.0
-    lambda_object_frame: float = 0.0
-    object_frame_logit_margin: float = 2.0
-    lambda_false_alarm: float = 0.0
-    false_alarm_logit_margin: float = 0.0
-    false_alarm_topk_per_frame: int = 32
+    # STC geometry uses raw source pixels and retained millisecond timestamps.
+    alpha: float = 0.55
+    gamma_focal: float = 2.0
+    gamma_stc: float = 2.0
+    eta_pos: float = 0.5
+    eta_neg: float = 0.5
+    tau: float = 50.0
+    r0: float = 8.0
+    vmax: float = 0.128
+    sigma_xy: float = 8.0
+    sigma_t: float = 25.0
+    max_neighbors: int = 32
+    lambda_fa: float = 0.5
+    fa_top_k: int = 32
+    fa_negative_margin: float = -1.0
+    fa_temperature: float = 0.25
 
 
 @dataclass(frozen=True)
@@ -265,29 +273,22 @@ class HUAVConfig:
             value = getattr(self.training, name)
             if value is not None:
                 _positive_integer(value, name)
-        focal_alpha = _finite_real(self.loss.focal_alpha, "focal_alpha")
-        if not 0 <= focal_alpha <= 1:
-            raise ValueError("focal_alpha must be in [0,1]")
-        if _finite_real(self.loss.focal_gamma, "focal_gamma") < 0:
-            raise ValueError("focal_gamma must be non-negative")
-        if _finite_real(self.loss.lambda_dice, "lambda_dice") <= 0:
-            raise ValueError("lambda_dice must be positive")
-        if _finite_real(self.loss.lambda_object_frame, "lambda_object_frame") < 0:
-            raise ValueError("lambda_object_frame must be non-negative")
-        if _finite_real(self.loss.lambda_false_alarm, "lambda_false_alarm") < 0:
-            raise ValueError("lambda_false_alarm must be non-negative")
-        _finite_real(
-            self.loss.object_frame_logit_margin,
-            "object_frame_logit_margin",
-        )
-        _finite_real(
-            self.loss.false_alarm_logit_margin,
-            "false_alarm_logit_margin",
-        )
-        _positive_integer(
-            self.loss.false_alarm_topk_per_frame,
-            "false_alarm_topk_per_frame",
-        )
+        alpha = _finite_real(self.loss.alpha, "loss alpha")
+        if not 0 <= alpha <= 1:
+            raise ValueError("loss alpha must be in [0,1]")
+        for name in ("eta_pos", "eta_neg"):
+            value = _finite_real(getattr(self.loss, name), f"loss {name}")
+            if not 0 <= value <= 1:
+                raise ValueError(f"loss {name} must be in [0,1]")
+        for name in ("gamma_focal", "gamma_stc", "r0", "vmax", "lambda_fa"):
+            if _finite_real(getattr(self.loss, name), f"loss {name}") < 0:
+                raise ValueError(f"loss {name} must be non-negative")
+        for name in ("tau", "sigma_xy", "sigma_t", "fa_temperature"):
+            if _finite_real(getattr(self.loss, name), f"loss {name}") <= 0:
+                raise ValueError(f"loss {name} must be positive")
+        _positive_integer(self.loss.max_neighbors, "loss max_neighbors")
+        _positive_integer(self.loss.fa_top_k, "loss fa_top_k")
+        _finite_real(self.loss.fa_negative_margin, "loss fa_negative_margin")
         if not isinstance(self.evaluation.optimize_threshold, bool):
             raise ValueError("optimize_threshold must be boolean")
         _positive_integer(self.evaluation.threshold_steps, "threshold_steps")
