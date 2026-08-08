@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import random
 from dataclasses import asdict
-from datetime import datetime
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
@@ -16,6 +15,12 @@ import torch
 import yaml
 from torch.nn.utils import clip_grad_norm_
 
+from huav.artifacts import (
+    create_run_directory,
+    rebuild_output_index,
+    record_run_finished,
+    record_run_started,
+)
 from huav.config import HUAVConfig
 from huav.data import EventSequence, LoadedEventSequence, NPZEventDataset
 from huav.inference import (
@@ -386,15 +391,11 @@ def _metrics_markdown(metrics: dict[str, Any]) -> str:
 def _run_directory(
     config: HUAVConfig, output_dir: str | Path | None, *, device_name: str
 ) -> Path:
-    if output_dir is not None:
-        run_dir = Path(output_dir)
-    else:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        run_dir = Path(config.training.output_root) / f"{device_name}_{timestamp}"
-    if run_dir.exists() and any(run_dir.iterdir()):
-        raise FileExistsError(f"run directory is not empty: {run_dir}")
-    run_dir.mkdir(parents=True, exist_ok=True)
-    return run_dir
+    return create_run_directory(
+        config.training.output_root,
+        device_name,
+        output_dir=output_dir,
+    )
 
 
 def _dataset_manifest(*datasets: NPZEventDataset) -> dict[str, Any]:
@@ -437,10 +438,10 @@ def _manifest_identity_digest(manifest: dict[str, Any]) -> str:
     return sha256(encoded).hexdigest()
 
 
-def run_training(
+def _run_training_impl(
     config: HUAVConfig,
     *,
-    output_dir: str | Path | None = None,
+    output_dir: str | Path,
     device: str | None = None,
     progress: bool = False,
 ) -> dict[str, Any]:
@@ -452,7 +453,7 @@ def run_training(
     np.random.seed(config.training.seed)
     torch.manual_seed(config.training.seed)
 
-    run_dir = _run_directory(config, output_dir, device_name=torch_device.type)
+    run_dir = Path(output_dir)
     configuration = _serializable(asdict(config))
     _atomic_write_text(
         run_dir / "config.yaml",
@@ -676,12 +677,66 @@ def run_training(
     return summary
 
 
-def resume_training(
+def run_training(
+    config: HUAVConfig,
+    *,
+    output_dir: str | Path | None = None,
+    device: str | None = None,
+    progress: bool = False,
+    note: str | None = None,
+    config_source: str | Path | None = None,
+) -> dict[str, Any]:
+    """Train while maintaining the run experiment record and output index."""
+    config.validate()
+    device_name = device or config.training.device
+    if device_name not in {"cpu", "cuda"}:
+        raise ValueError("device must be exactly 'cpu' or 'cuda'")
+    stage = (
+        "smoke"
+        if config.training.max_train_files is not None
+        or config.training.max_val_files is not None
+        else "full"
+    )
+    run_dir = _run_directory(config, output_dir, device_name=device_name)
+    record_run_started(
+        run_dir,
+        device=device_name,
+        mode="fresh",
+        stage=stage,
+        note=note,
+        config_source=config_source,
+    )
+    try:
+        summary = _run_training_impl(
+            config,
+            output_dir=run_dir,
+            device=device,
+            progress=progress,
+        )
+    except BaseException as error:
+        try:
+            record_run_finished(run_dir, status="失败", failure=str(error))
+            rebuild_output_index(run_dir.parent)
+        except Exception as bookkeeping_error:
+            if hasattr(error, "add_note"):
+                error.add_note(f"artifact update also failed: {bookkeeping_error}")
+        raise
+    try:
+        record_run_finished(run_dir, status="成功")
+        rebuild_output_index(run_dir.parent)
+    except Exception as bookkeeping_error:
+        raise RuntimeError(
+            "training core operation succeeded but artifact update failed"
+        ) from bookkeeping_error
+    return summary
+
+
+def _resume_training_impl(
     config: HUAVConfig,
     checkpoint_path: str | Path,
     *,
     additional_epochs: int = 10,
-    output_dir: str | Path | None = None,
+    output_dir: str | Path,
     device: str | None = None,
     progress: bool = False,
 ) -> dict[str, Any]:
@@ -735,18 +790,12 @@ def resume_training(
         )
 
     # ── Run directory ───────────────────────────────────────────────────
-    run_dir = _run_directory(config, output_dir, device_name=torch_device.type)
+    run_dir = Path(output_dir)
     configuration = _serializable(asdict(config))
     _atomic_write_text(
         run_dir / "config.yaml",
         yaml.safe_dump(configuration, allow_unicode=True, sort_keys=False),
     )
-    _atomic_write_text(
-        run_dir / "resumed_from.txt",
-        f"checkpoint: {checkpoint_path.resolve()}\n"
-        f"source_epoch: {checkpoint.get('epoch', 'unknown')}\n",
-    )
-
     # ── Datasets & manifest ─────────────────────────────────────────────
     train_dataset = _dataset(config, "train")
     validation_dataset = _dataset(config, "val")
@@ -984,6 +1033,71 @@ def resume_training(
         "metrics": best_metrics,
     }
     _write_json(run_dir / "summary.json", summary)
+    return summary
+
+
+def resume_training(
+    config: HUAVConfig,
+    checkpoint_path: str | Path,
+    *,
+    additional_epochs: int = 10,
+    output_dir: str | Path | None = None,
+    device: str | None = None,
+    progress: bool = False,
+    note: str | None = None,
+    config_source: str | Path | None = None,
+) -> dict[str, Any]:
+    """Resume training while maintaining the experiment record and index."""
+    config.validate()
+    device_name = device or config.training.device
+    if device_name not in {"cpu", "cuda"}:
+        raise ValueError("device must be exactly 'cpu' or 'cuda'")
+    checkpoint_metadata = torch.load(
+        Path(checkpoint_path), map_location="cpu", weights_only=True
+    )
+    raw_source_epoch = checkpoint_metadata.get("epoch")
+    source_epoch = int(raw_source_epoch) if isinstance(raw_source_epoch, int) else None
+    stage = (
+        "smoke"
+        if config.training.max_train_files is not None
+        or config.training.max_val_files is not None
+        else "full"
+    )
+    run_dir = _run_directory(config, output_dir, device_name=device_name)
+    record_run_started(
+        run_dir,
+        device=device_name,
+        mode="resume",
+        stage=stage,
+        note=note,
+        config_source=config_source,
+        resumed_from=checkpoint_path,
+        source_epoch=source_epoch,
+    )
+    try:
+        summary = _resume_training_impl(
+            config,
+            checkpoint_path,
+            additional_epochs=additional_epochs,
+            output_dir=run_dir,
+            device=device,
+            progress=progress,
+        )
+    except BaseException as error:
+        try:
+            record_run_finished(run_dir, status="失败", failure=str(error))
+            rebuild_output_index(run_dir.parent)
+        except Exception as bookkeeping_error:
+            if hasattr(error, "add_note"):
+                error.add_note(f"artifact update also failed: {bookkeeping_error}")
+        raise
+    try:
+        record_run_finished(run_dir, status="成功")
+        rebuild_output_index(run_dir.parent)
+    except Exception as bookkeeping_error:
+        raise RuntimeError(
+            "resume core operation succeeded but artifact update failed"
+        ) from bookkeeping_error
     return summary
 
 

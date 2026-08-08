@@ -17,6 +17,8 @@
 
 - 开始前先运行 `git status --short`，保留用户已有改动，不覆盖历史 `outputs/` 结果。
 - 每轮使用新的时间戳目录；全量训练、独立复评、提交 TXT 和 ZIP 必须能够对应到同一个 `best.pt`。
+- 默认运行目录统一为 `outputs/<device>_YYYYMMDD_HHMMSS/`，同秒冲突使用 `_02`、`_03`；smoke、full 和续训类型写入 `experiment.md`，不写入目录名。除兼容旧脚本外，不再手工拼接运行目录名。
+- 训练时使用 `--note` 记录本轮主要修改。复评默认写入同目录 `reproduced_metrics.json`，预测默认写入同目录 `submission/`；每个阶段结束后检查 `experiment.md` 和 `outputs/INDEX.md` 已更新。
 - 当前生产配置使用 checkpoint schema `3`。旧 schema `2` 只作为历史产物保留，不能用当前模型代码直接加载。
 - 始终保持每个原始事件及其 `x y t p` 顺序不变，模型输出必须对应每个原始事件。背景采样只能影响损失样本选择，不能删减前向上下文或提交事件。
 - 新的锥体几何或邻域尺度必须先基于真实训练数据统计确定，不能根据单个极端样本拍脑袋设置。
@@ -59,21 +61,19 @@ python -m huav.analysis.cone_slopes data/ev-uav/train `
 然后建立本轮唯一目录名，并跑通训练和验证链路：
 
 ```powershell
-$stamp = Get-Date -Format "yyyyMMdd_HHmmss"
-$smokeDir = "outputs/score_optimized_cpu_smoke_$stamp"
-$runDir = "outputs/score_optimized_cpu_full_$stamp"
-$submissionDir = "outputs/submission_$stamp"
-
 python -m huav.cli.train `
   --config configs/huav_score_optimized_smoke.yaml `
   --device cpu `
-  --output-dir $smokeDir
+  --note "真实数据 smoke 链路检查"
+
+$smokeDir = (Get-ChildItem outputs -Directory -Filter "cpu_*" |
+  Sort-Object LastWriteTime -Descending |
+  Select-Object -First 1).FullName
 
 python -m huav.cli.evaluate `
   --config "$smokeDir/config.yaml" `
   --checkpoint "$smokeDir/best.pt" `
   --device cpu `
-  --output "$smokeDir/reproduced_metrics.json" `
   --quiet
 ```
 
@@ -87,7 +87,11 @@ python -m huav.cli.evaluate `
 python -m huav.cli.train `
   --config configs/huav_score_optimized.yaml `
   --device cpu `
-  --output-dir $runDir
+  --note "本轮模型或训练方法修改摘要"
+
+$runDir = (Get-ChildItem outputs -Directory -Filter "cpu_*" |
+  Sort-Object LastWriteTime -Descending |
+  Select-Object -First 1).FullName
 ```
 
 确认全量训练覆盖当前全部训练文件和验证文件，并在 `$runDir` 下生成：
@@ -99,6 +103,7 @@ python -m huav.cli.train `
 - `metrics.json`
 - `metrics.md`
 - `summary.json`
+- `experiment.md`
 
 不得复用修改前的 `best.pt`，也不得用烟雾训练权重代替本轮全量训练权重。
 
@@ -111,7 +116,6 @@ python -m huav.cli.evaluate `
   --config "$runDir/config.yaml" `
   --checkpoint "$runDir/best.pt" `
   --device cpu `
-  --output "$runDir/reproduced_metrics.json" `
   --quiet
 ```
 
@@ -141,7 +145,6 @@ if ($savedHash -ne $reproducedHash) {
 python -m huav.cli.predict `
   --config "$runDir/config.yaml" `
   --checkpoint "$runDir/best.pt" `
-  --output-dir $submissionDir `
   --device cpu
 ```
 
@@ -153,7 +156,7 @@ python -m huav.cli.predict `
 - 每行严格为 `x y t p predicted_label` 五列；
 - 行数与源 NPZ 的事件数一致，`x y t p` 的值和顺序完全一致；
 - `predicted_label` 只能是 `0` 或 `1`；
-- `$submissionDir/submission.zip` 存在；
+- `$runDir/submission/submission.zip` 存在；
 - ZIP 根目录直接包含全部 TXT，不能含子目录、非 TXT 文件或额外包装目录；
 - ZIP 内 TXT 数量与验证文件数一致。
 
@@ -161,6 +164,7 @@ python -m huav.cli.predict `
 
 ```powershell
 Add-Type -AssemblyName System.IO.Compression.FileSystem
+$submissionDir = Join-Path $runDir "submission"
 $zipPath = Join-Path $submissionDir "submission.zip"
 $archive = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
 try {

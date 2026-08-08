@@ -48,10 +48,19 @@ def test_train_and_evaluate_expose_runtime_arguments() -> None:
     assert train_help.returncode == 0
     assert "--device" in train_help.stdout
     assert "--output-dir" in train_help.stdout
+    assert "--note" in train_help.stdout
+    assert "outputs/<device>_<timestamp>" in train_help.stdout
+    assert "outputs/cpu_<timestamp>" not in train_help.stdout
 
     evaluate_help = run("evaluate", "--help")
     assert evaluate_help.returncode == 0
     assert "--checkpoint" in evaluate_help.stdout
+
+
+def test_output_index_command_exposes_output_root() -> None:
+    result = run("index_outputs", "--help")
+    assert result.returncode == 0
+    assert "--output-root" in result.stdout
 
 
 def test_malformed_yaml_is_a_concise_cli_parser_error_without_traceback() -> None:

@@ -65,6 +65,17 @@ huav-inspect --help
 huav-train --config configs/huav_base.yaml --device cpu
 ```
 
+训练未指定 `--output-dir` 时，统一创建 `outputs/<device>_YYYYMMDD_HHMMSS/`；
+同一设备在同一秒启动的后续任务依次追加 `_02`、`_03`。`--output-dir` 仍可用于精确指定
+目录。建议用 `--note` 写明本轮主要修改，例如：
+
+```powershell
+huav-train `
+  --config configs/huav_score_optimized.yaml `
+  --device cpu `
+  --note "尝试新的背景抑制参数"
+```
+
 复现锥斜率分析：
 
 ```powershell
@@ -78,7 +89,8 @@ python -m huav.analysis.cone_slopes data/ev-uav/train `
 ```powershell
 python -m huav.cli.train `
   --config configs/huav_cpu_smoke.yaml `
-  --device cpu
+  --device cpu `
+  --note "真实数据 smoke 链路检查"
 ```
 
 独立复评 checkpoint：
@@ -90,6 +102,18 @@ python -m huav.cli.evaluate `
   --device cpu
 ```
 
+未指定 `--output` 时，复评结果默认写入 checkpoint 同目录的
+`reproduced_metrics.json`。提交预测同样默认写入 checkpoint 同目录的 `submission/`：
+
+```powershell
+python -m huav.cli.predict `
+  --config outputs/<run>/config.yaml `
+  --checkpoint outputs/<run>/best.pt `
+  --device cpu
+
+python -m huav.cli.index_outputs --output-root outputs
+```
+
 每次训练写入：
 
 - `best.pt`：比赛官网总分最优的权重、阈值和模型配置；
@@ -99,6 +123,12 @@ python -m huav.cli.evaluate `
   `validation_loss`（total/STC-Focal/Fa）和阈值验证指标；
 - `metrics.json` / `metrics.md`：最佳 checkpoint 指标；
 - `summary.json`：设备、参数量、epoch 和最佳结果。
+- `experiment.md`：本轮说明、Git 状态、训练状态、指标、独立复评和提交审计；自动维护区之外可自由补充，不会被后续更新覆盖；
+- `reproduced_metrics.json`：同一轮 `best.pt` 的独立复评结果；
+- `submission/`：同一轮比赛 TXT 和根目录仅含 TXT 的 `submission.zip`。
+
+训练、复评和预测结束后会自动重建 `outputs/INDEX.md`。索引按时间倒序列出新旧运行；
+无法从历史产物可靠恢复的字段显示为“历史产物／未知”，不会猜测 checkpoint 归属。
 
 ## 指标口径
 

@@ -23,10 +23,14 @@ def main() -> None:
     )
     parser.add_argument(
         "--output-dir",
-        help="exact run directory; defaults to outputs/cpu_<timestamp>",
+        help="exact run directory; defaults to outputs/<device>_<timestamp>",
     )
     parser.add_argument(
         "--quiet", action="store_true", help="hide per-file progress messages"
+    )
+    parser.add_argument(
+        "--note",
+        help="short description of the main change in this experiment",
     )
     parser.add_argument(
         "--resume",
@@ -58,6 +62,8 @@ def main() -> None:
                 output_dir=arguments.output_dir,
                 device=arguments.device,
                 progress=not arguments.quiet,
+                note=arguments.note,
+                config_source=arguments.config,
             )
         else:
             summary = run_training(
@@ -65,6 +71,8 @@ def main() -> None:
                 output_dir=arguments.output_dir,
                 device=arguments.device,
                 progress=not arguments.quiet,
+                note=arguments.note,
+                config_source=arguments.config,
             )
     except (OSError, RuntimeError, ValueError) as error:
         parser.error(str(error))

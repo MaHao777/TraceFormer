@@ -6,6 +6,11 @@ import argparse
 import json
 from pathlib import Path
 
+from huav.artifacts import (
+    rebuild_output_index,
+    record_evaluation,
+    resolve_evaluation_output,
+)
 from huav.config import load_config
 from huav.training.engine import evaluate_checkpoint
 
@@ -38,11 +43,18 @@ def main() -> None:
         )
     except (OSError, RuntimeError, ValueError) as error:
         parser.error(str(error))
-    if arguments.output:
-        Path(arguments.output).write_text(
+    try:
+        checkpoint_path = Path(arguments.checkpoint)
+        output_path = resolve_evaluation_output(checkpoint_path, arguments.output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(
             json.dumps(metrics, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
+        record_evaluation(checkpoint_path.parent, output_path)
+        rebuild_output_index(checkpoint_path.parent.parent)
+    except (OSError, RuntimeError, ValueError) as error:
+        parser.error(f"evaluation succeeded but artifact update failed: {error}")
     print(json.dumps(metrics, ensure_ascii=False, indent=2))
 
 
