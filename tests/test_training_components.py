@@ -4,9 +4,12 @@ import pytest
 import torch
 
 from huav.training.losses import (
-    EventSpatiotemporalLoss,
-    margin_false_alarm_loss,
-    spatiotemporal_focal_loss,
+    EventFocalDiceLoss,
+    binary_dice_loss,
+    binary_focal_loss,
+    false_alarm_pixel_loss,
+    object_frame_recall_loss,
+    spatiotemporal_continuity_weight,
 )
 from huav.training.metrics import (
     EventMetricAccumulator,
@@ -51,81 +54,69 @@ def _loss_coordinates(count: int) -> torch.Tensor:
     )
 
 
-def test_spatiotemporal_focal_loss_handles_empty_events() -> None:
-    logits = torch.empty(0, requires_grad=True)
-    loss = spatiotemporal_focal_loss(
-        logits,
-        torch.empty(0),
-        torch.empty((0, 2)),
-        torch.empty(0),
-        torch.empty(0, dtype=torch.long),
+def test_focal_and_dice_losses_prefer_correct_logits() -> None:
+    targets = torch.tensor([1.0, 0.0, 1.0, 0.0])
+    correct = torch.tensor([5.0, -5.0, 5.0, -5.0])
+    wrong = -correct
+
+    assert binary_focal_loss(correct, targets) < binary_focal_loss(wrong, targets)
+    assert binary_dice_loss(correct, targets) < binary_dice_loss(wrong, targets)
+
+
+def test_lambda_stc_zero_matches_original_focal_value_and_gradient() -> None:
+    targets = torch.tensor([1.0, 0.0, 1.0, 0.0])
+    coordinates = _loss_coordinates(4)
+    timestamps = torch.tensor([1.0, 2.0, 3.0, 4.0])
+    batches = torch.zeros(4, dtype=torch.long)
+    baseline_logits = torch.tensor([0.2, -0.4, 1.1, -1.3], requires_grad=True)
+    stc_logits = baseline_logits.detach().clone().requires_grad_(True)
+
+    baseline = binary_focal_loss(
+        baseline_logits, targets, alpha=0.75, gamma=2.0
     )
-
-    assert loss.item() == 0.0
-    loss.backward()
-    assert logits.grad is not None
-
-
-@pytest.mark.parametrize("target", [0.0, 1.0])
-def test_spatiotemporal_focal_loss_is_finite_for_single_class(target: float) -> None:
-    logits = torch.tensor([-2.0, 0.0, 2.0], requires_grad=True)
-    loss = spatiotemporal_focal_loss(
-        logits,
-        torch.full((3,), target),
-        _loss_coordinates(3),
-        torch.tensor([1.0, 2.0, 3.0]),
-        torch.zeros(3, dtype=torch.long),
+    criterion = EventFocalDiceLoss(
+        lambda_stc=0.0,
+        lambda_object_frame=0.0,
+        lambda_false_alarm=0.0,
     )
-
-    assert torch.isfinite(loss)
-    loss.backward()
-    assert logits.grad is not None
-    assert torch.isfinite(logits.grad).all()
-
-
-def test_spatiotemporal_focal_loss_uses_no_neighbor_support_of_zero() -> None:
-    logits = torch.tensor([0.0, 0.0])
-    targets = torch.tensor([1.0, 0.0])
-    loss = spatiotemporal_focal_loss(
-        logits,
+    weighted = criterion(
+        stc_logits,
         targets,
+        batches,
+        coordinates=coordinates,
+        timestamps_ms=timestamps,
+    )["focal"]
+    baseline.backward()
+    weighted.backward()
+
+    torch.testing.assert_close(weighted, baseline)
+    torch.testing.assert_close(stc_logits.grad, baseline_logits.grad)
+
+
+def test_stc_weight_range_and_no_neighbor_behavior() -> None:
+    weights = spatiotemporal_continuity_weight(
+        torch.tensor([0.0, 0.0]),
+        torch.tensor([1.0, 0.0]),
         torch.tensor([[0.0, 0.0], [100.0, 100.0]]),
         torch.tensor([0.0, 1000.0]),
         torch.zeros(2, dtype=torch.long),
-        alpha=0.55,
-        gamma_focal=2.0,
-        gamma_stc=2.0,
-        eta_pos=0.5,
-        eta_neg=0.5,
-        tau=50.0,
-        r0=8.0,
-        vmax=0.128,
-        sigma_xy=8.0,
-        sigma_t=25.0,
-        max_neighbors=32,
+        lambda_stc=0.1,
     )
-    bce = torch.nn.functional.binary_cross_entropy_with_logits(
-        logits, targets, reduction="none"
-    )
-    expected_weights = torch.tensor([0.55 * 0.5, 0.45])
-    expected = (expected_weights * 0.25 * bce).mean()
 
-    torch.testing.assert_close(loss, expected)
+    torch.testing.assert_close(weights, torch.tensor([1.1, 1.0]))
+    assert float(weights.min()) >= 1.0
+    assert float(weights.max()) <= 1.1
 
 
-def test_spatiotemporal_focal_loss_does_not_link_different_batches() -> None:
-    logits = torch.tensor([3.0, 3.0])
+def test_stc_weight_does_not_link_different_batches() -> None:
+    logits = torch.tensor([4.0, 4.0])
     targets = torch.ones(2)
     coordinates = torch.tensor([[4.0, 4.0], [4.0, 4.0]])
     timestamps = torch.tensor([10.0, 11.0])
-    split_batch_loss = spatiotemporal_focal_loss(
-        logits,
-        targets,
-        coordinates,
-        timestamps,
-        torch.tensor([0, 1]),
+    split = spatiotemporal_continuity_weight(
+        logits, targets, coordinates, timestamps, torch.tensor([0, 1])
     )
-    isolated_loss = spatiotemporal_focal_loss(
+    isolated = spatiotemporal_continuity_weight(
         logits,
         targets,
         torch.tensor([[4.0, 4.0], [200.0, 200.0]]),
@@ -133,31 +124,40 @@ def test_spatiotemporal_focal_loss_does_not_link_different_batches() -> None:
         torch.zeros(2, dtype=torch.long),
     )
 
-    torch.testing.assert_close(split_batch_loss, isolated_loss)
+    torch.testing.assert_close(split, isolated)
 
 
-def test_confident_continuous_target_track_has_lower_loss_than_isolated_predictions() -> None:
-    targets = torch.ones(4)
-    batches = torch.zeros(4, dtype=torch.long)
-    continuous_loss = spatiotemporal_focal_loss(
-        torch.full((4,), 4.0),
-        targets,
-        torch.tensor([[10.0, 10.0], [11.0, 10.0], [12.0, 10.0], [13.0, 10.0]]),
-        torch.tensor([10.0, 20.0, 30.0, 40.0]),
-        batches,
-    )
-    isolated_loss = spatiotemporal_focal_loss(
-        torch.full((4,), 0.5),
-        targets,
-        torch.tensor([[0.0, 0.0], [80.0, 0.0], [160.0, 0.0], [240.0, 0.0]]),
-        torch.tensor([0.0, 100.0, 200.0, 300.0]),
-        batches,
+def test_stc_neighbor_support_is_detached() -> None:
+    logits = torch.tensor([2.0, -2.0], requires_grad=True)
+    weights = spatiotemporal_continuity_weight(
+        logits,
+        torch.tensor([1.0, 0.0]),
+        torch.tensor([[5.0, 5.0], [6.0, 5.0]]),
+        torch.tensor([10.0, 20.0]),
+        torch.zeros(2, dtype=torch.long),
     )
 
-    assert continuous_loss < isolated_loss
+    assert weights.requires_grad is False
 
 
-def test_margin_false_alarm_loss_penalizes_isolated_high_background() -> None:
+def test_object_frame_loss_requires_one_confident_event_per_object_frame() -> None:
+    labels = torch.ones(4)
+    object_ids = torch.tensor([1, 1, 2, 2])
+    timestamps_ms = torch.tensor([1.0, 2.0, 51.0, 52.0])
+    confident = torch.tensor([3.0, -3.0, 3.0, -3.0])
+    missed = torch.full((4,), -3.0)
+
+    confident_loss = object_frame_recall_loss(
+        confident, labels, object_ids, timestamps_ms, frame_ms=50.0, logit_margin=2.0
+    )
+    missed_loss = object_frame_recall_loss(
+        missed, labels, object_ids, timestamps_ms, frame_ms=50.0, logit_margin=2.0
+    )
+
+    assert confident_loss < missed_loss
+
+
+def test_false_alarm_pixel_loss_penalizes_high_background_responses() -> None:
     labels = torch.zeros(4)
     batches = torch.zeros(4, dtype=torch.long)
     timestamps_ms = torch.tensor([1.0, 2.0, 51.0, 52.0])
@@ -167,39 +167,37 @@ def test_margin_false_alarm_loss_penalizes_isolated_high_background() -> None:
     low_background = torch.full((4,), -5.0)
     high_background = torch.tensor([5.0, -5.0, 5.0, -5.0])
 
-    low_loss = margin_false_alarm_loss(
+    low_loss = false_alarm_pixel_loss(
         low_background,
         labels,
         batches,
         timestamps_ms,
         coordinates,
         frame_ms=50.0,
-        negative_margin=-1.0,
-        temperature=0.25,
+        logit_margin=0.0,
     )
-    high_loss = margin_false_alarm_loss(
+    high_loss = false_alarm_pixel_loss(
         high_background,
         labels,
         batches,
         timestamps_ms,
         coordinates,
         frame_ms=50.0,
-        negative_margin=-1.0,
-        temperature=0.25,
+        logit_margin=0.0,
     )
 
     assert low_loss < high_loss
 
 
-def test_margin_false_alarm_loss_counts_repeated_pixel_events_once() -> None:
-    single_loss = margin_false_alarm_loss(
+def test_false_alarm_pixel_loss_counts_repeated_pixel_events_once() -> None:
+    single_loss = false_alarm_pixel_loss(
         torch.tensor([2.0]),
         torch.zeros(1),
         torch.zeros(1, dtype=torch.long),
         torch.tensor([1.0]),
         torch.tensor([[4.0, 5.0]]),
     )
-    repeated_loss = margin_false_alarm_loss(
+    repeated_loss = false_alarm_pixel_loss(
         torch.tensor([2.0, -1.0, -3.0]),
         torch.zeros(3),
         torch.zeros(3, dtype=torch.long),
@@ -210,35 +208,16 @@ def test_margin_false_alarm_loss_counts_repeated_pixel_events_once() -> None:
     torch.testing.assert_close(single_loss, repeated_loss)
 
 
-def test_margin_false_alarm_loss_suppresses_continuous_background_cluster() -> None:
-    low_cluster = margin_false_alarm_loss(
-        torch.full((4,), -4.0),
-        torch.zeros(4),
-        torch.zeros(4, dtype=torch.long),
-        torch.tensor([1.0, 2.0, 3.0, 4.0]),
-        torch.tensor([[5.0, 5.0], [6.0, 5.0], [7.0, 5.0], [8.0, 5.0]]),
-    )
-    high_cluster = margin_false_alarm_loss(
-        torch.full((4,), 4.0),
-        torch.zeros(4),
-        torch.zeros(4, dtype=torch.long),
-        torch.tensor([1.0, 2.0, 3.0, 4.0]),
-        torch.tensor([[5.0, 5.0], [6.0, 5.0], [7.0, 5.0], [8.0, 5.0]]),
-    )
-
-    assert low_cluster < high_cluster
-
-
-def test_margin_false_alarm_loss_focuses_on_hardest_pixels_per_frame() -> None:
-    single_hard_loss = margin_false_alarm_loss(
+def test_false_alarm_pixel_loss_focuses_on_hardest_pixels_per_frame() -> None:
+    single_hard_loss = false_alarm_pixel_loss(
         torch.tensor([3.0]),
         torch.zeros(1),
         torch.zeros(1, dtype=torch.long),
         torch.tensor([1.0]),
         torch.tensor([[1.0, 1.0]]),
-        top_k=1,
+        topk_per_frame=1,
     )
-    hard_with_easy_pixels = margin_false_alarm_loss(
+    hard_with_easy_pixels = false_alarm_pixel_loss(
         torch.tensor([3.0, -8.0, -8.0, -8.0]),
         torch.zeros(4),
         torch.zeros(4, dtype=torch.long),
@@ -246,43 +225,45 @@ def test_margin_false_alarm_loss_focuses_on_hardest_pixels_per_frame() -> None:
         torch.tensor(
             [[1.0, 1.0], [2.0, 2.0], [3.0, 3.0], [4.0, 4.0]]
         ),
-        top_k=1,
+        topk_per_frame=1,
     )
 
     torch.testing.assert_close(single_hard_loss, hard_with_easy_pixels)
 
 
-def test_margin_false_alarm_loss_accepts_top_k_larger_than_pixel_count() -> None:
-    loss = margin_false_alarm_loss(
+def test_false_alarm_pixel_loss_accepts_top_k_larger_than_pixel_count() -> None:
+    loss = false_alarm_pixel_loss(
         torch.tensor([2.0, -2.0]),
         torch.zeros(2),
         torch.zeros(2, dtype=torch.long),
         torch.tensor([1.0, 2.0]),
         torch.tensor([[1.0, 1.0], [2.0, 2.0]]),
-        top_k=32,
+        topk_per_frame=32,
     )
 
     assert torch.isfinite(loss)
 
 
-def test_total_loss_is_stc_focal_plus_full_event_margin_fa() -> None:
+def test_total_loss_restores_best_components_and_reports_stc_weight() -> None:
     sampled_logits = torch.tensor([2.0, -2.0], requires_grad=True)
     sampled_labels = torch.tensor([1.0, 0.0])
     full_logits = torch.tensor([2.0, -2.0, 3.0], requires_grad=True)
     full_labels = torch.tensor([1.0, 0.0, 0.0])
-    criterion = EventSpatiotemporalLoss(
-        lambda_fa=0.2,
-        fa_negative_margin=-1.0,
-        fa_temperature=0.25,
-        fa_top_k=2,
+    criterion = EventFocalDiceLoss(
+        lambda_dice=0.75,
+        lambda_object_frame=0.25,
+        lambda_false_alarm=0.05,
+        false_alarm_topk_per_frame=2,
+        lambda_stc=0.1,
     )
 
     losses = criterion(
         sampled_logits,
         sampled_labels,
-        torch.tensor([[1.0, 1.0], [2.0, 2.0]]),
-        torch.tensor([1.0, 1.0]),
         torch.zeros(2, dtype=torch.long),
+        coordinates=torch.tensor([[1.0, 1.0], [2.0, 2.0]]),
+        object_ids=torch.tensor([1, 0]),
+        timestamps_ms=torch.tensor([1.0, 1.0]),
         full_logits=full_logits,
         full_targets=full_labels,
         full_batch_indices=torch.zeros(3, dtype=torch.long),
@@ -293,26 +274,61 @@ def test_total_loss_is_stc_focal_plus_full_event_margin_fa() -> None:
         frame_ms=50.0,
     )
 
-    expected = losses["stc_focal"] + 0.2 * losses["false_alarm"]
+    expected = (
+        losses["focal"]
+        + 0.75 * losses["dice"]
+        + 0.25 * losses["object_frame"]
+        + 0.05 * losses["false_alarm"]
+    )
     assert torch.allclose(losses["total"], expected)
-    assert set(losses) == {"total", "stc_focal", "false_alarm"}
+    assert set(losses) == {
+        "total",
+        "focal",
+        "dice",
+        "object_frame",
+        "false_alarm",
+        "stc_weight_mean",
+    }
+    assert 1.0 <= float(losses["stc_weight_mean"]) <= 1.1
     losses["total"].backward()
     assert torch.isfinite(sampled_logits.grad).all()
     assert torch.isfinite(full_logits.grad).all()
-def test_new_losses_remain_finite_under_cpu_bfloat16_autocast() -> None:
+
+
+@pytest.mark.parametrize("target", [0.0, 1.0])
+def test_restored_loss_is_stable_for_empty_and_single_class(target: float) -> None:
+    empty_logits = torch.empty(0, requires_grad=True)
+    criterion = EventFocalDiceLoss(lambda_stc=0.1)
+    empty = criterion(
+        empty_logits,
+        torch.empty(0),
+        torch.empty(0, dtype=torch.long),
+        coordinates=torch.empty((0, 2)),
+        object_ids=torch.empty(0, dtype=torch.long),
+        timestamps_ms=torch.empty(0),
+    )
+    assert all(torch.isfinite(value) for value in empty.values())
+    empty["total"].backward()
+
     logits = torch.tensor([2.0, -1.0, 1.5, -3.0], requires_grad=True)
-    targets = torch.tensor([1.0, 0.0, 1.0, 0.0])
+    targets = torch.full((4,), target)
     coordinates = _loss_coordinates(4)
     timestamps = torch.tensor([1.0, 2.0, 3.0, 4.0])
     batches = torch.zeros(4, dtype=torch.long)
     with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
-        stc = spatiotemporal_focal_loss(
-            logits, targets, coordinates, timestamps, batches
-        )
-        false_alarm = margin_false_alarm_loss(
-            logits, targets, batches, timestamps, coordinates
-        )
-        loss = stc + false_alarm
+        loss = criterion(
+            logits,
+            targets,
+            batches,
+            coordinates=coordinates,
+            object_ids=torch.zeros(4, dtype=torch.long),
+            timestamps_ms=timestamps,
+            full_logits=logits,
+            full_targets=targets,
+            full_batch_indices=batches,
+            full_timestamps_ms=timestamps,
+            full_coordinates=coordinates,
+        )["total"]
 
     assert torch.isfinite(loss)
     loss.backward()

@@ -88,22 +88,23 @@ class TrainingConfig:
 
 @dataclass(frozen=True)
 class LossConfig:
-    # STC geometry uses raw source pixels and retained millisecond timestamps.
-    alpha: float = 0.55
-    gamma_focal: float = 2.0
+    focal_alpha: float = 0.75
+    focal_gamma: float = 2.0
+    lambda_dice: float = 0.75
+    lambda_object_frame: float = 0.25
+    object_frame_logit_margin: float = 2.0
+    lambda_false_alarm: float = 0.05
+    false_alarm_logit_margin: float = 0.0
+    false_alarm_topk_per_frame: int = 32
+    lambda_stc: float = 0.1
     gamma_stc: float = 2.0
-    eta_pos: float = 0.5
-    eta_neg: float = 0.5
-    tau: float = 50.0
-    r0: float = 8.0
-    vmax: float = 0.128
-    sigma_xy: float = 8.0
-    sigma_t: float = 25.0
-    max_neighbors: int = 32
-    lambda_fa: float = 0.5
-    fa_top_k: int = 32
-    fa_negative_margin: float = -1.0
-    fa_temperature: float = 0.25
+    # STC geometry uses raw source pixels and retained millisecond timestamps.
+    stc_tau: float = 50.0
+    stc_r0: float = 8.0
+    stc_vmax: float = 0.128
+    stc_sigma_xy: float = 8.0
+    stc_sigma_t: float = 25.0
+    stc_max_neighbors: int = 32
 
 
 @dataclass(frozen=True)
@@ -273,22 +274,40 @@ class HUAVConfig:
             value = getattr(self.training, name)
             if value is not None:
                 _positive_integer(value, name)
-        alpha = _finite_real(self.loss.alpha, "loss alpha")
+        alpha = _finite_real(self.loss.focal_alpha, "loss focal_alpha")
         if not 0 <= alpha <= 1:
-            raise ValueError("loss alpha must be in [0,1]")
-        for name in ("eta_pos", "eta_neg"):
-            value = _finite_real(getattr(self.loss, name), f"loss {name}")
-            if not 0 <= value <= 1:
-                raise ValueError(f"loss {name} must be in [0,1]")
-        for name in ("gamma_focal", "gamma_stc", "r0", "vmax", "lambda_fa"):
+            raise ValueError("loss focal_alpha must be in [0,1]")
+        for name in (
+            "focal_gamma",
+            "gamma_stc",
+            "stc_r0",
+            "stc_vmax",
+            "lambda_object_frame",
+            "lambda_false_alarm",
+        ):
             if _finite_real(getattr(self.loss, name), f"loss {name}") < 0:
                 raise ValueError(f"loss {name} must be non-negative")
-        for name in ("tau", "sigma_xy", "sigma_t", "fa_temperature"):
+        if _finite_real(self.loss.lambda_dice, "loss lambda_dice") <= 0:
+            raise ValueError("loss lambda_dice must be positive")
+        lambda_stc = _finite_real(self.loss.lambda_stc, "loss lambda_stc")
+        if not 0 <= lambda_stc <= 1:
+            raise ValueError("loss lambda_stc must be in [0,1]")
+        for name in ("stc_tau", "stc_sigma_xy", "stc_sigma_t"):
             if _finite_real(getattr(self.loss, name), f"loss {name}") <= 0:
                 raise ValueError(f"loss {name} must be positive")
-        _positive_integer(self.loss.max_neighbors, "loss max_neighbors")
-        _positive_integer(self.loss.fa_top_k, "loss fa_top_k")
-        _finite_real(self.loss.fa_negative_margin, "loss fa_negative_margin")
+        _positive_integer(self.loss.stc_max_neighbors, "loss stc_max_neighbors")
+        _positive_integer(
+            self.loss.false_alarm_topk_per_frame,
+            "loss false_alarm_topk_per_frame",
+        )
+        _finite_real(
+            self.loss.object_frame_logit_margin,
+            "loss object_frame_logit_margin",
+        )
+        _finite_real(
+            self.loss.false_alarm_logit_margin,
+            "loss false_alarm_logit_margin",
+        )
         if not isinstance(self.evaluation.optimize_threshold, bool):
             raise ValueError("optimize_threshold must be boolean")
         _positive_integer(self.evaluation.threshold_steps, "threshold_steps")

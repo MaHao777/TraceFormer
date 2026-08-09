@@ -11,7 +11,7 @@ import torch
 from huav.config import load_config
 from huav.data import NPZEventDataset
 from huav.training.engine import _amp_is_enabled, _autocast_dtype, build_model
-from huav.training.losses import EventSpatiotemporalLoss
+from huav.training.losses import EventFocalDiceLoss
 from huav.training.runtime import prepare_device
 from huav.training.sampling import sample_event_indices
 
@@ -56,25 +56,27 @@ def main() -> None:
         )
     sequence = dataset[matching[0]]
     model = build_model(config).to(device).train()
-    criterion = EventSpatiotemporalLoss(
-        alpha=config.loss.alpha,
-        gamma_focal=config.loss.gamma_focal,
+    criterion = EventFocalDiceLoss(
+        focal_alpha=config.loss.focal_alpha,
+        focal_gamma=config.loss.focal_gamma,
+        lambda_dice=config.loss.lambda_dice,
+        lambda_object_frame=config.loss.lambda_object_frame,
+        object_frame_logit_margin=config.loss.object_frame_logit_margin,
+        lambda_false_alarm=config.loss.lambda_false_alarm,
+        false_alarm_logit_margin=config.loss.false_alarm_logit_margin,
+        false_alarm_topk_per_frame=config.loss.false_alarm_topk_per_frame,
+        lambda_stc=config.loss.lambda_stc,
         gamma_stc=config.loss.gamma_stc,
-        eta_pos=config.loss.eta_pos,
-        eta_neg=config.loss.eta_neg,
-        tau=config.loss.tau,
-        r0=config.loss.r0,
-        vmax=config.loss.vmax,
-        sigma_xy=config.loss.sigma_xy,
-        sigma_t=config.loss.sigma_t,
-        max_neighbors=config.loss.max_neighbors,
-        lambda_fa=config.loss.lambda_fa,
-        fa_top_k=config.loss.fa_top_k,
-        fa_negative_margin=config.loss.fa_negative_margin,
-        fa_temperature=config.loss.fa_temperature,
+        stc_tau=config.loss.stc_tau,
+        stc_r0=config.loss.stc_r0,
+        stc_vmax=config.loss.stc_vmax,
+        stc_sigma_xy=config.loss.stc_sigma_xy,
+        stc_sigma_t=config.loss.stc_sigma_t,
+        stc_max_neighbors=config.loss.stc_max_neighbors,
     )
     events = sequence.events.to(device)
     labels = sequence.labels.to(device)
+    object_ids = sequence.object_ids.to(device)
     timestamps_ms = sequence.timestamps_ms.to(device)
     batch_indices = torch.zeros(len(events), dtype=torch.long, device=device)
     sampling_generator = torch.Generator(device=device.type).manual_seed(
@@ -104,9 +106,10 @@ def main() -> None:
         losses = criterion(
             output["event_logits"][query_indices],
             labels[query_indices],
-            events[query_indices, :2],
-            timestamps_ms[query_indices],
             batch_indices[query_indices],
+            coordinates=events[query_indices, :2],
+            object_ids=object_ids[query_indices],
+            timestamps_ms=timestamps_ms[query_indices],
             frame_ms=config.evaluation.frame_ms,
             full_logits=output["event_logits"],
             full_targets=labels,
@@ -131,7 +134,10 @@ def main() -> None:
             for name, value in losses.items()
         },
         "false_alarm": float(losses["false_alarm"].detach().float().item()),
-        "stc_focal": float(losses["stc_focal"].detach().float().item()),
+        "focal": float(losses["focal"].detach().float().item()),
+        "stc_weight_mean": float(
+            losses["stc_weight_mean"].detach().float().item()
+        ),
         "max_memory_allocated_bytes": peak_memory,
         "runtime": runtime.metadata,
     }

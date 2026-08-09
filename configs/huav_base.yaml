@@ -43,21 +43,22 @@ training:
   max_train_files:
   max_val_files:
 loss:
-  alpha: 0.55
-  gamma_focal: 2.0
+  focal_alpha: 0.75
+  focal_gamma: 2.0
+  lambda_dice: 0.75
+  lambda_object_frame: 0.25
+  object_frame_logit_margin: 2.0
+  lambda_false_alarm: 0.05
+  false_alarm_logit_margin: 0.0
+  false_alarm_topk_per_frame: 32
+  lambda_stc: 0.1
   gamma_stc: 2.0
-  eta_pos: 0.5
-  eta_neg: 0.5
-  tau: 50.0
-  r0: 8.0
-  vmax: 0.128
-  sigma_xy: 8.0
-  sigma_t: 25.0
-  max_neighbors: 32
-  lambda_fa: 0.5
-  fa_top_k: 32
-  fa_negative_margin: -1.0
-  fa_temperature: 0.25
+  stc_tau: 50.0
+  stc_r0: 8.0
+  stc_vmax: 0.128
+  stc_sigma_xy: 8.0
+  stc_sigma_t: 25.0
+  stc_max_neighbors: 32
 evaluation:
   optimize_threshold: true
   threshold_steps: 19

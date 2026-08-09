@@ -1,0 +1,1290 @@
+{
+  "method": {
+    "track_key": "positive event field 'name' within each source file",
+    "center": "median x/y for groups with at least three events",
+    "distance": "Chebyshev distance between target centers",
+    "outlier_policy": "report all pairs; choose cone heads from robust quantiles"
+  },
+  "configuration": {
+    "spatial_block_size_x": 8,
+    "spatial_block_size_y": 8,
+    "num_time_blocks": 160,
+    "duration_ms": 8000.0,
+    "max_time_distance": 20,
+    "min_events_per_group": 3,
+    "milliseconds_per_time_block": 50.0,
+    "selected_max_time_distances": [
+      10,
+      10,
+      15,
+      20
+    ]
+  },
+  "dataset": {
+    "root": "D:\\VS_project\\TinyObjDetection\\HUAV\\data\\ev-uav\\train",
+    "files": 99,
+    "positive_events": 274122,
+    "tracks": 321,
+    "valid_time_groups": 18024,
+    "slope_pairs": 262142
+  },
+  "summary": {
+    "slope_unit": "spatial_blocks_per_time_block",
+    "raw_slope_quantiles": {
+      "q00": 0.0,
+      "q25": 0.171875,
+      "q50": 0.25,
+      "q75": 0.375,
+      "q90": 0.5,
+      "q95": 0.5625,
+      "q99": 0.75,
+      "q995": 0.8125,
+      "q999": 1.0,
+      "q100": 11.6875
+    },
+    "required_slope_base_radius_1_quantiles": {
+      "q00": 0.0,
+      "q25": 0.0,
+      "q50": 0.1125,
+      "q75": 0.234375,
+      "q90": 0.36328125,
+      "q95": 0.4375,
+      "q99": 0.6,
+      "q995": 0.6785714285714286,
+      "q999": 0.8125,
+      "q100": 10.6875
+    },
+    "required_slope_base_radius_2_quantiles": {
+      "q00": 0.0,
+      "q25": 0.0,
+      "q50": 0.013157894736842105,
+      "q75": 0.13839285714285715,
+      "q90": 0.275,
+      "q95": 0.3522727272727273,
+      "q99": 0.5138888888888888,
+      "q995": 0.5909090909090909,
+      "q999": 0.7271725852272705,
+      "q100": 9.6875
+    },
+    "target_90pct_half_extent_quantiles": {
+      "q00": 0.0,
+      "q25": 0.25,
+      "q50": 0.30000000000000004,
+      "q75": 0.375,
+      "q90": 0.5,
+      "q95": 0.6125000000000003,
+      "q99": 0.8,
+      "q995": 0.925,
+      "q999": 1.3744249999999738,
+      "q100": 11.525
+    },
+    "recommended_cone_slopes": [
+      0.2,
+      0.4,
+      0.6,
+      0.8
+    ],
+    "recommended_base_radii": [
+      1.0,
+      1.0,
+      2.0,
+      2.0
+    ]
+  },
+  "per_time_distance": {
+    "1": {
+      "pairs": 16350,
+      "quantiles": {
+        "q00": 0.0,
+        "q25": 0.1875,
+        "q50": 0.25,
+        "q75": 0.375,
+        "q90": 0.5625,
+        "q95": 0.625,
+        "q99": 0.9375,
+        "q995": 1.125,
+        "q999": 2.3125,
+        "q100": 11.6875
+      }
+    },
+    "2": {
+      "pairs": 15971,
+      "quantiles": {
+        "q00": 0.0,
+        "q25": 0.1875,
+        "q50": 0.25,
+        "q75": 0.375,
+        "q90": 0.5,
+        "q95": 0.59375,
+        "q99": 0.78125,
+        "q995": 0.875,
+        "q999": 1.3446875000000205,
+        "q100": 6.0
+      }
+    },
+    "3": {
+      "pairs": 15576,
+      "quantiles": {
+        "q00": 0.0,
+        "q25": 0.16666666666666666,
+        "q50": 0.25,
+        "q75": 0.375,
+        "q90": 0.5,
+        "q95": 0.5833333333333334,
+        "q99": 0.75,
+        "q995": 0.8333333333333334,
+        "q999": 1.0505208333333182,
+        "q100": 4.083333333333333
+      }
+    },
+    "4": {
+      "pairs": 15177,
+      "quantiles": {
+        "q00": 0.0,
+        "q25": 0.1875,
+        "q50": 0.25,
+        "q75": 0.375,
+        "q90": 0.5,
+        "q95": 0.578125,
+        "q99": 0.75,
+        "q995": 0.8125,
+        "q999": 0.9375,
+        "q100": 3.09375
+      }
+    },
+    "5": {
+      "pairs": 14782,
+      "quantiles": {
+        "q00": 0.0,
+        "q25": 0.175,
+        "q50": 0.2625,
+        "q75": 0.3875,
+        "q90": 0.5,
+        "q95": 0.575,
+        "q99": 0.75,
+        "q995": 0.8011874999999918,
+        "q999": 0.9402374999999893,
+        "q100": 2.525
+      }
+    },
+    "6": {
+      "pairs": 14421,
+      "quantiles": {
+        "q00": 0.0,
+        "q25": 0.1875,
+        "q50": 0.2604166666666667,
+        "q75": 0.3854166666666667,
+        "q90": 0.5,
+        "q95": 0.5729166666666666,
+        "q99": 0.7395833333333334,
+        "q995": 0.8125,
+        "q999": 0.9375,
+        "q100": 2.125
+      }
+    },
+    "7": {
+      "pairs": 14042,
+      "quantiles": {
+        "q00": 0.0,
+        "q25": 0.17857142857142858,
+        "q50": 0.25892857142857145,
+        "q75": 0.38392857142857145,
+        "q90": 0.5,
+        "q95": 0.5714285714285714,
+        "q99": 0.7321428571428571,
+        "q995": 0.8035714285714286,
+        "q999": 0.9285714285714286,
+        "q100": 1.8571428571428572
+      }
+    },
+    "8": {
+      "pairs": 13699,
+      "quantiles": {
+        "q00": 0.0,
+        "q25": 0.1796875,
+        "q50": 0.2578125,
+        "q75": 0.3828125,
+        "q90": 0.5,
+        "q95": 0.5625,
+        "q99": 0.734375,
+        "q995": 0.796875,
+        "q999": 0.921875,
+        "q100": 1.671875
+      }
+    },
+    "9": {
+      "pairs": 13366,
+      "quantiles": {
+        "q00": 0.0,
+        "q25": 0.18055555555555555,
+        "q50": 0.2569444444444444,
+        "q75": 0.3819444444444444,
+        "q90": 0.5,
+        "q95": 0.5625,
+        "q99": 0.7361111111111112,
+        "q995": 0.7916666666666666,
+        "q999": 0.9166666666666666,
+        "q100": 1.4930555555555556
+      }
+    },
+    "10": {
+      "pairs": 13045,
+      "quantiles": {
+        "q00": 0.0,
+        "q25": 0.175,
+        "q50": 0.25625,
+        "q75": 0.38125,
+        "q90": 0.49375,
+        "q95": 0.5625,
+        "q99": 0.7375,
+        "q995": 0.7875,
+        "q999": 0.925,
+        "q100": 1.375
+      }
+    },
+    "11": {
+      "pairs": 12745,
+      "quantiles": {
+        "q00": 0.0,
+        "q25": 0.17045454545454544,
+        "q50": 0.25,
+        "q75": 0.375,
+        "q90": 0.48863636363636365,
+        "q95": 0.5568181818181818,
+        "q99": 0.7272727272727273,
+        "q995": 0.7897727272727273,
+        "q999": 0.9204545454545454,
+        "q100": 1.2613636363636365
+      }
+    },
+    "12": {
+      "pairs": 12468,
+      "quantiles": {
+        "q00": 0.0,
+        "q25": 0.171875,
+        "q50": 0.25,
+        "q75": 0.375,
+        "q90": 0.4895833333333333,
+        "q95": 0.5520833333333334,
+        "q99": 0.7291666666666666,
+        "q995": 0.78125,
+        "q999": 0.9166666666666666,
+        "q100": 1.2135416666666667
+      }
+    },
+    "13": {
+      "pairs": 12174,
+      "quantiles": {
+        "q00": 0.0,
+        "q25": 0.16826923076923078,
+        "q50": 0.25,
+        "q75": 0.375,
+        "q90": 0.4855769230769231,
+        "q95": 0.5480769230769231,
+        "q99": 0.7272596153846175,
+        "q995": 0.7746875000000011,
+        "q999": 0.9134615384615384,
+        "q100": 1.1105769230769231
+      }
+    },
+    "14": {
+      "pairs": 11895,
+      "quantiles": {
+        "q00": 0.0,
+        "q25": 0.16964285714285715,
+        "q50": 0.24553571428571427,
+        "q75": 0.3705357142857143,
+        "q90": 0.48214285714285715,
+        "q95": 0.5446428571428571,
+        "q99": 0.7232142857142857,
+        "q995": 0.774687500000003,
+        "q999": 0.9196428571428571,
+        "q100": 1.0446428571428572
+      }
+    },
+    "15": {
+      "pairs": 11625,
+      "quantiles": {
+        "q00": 0.0,
+        "q25": 0.16666666666666666,
+        "q50": 0.24166666666666667,
+        "q75": 0.36666666666666664,
+        "q90": 0.4791666666666667,
+        "q95": 0.5416666666666666,
+        "q99": 0.7166666666666667,
+        "q995": 0.7666666666666667,
+        "q999": 0.9041666666666667,
+        "q100": 0.9916666666666667
+      }
+    },
+    "16": {
+      "pairs": 11390,
+      "quantiles": {
+        "q00": 0.0,
+        "q25": 0.16015625,
+        "q50": 0.23828125,
+        "q75": 0.359375,
+        "q90": 0.4765625,
+        "q95": 0.5390625,
+        "q99": 0.7152734375000023,
+        "q995": 0.76171875,
+        "q999": 0.875,
+        "q100": 0.953125
+      }
+    },
+    "17": {
+      "pairs": 11166,
+      "quantiles": {
+        "q00": 0.0,
+        "q25": 0.15808823529411764,
+        "q50": 0.23529411764705882,
+        "q75": 0.3602941176470588,
+        "q90": 0.47058823529411764,
+        "q95": 0.5294117647058824,
+        "q99": 0.7132352941176471,
+        "q995": 0.7573529411764706,
+        "q999": 0.8737867647058759,
+        "q100": 0.9117647058823529
+      }
+    },
+    "18": {
+      "pairs": 10949,
+      "quantiles": {
+        "q00": 0.0,
+        "q25": 0.15625,
+        "q50": 0.2326388888888889,
+        "q75": 0.3541666666666667,
+        "q90": 0.4652777777777778,
+        "q95": 0.5277777777777778,
+        "q99": 0.7013888888888888,
+        "q995": 0.7518055555555571,
+        "q999": 0.84794444444444,
+        "q100": 0.9097222222222222
+      }
+    },
+    "19": {
+      "pairs": 10753,
+      "quantiles": {
+        "q00": 0.0,
+        "q25": 0.15460526315789475,
+        "q50": 0.23026315789473684,
+        "q75": 0.34868421052631576,
+        "q90": 0.4605263157894737,
+        "q95": 0.5230263157894737,
+        "q99": 0.6989473684210512,
+        "q995": 0.7442105263157888,
+        "q999": 0.8355263157894737,
+        "q100": 0.9013157894736842
+      }
+    },
+    "20": {
+      "pairs": 10548,
+      "quantiles": {
+        "q00": 0.0,
+        "q25": 0.153125,
+        "q50": 0.225,
+        "q75": 0.34375,
+        "q90": 0.45625,
+        "q95": 0.51875,
+        "q99": 0.69375,
+        "q995": 0.7383281249999982,
+        "q999": 0.8289531249999925,
+        "q100": 0.89375
+      }
+    }
+  },
+  "sequences": [
+    {
+      "file": "train_000.npz",
+      "positive_events": 2790,
+      "tracks": 1,
+      "valid_time_groups": 127,
+      "slope_pairs": 2126,
+      "slope_q99": 0.25,
+      "slope_max": 0.25
+    },
+    {
+      "file": "train_001.npz",
+      "positive_events": 3015,
+      "tracks": 1,
+      "valid_time_groups": 129,
+      "slope_pairs": 2319,
+      "slope_q99": 0.34375,
+      "slope_max": 0.5
+    },
+    {
+      "file": "train_002.npz",
+      "positive_events": 3955,
+      "tracks": 1,
+      "valid_time_groups": 146,
+      "slope_pairs": 2578,
+      "slope_q99": 0.425,
+      "slope_max": 0.625
+    },
+    {
+      "file": "train_003.npz",
+      "positive_events": 5155,
+      "tracks": 1,
+      "valid_time_groups": 149,
+      "slope_pairs": 2575,
+      "slope_q99": 0.572357142857142,
+      "slope_max": 0.625
+    },
+    {
+      "file": "train_004.npz",
+      "positive_events": 1414,
+      "tracks": 1,
+      "valid_time_groups": 100,
+      "slope_pairs": 1496,
+      "slope_q99": 0.375,
+      "slope_max": 0.5
+    },
+    {
+      "file": "train_005.npz",
+      "positive_events": 1147,
+      "tracks": 1,
+      "valid_time_groups": 107,
+      "slope_pairs": 1611,
+      "slope_q99": 0.375,
+      "slope_max": 0.625
+    },
+    {
+      "file": "train_006.npz",
+      "positive_events": 1340,
+      "tracks": 1,
+      "valid_time_groups": 113,
+      "slope_pairs": 1786,
+      "slope_q99": 0.25,
+      "slope_max": 0.375
+    },
+    {
+      "file": "train_007.npz",
+      "positive_events": 1078,
+      "tracks": 1,
+      "valid_time_groups": 131,
+      "slope_pairs": 2073,
+      "slope_q99": 0.34375,
+      "slope_max": 0.625
+    },
+    {
+      "file": "train_008.npz",
+      "positive_events": 1192,
+      "tracks": 1,
+      "valid_time_groups": 108,
+      "slope_pairs": 1520,
+      "slope_q99": 0.3125,
+      "slope_max": 0.625
+    },
+    {
+      "file": "train_009.npz",
+      "positive_events": 2485,
+      "tracks": 1,
+      "valid_time_groups": 127,
+      "slope_pairs": 2106,
+      "slope_q99": 0.33291666666666514,
+      "slope_max": 0.6875
+    },
+    {
+      "file": "train_010.npz",
+      "positive_events": 1979,
+      "tracks": 1,
+      "valid_time_groups": 122,
+      "slope_pairs": 1691,
+      "slope_q99": 0.4375,
+      "slope_max": 0.5
+    },
+    {
+      "file": "train_011.npz",
+      "positive_events": 1894,
+      "tracks": 1,
+      "valid_time_groups": 142,
+      "slope_pairs": 2429,
+      "slope_q99": 0.375,
+      "slope_max": 0.75
+    },
+    {
+      "file": "train_012.npz",
+      "positive_events": 1853,
+      "tracks": 1,
+      "valid_time_groups": 108,
+      "slope_pairs": 1522,
+      "slope_q99": 0.25,
+      "slope_max": 0.375
+    },
+    {
+      "file": "train_013.npz",
+      "positive_events": 2667,
+      "tracks": 1,
+      "valid_time_groups": 149,
+      "slope_pairs": 2601,
+      "slope_q99": 0.40625,
+      "slope_max": 0.5625
+    },
+    {
+      "file": "train_014.npz",
+      "positive_events": 3465,
+      "tracks": 1,
+      "valid_time_groups": 119,
+      "slope_pairs": 1850,
+      "slope_q99": 0.625,
+      "slope_max": 0.6875
+    },
+    {
+      "file": "train_015.npz",
+      "positive_events": 1240,
+      "tracks": 1,
+      "valid_time_groups": 114,
+      "slope_pairs": 1713,
+      "slope_q99": 0.3125,
+      "slope_max": 0.375
+    },
+    {
+      "file": "train_016.npz",
+      "positive_events": 1481,
+      "tracks": 1,
+      "valid_time_groups": 126,
+      "slope_pairs": 1898,
+      "slope_q99": 0.4375,
+      "slope_max": 0.625
+    },
+    {
+      "file": "train_017.npz",
+      "positive_events": 1873,
+      "tracks": 1,
+      "valid_time_groups": 135,
+      "slope_pairs": 2136,
+      "slope_q99": 0.34375,
+      "slope_max": 0.625
+    },
+    {
+      "file": "train_018.npz",
+      "positive_events": 1601,
+      "tracks": 1,
+      "valid_time_groups": 131,
+      "slope_pairs": 2043,
+      "slope_q99": 0.2743437499999999,
+      "slope_max": 0.375
+    },
+    {
+      "file": "train_019.npz",
+      "positive_events": 737,
+      "tracks": 1,
+      "valid_time_groups": 101,
+      "slope_pairs": 1512,
+      "slope_q99": 0.25,
+      "slope_max": 0.3125
+    },
+    {
+      "file": "train_020.npz",
+      "positive_events": 890,
+      "tracks": 1,
+      "valid_time_groups": 100,
+      "slope_pairs": 1408,
+      "slope_q99": 0.359010416666667,
+      "slope_max": 0.5
+    },
+    {
+      "file": "train_021.npz",
+      "positive_events": 2034,
+      "tracks": 1,
+      "valid_time_groups": 141,
+      "slope_pairs": 2420,
+      "slope_q99": 0.375,
+      "slope_max": 0.5
+    },
+    {
+      "file": "train_022.npz",
+      "positive_events": 715,
+      "tracks": 1,
+      "valid_time_groups": 59,
+      "slope_pairs": 638,
+      "slope_q99": 0.25,
+      "slope_max": 0.375
+    },
+    {
+      "file": "train_023.npz",
+      "positive_events": 1881,
+      "tracks": 1,
+      "valid_time_groups": 126,
+      "slope_pairs": 2165,
+      "slope_q99": 0.25,
+      "slope_max": 0.40625
+    },
+    {
+      "file": "train_024.npz",
+      "positive_events": 1538,
+      "tracks": 1,
+      "valid_time_groups": 122,
+      "slope_pairs": 1847,
+      "slope_q99": 0.3067499999999995,
+      "slope_max": 0.75
+    },
+    {
+      "file": "train_025.npz",
+      "positive_events": 1305,
+      "tracks": 1,
+      "valid_time_groups": 110,
+      "slope_pairs": 1773,
+      "slope_q99": 0.375,
+      "slope_max": 0.5625
+    },
+    {
+      "file": "train_026.npz",
+      "positive_events": 1062,
+      "tracks": 1,
+      "valid_time_groups": 119,
+      "slope_pairs": 1810,
+      "slope_q99": 0.25,
+      "slope_max": 0.5625
+    },
+    {
+      "file": "train_027.npz",
+      "positive_events": 1260,
+      "tracks": 1,
+      "valid_time_groups": 101,
+      "slope_pairs": 1660,
+      "slope_q99": 0.3125,
+      "slope_max": 0.625
+    },
+    {
+      "file": "train_028.npz",
+      "positive_events": 2600,
+      "tracks": 1,
+      "valid_time_groups": 133,
+      "slope_pairs": 1993,
+      "slope_q99": 0.25,
+      "slope_max": 0.375
+    },
+    {
+      "file": "train_029.npz",
+      "positive_events": 3822,
+      "tracks": 1,
+      "valid_time_groups": 135,
+      "slope_pairs": 2145,
+      "slope_q99": 0.375,
+      "slope_max": 0.5
+    },
+    {
+      "file": "train_030.npz",
+      "positive_events": 4752,
+      "tracks": 1,
+      "valid_time_groups": 144,
+      "slope_pairs": 2385,
+      "slope_q99": 0.375,
+      "slope_max": 0.5
+    },
+    {
+      "file": "train_031.npz",
+      "positive_events": 2999,
+      "tracks": 1,
+      "valid_time_groups": 132,
+      "slope_pairs": 1970,
+      "slope_q99": 0.2916666666666667,
+      "slope_max": 0.375
+    },
+    {
+      "file": "train_032.npz",
+      "positive_events": 3242,
+      "tracks": 1,
+      "valid_time_groups": 138,
+      "slope_pairs": 2274,
+      "slope_q99": 0.32142857142857145,
+      "slope_max": 0.4375
+    },
+    {
+      "file": "train_033.npz",
+      "positive_events": 3869,
+      "tracks": 1,
+      "valid_time_groups": 123,
+      "slope_pairs": 1840,
+      "slope_q99": 0.44642857142857145,
+      "slope_max": 0.5
+    },
+    {
+      "file": "train_034.npz",
+      "positive_events": 4020,
+      "tracks": 1,
+      "valid_time_groups": 147,
+      "slope_pairs": 2501,
+      "slope_q99": 0.3125,
+      "slope_max": 0.4375
+    },
+    {
+      "file": "train_035.npz",
+      "positive_events": 4133,
+      "tracks": 1,
+      "valid_time_groups": 148,
+      "slope_pairs": 2529,
+      "slope_q99": 0.375,
+      "slope_max": 0.625
+    },
+    {
+      "file": "train_036.npz",
+      "positive_events": 3767,
+      "tracks": 1,
+      "valid_time_groups": 133,
+      "slope_pairs": 2174,
+      "slope_q99": 0.3125,
+      "slope_max": 0.375
+    },
+    {
+      "file": "train_037.npz",
+      "positive_events": 3406,
+      "tracks": 1,
+      "valid_time_groups": 146,
+      "slope_pairs": 2521,
+      "slope_q99": 0.3125,
+      "slope_max": 0.5
+    },
+    {
+      "file": "train_038.npz",
+      "positive_events": 3466,
+      "tracks": 1,
+      "valid_time_groups": 130,
+      "slope_pairs": 1961,
+      "slope_q99": 0.3160714285714294,
+      "slope_max": 0.375
+    },
+    {
+      "file": "train_039.npz",
+      "positive_events": 4747,
+      "tracks": 1,
+      "valid_time_groups": 142,
+      "slope_pairs": 2377,
+      "slope_q99": 0.30049999999999955,
+      "slope_max": 0.375
+    },
+    {
+      "file": "train_040.npz",
+      "positive_events": 1574,
+      "tracks": 6,
+      "valid_time_groups": 186,
+      "slope_pairs": 2333,
+      "slope_q99": 0.625,
+      "slope_max": 0.875
+    },
+    {
+      "file": "train_041.npz",
+      "positive_events": 2353,
+      "tracks": 6,
+      "valid_time_groups": 218,
+      "slope_pairs": 3152,
+      "slope_q99": 0.625,
+      "slope_max": 0.8125
+    },
+    {
+      "file": "train_042.npz",
+      "positive_events": 1652,
+      "tracks": 5,
+      "valid_time_groups": 159,
+      "slope_pairs": 2023,
+      "slope_q99": 0.8090624999999996,
+      "slope_max": 6.5
+    },
+    {
+      "file": "train_043.npz",
+      "positive_events": 2192,
+      "tracks": 5,
+      "valid_time_groups": 217,
+      "slope_pairs": 3152,
+      "slope_q99": 0.5806770833333322,
+      "slope_max": 0.875
+    },
+    {
+      "file": "train_044.npz",
+      "positive_events": 2753,
+      "tracks": 9,
+      "valid_time_groups": 259,
+      "slope_pairs": 3692,
+      "slope_q99": 0.3257500000000012,
+      "slope_max": 0.625
+    },
+    {
+      "file": "train_045.npz",
+      "positive_events": 5092,
+      "tracks": 4,
+      "valid_time_groups": 360,
+      "slope_pairs": 4996,
+      "slope_q99": 0.4375,
+      "slope_max": 3.7083333333333335
+    },
+    {
+      "file": "train_046.npz",
+      "positive_events": 4322,
+      "tracks": 3,
+      "valid_time_groups": 298,
+      "slope_pairs": 3792,
+      "slope_q99": 1.1430681818181836,
+      "slope_max": 11.6875
+    },
+    {
+      "file": "train_047.npz",
+      "positive_events": 1841,
+      "tracks": 2,
+      "valid_time_groups": 131,
+      "slope_pairs": 1730,
+      "slope_q99": 0.5818229166666669,
+      "slope_max": 1.28125
+    },
+    {
+      "file": "train_048.npz",
+      "positive_events": 3793,
+      "tracks": 26,
+      "valid_time_groups": 417,
+      "slope_pairs": 3675,
+      "slope_q99": 0.40625,
+      "slope_max": 3.875
+    },
+    {
+      "file": "train_049.npz",
+      "positive_events": 4674,
+      "tracks": 24,
+      "valid_time_groups": 523,
+      "slope_pairs": 6292,
+      "slope_q99": 0.40625,
+      "slope_max": 0.5625
+    },
+    {
+      "file": "train_050.npz",
+      "positive_events": 2243,
+      "tracks": 12,
+      "valid_time_groups": 255,
+      "slope_pairs": 2880,
+      "slope_q99": 0.5684469696969697,
+      "slope_max": 0.875
+    },
+    {
+      "file": "train_051.npz",
+      "positive_events": 1849,
+      "tracks": 11,
+      "valid_time_groups": 213,
+      "slope_pairs": 2349,
+      "slope_q99": 0.5,
+      "slope_max": 1.3125
+    },
+    {
+      "file": "train_052.npz",
+      "positive_events": 1797,
+      "tracks": 9,
+      "valid_time_groups": 254,
+      "slope_pairs": 3061,
+      "slope_q99": 0.5625,
+      "slope_max": 1.125
+    },
+    {
+      "file": "train_053.npz",
+      "positive_events": 1491,
+      "tracks": 9,
+      "valid_time_groups": 213,
+      "slope_pairs": 2618,
+      "slope_q99": 0.5833333333333334,
+      "slope_max": 1.125
+    },
+    {
+      "file": "train_054.npz",
+      "positive_events": 1180,
+      "tracks": 4,
+      "valid_time_groups": 121,
+      "slope_pairs": 1498,
+      "slope_q99": 0.6253749999999997,
+      "slope_max": 2.125
+    },
+    {
+      "file": "train_055.npz",
+      "positive_events": 4162,
+      "tracks": 5,
+      "valid_time_groups": 339,
+      "slope_pairs": 5254,
+      "slope_q99": 0.5456919642857149,
+      "slope_max": 1.125
+    },
+    {
+      "file": "train_056.npz",
+      "positive_events": 2890,
+      "tracks": 4,
+      "valid_time_groups": 306,
+      "slope_pairs": 4336,
+      "slope_q99": 0.5675781249999972,
+      "slope_max": 1.3125
+    },
+    {
+      "file": "train_057.npz",
+      "positive_events": 2887,
+      "tracks": 4,
+      "valid_time_groups": 258,
+      "slope_pairs": 4137,
+      "slope_q99": 0.625,
+      "slope_max": 0.9375
+    },
+    {
+      "file": "train_058.npz",
+      "positive_events": 1468,
+      "tracks": 3,
+      "valid_time_groups": 147,
+      "slope_pairs": 2231,
+      "slope_q99": 0.625,
+      "slope_max": 0.875
+    },
+    {
+      "file": "train_059.npz",
+      "positive_events": 888,
+      "tracks": 4,
+      "valid_time_groups": 109,
+      "slope_pairs": 1415,
+      "slope_q99": 0.4375,
+      "slope_max": 0.5
+    },
+    {
+      "file": "train_060.npz",
+      "positive_events": 1229,
+      "tracks": 4,
+      "valid_time_groups": 117,
+      "slope_pairs": 1505,
+      "slope_q99": 0.575,
+      "slope_max": 0.75
+    },
+    {
+      "file": "train_061.npz",
+      "positive_events": 1294,
+      "tracks": 1,
+      "valid_time_groups": 127,
+      "slope_pairs": 1895,
+      "slope_q99": 0.5,
+      "slope_max": 1.25
+    },
+    {
+      "file": "train_062.npz",
+      "positive_events": 1955,
+      "tracks": 2,
+      "valid_time_groups": 270,
+      "slope_pairs": 4299,
+      "slope_q99": 0.5,
+      "slope_max": 0.8125
+    },
+    {
+      "file": "train_063.npz",
+      "positive_events": 1392,
+      "tracks": 4,
+      "valid_time_groups": 210,
+      "slope_pairs": 2855,
+      "slope_q99": 0.53125,
+      "slope_max": 2.0
+    },
+    {
+      "file": "train_064.npz",
+      "positive_events": 2096,
+      "tracks": 3,
+      "valid_time_groups": 249,
+      "slope_pairs": 3796,
+      "slope_q99": 0.6485156250000003,
+      "slope_max": 1.0
+    },
+    {
+      "file": "train_065.npz",
+      "positive_events": 1555,
+      "tracks": 2,
+      "valid_time_groups": 216,
+      "slope_pairs": 2973,
+      "slope_q99": 0.5,
+      "slope_max": 1.625
+    },
+    {
+      "file": "train_066.npz",
+      "positive_events": 1349,
+      "tracks": 2,
+      "valid_time_groups": 166,
+      "slope_pairs": 2599,
+      "slope_q99": 0.6719375,
+      "slope_max": 1.25
+    },
+    {
+      "file": "train_067.npz",
+      "positive_events": 2404,
+      "tracks": 2,
+      "valid_time_groups": 265,
+      "slope_pairs": 4216,
+      "slope_q99": 0.6733506944444451,
+      "slope_max": 0.875
+    },
+    {
+      "file": "train_068.npz",
+      "positive_events": 2889,
+      "tracks": 2,
+      "valid_time_groups": 276,
+      "slope_pairs": 4509,
+      "slope_q99": 0.9166666666666666,
+      "slope_max": 1.125
+    },
+    {
+      "file": "train_069.npz",
+      "positive_events": 323,
+      "tracks": 1,
+      "valid_time_groups": 51,
+      "slope_pairs": 498,
+      "slope_q99": 0.5662499999999966,
+      "slope_max": 0.8125
+    },
+    {
+      "file": "train_070.npz",
+      "positive_events": 474,
+      "tracks": 2,
+      "valid_time_groups": 75,
+      "slope_pairs": 596,
+      "slope_q99": 1.0015624999999986,
+      "slope_max": 1.2135416666666667
+    },
+    {
+      "file": "train_071.npz",
+      "positive_events": 2027,
+      "tracks": 2,
+      "valid_time_groups": 220,
+      "slope_pairs": 3172,
+      "slope_q99": 0.75,
+      "slope_max": 2.625
+    },
+    {
+      "file": "train_072.npz",
+      "positive_events": 4455,
+      "tracks": 2,
+      "valid_time_groups": 271,
+      "slope_pairs": 4213,
+      "slope_q99": 0.8998125000000002,
+      "slope_max": 1.125
+    },
+    {
+      "file": "train_073.npz",
+      "positive_events": 7460,
+      "tracks": 2,
+      "valid_time_groups": 282,
+      "slope_pairs": 4596,
+      "slope_q99": 0.8125,
+      "slope_max": 1.1875
+    },
+    {
+      "file": "train_074.npz",
+      "positive_events": 15399,
+      "tracks": 2,
+      "valid_time_groups": 174,
+      "slope_pairs": 2864,
+      "slope_q99": 0.9375,
+      "slope_max": 1.0
+    },
+    {
+      "file": "train_075.npz",
+      "positive_events": 1402,
+      "tracks": 2,
+      "valid_time_groups": 188,
+      "slope_pairs": 2256,
+      "slope_q99": 0.6875,
+      "slope_max": 1.25
+    },
+    {
+      "file": "train_076.npz",
+      "positive_events": 1489,
+      "tracks": 2,
+      "valid_time_groups": 184,
+      "slope_pairs": 2231,
+      "slope_q99": 0.78125,
+      "slope_max": 1.1875
+    },
+    {
+      "file": "train_077.npz",
+      "positive_events": 1477,
+      "tracks": 2,
+      "valid_time_groups": 192,
+      "slope_pairs": 2481,
+      "slope_q99": 0.6381249999999994,
+      "slope_max": 0.8125
+    },
+    {
+      "file": "train_078.npz",
+      "positive_events": 1630,
+      "tracks": 2,
+      "valid_time_groups": 189,
+      "slope_pairs": 2519,
+      "slope_q99": 0.6458333333333334,
+      "slope_max": 0.875
+    },
+    {
+      "file": "train_079.npz",
+      "positive_events": 1270,
+      "tracks": 2,
+      "valid_time_groups": 176,
+      "slope_pairs": 1975,
+      "slope_q99": 0.6469166666666667,
+      "slope_max": 0.9166666666666666
+    },
+    {
+      "file": "train_080.npz",
+      "positive_events": 1336,
+      "tracks": 2,
+      "valid_time_groups": 181,
+      "slope_pairs": 2311,
+      "slope_q99": 0.6656250000000009,
+      "slope_max": 0.9375
+    },
+    {
+      "file": "train_081.npz",
+      "positive_events": 2778,
+      "tracks": 7,
+      "valid_time_groups": 201,
+      "slope_pairs": 2902,
+      "slope_q99": 0.75,
+      "slope_max": 0.9375
+    },
+    {
+      "file": "train_082.npz",
+      "positive_events": 2261,
+      "tracks": 6,
+      "valid_time_groups": 224,
+      "slope_pairs": 3209,
+      "slope_q99": 0.625,
+      "slope_max": 0.8125
+    },
+    {
+      "file": "train_083.npz",
+      "positive_events": 1890,
+      "tracks": 6,
+      "valid_time_groups": 194,
+      "slope_pairs": 2774,
+      "slope_q99": 0.625,
+      "slope_max": 0.75
+    },
+    {
+      "file": "train_084.npz",
+      "positive_events": 2055,
+      "tracks": 6,
+      "valid_time_groups": 189,
+      "slope_pairs": 2573,
+      "slope_q99": 0.625,
+      "slope_max": 0.75
+    },
+    {
+      "file": "train_085.npz",
+      "positive_events": 1847,
+      "tracks": 7,
+      "valid_time_groups": 187,
+      "slope_pairs": 2316,
+      "slope_q99": 0.625,
+      "slope_max": 0.75
+    },
+    {
+      "file": "train_086.npz",
+      "positive_events": 2412,
+      "tracks": 8,
+      "valid_time_groups": 195,
+      "slope_pairs": 2338,
+      "slope_q99": 0.8125,
+      "slope_max": 1.0
+    },
+    {
+      "file": "train_087.npz",
+      "positive_events": 2812,
+      "tracks": 5,
+      "valid_time_groups": 174,
+      "slope_pairs": 2390,
+      "slope_q99": 0.875,
+      "slope_max": 2.3125
+    },
+    {
+      "file": "train_088.npz",
+      "positive_events": 5538,
+      "tracks": 7,
+      "valid_time_groups": 394,
+      "slope_pairs": 6365,
+      "slope_q99": 0.5,
+      "slope_max": 3.5
+    },
+    {
+      "file": "train_089.npz",
+      "positive_events": 2681,
+      "tracks": 4,
+      "valid_time_groups": 282,
+      "slope_pairs": 4718,
+      "slope_q99": 0.625,
+      "slope_max": 4.0625
+    },
+    {
+      "file": "train_090.npz",
+      "positive_events": 2585,
+      "tracks": 6,
+      "valid_time_groups": 255,
+      "slope_pairs": 3719,
+      "slope_q99": 0.6875,
+      "slope_max": 2.75
+    },
+    {
+      "file": "train_091.npz",
+      "positive_events": 3299,
+      "tracks": 5,
+      "valid_time_groups": 293,
+      "slope_pairs": 4707,
+      "slope_q99": 0.625,
+      "slope_max": 2.625
+    },
+    {
+      "file": "train_092.npz",
+      "positive_events": 7192,
+      "tracks": 2,
+      "valid_time_groups": 305,
+      "slope_pairs": 5640,
+      "slope_q99": 0.6875,
+      "slope_max": 4.75
+    },
+    {
+      "file": "train_093.npz",
+      "positive_events": 6137,
+      "tracks": 2,
+      "valid_time_groups": 286,
+      "slope_pairs": 4978,
+      "slope_q99": 0.75,
+      "slope_max": 3.75
+    },
+    {
+      "file": "train_094.npz",
+      "positive_events": 6475,
+      "tracks": 2,
+      "valid_time_groups": 150,
+      "slope_pairs": 2280,
+      "slope_q99": 0.5651250000000004,
+      "slope_max": 1.3125
+    },
+    {
+      "file": "train_095.npz",
+      "positive_events": 2387,
+      "tracks": 1,
+      "valid_time_groups": 71,
+      "slope_pairs": 1051,
+      "slope_q99": 0.5870535714285714,
+      "slope_max": 1.4375
+    },
+    {
+      "file": "train_096.npz",
+      "positive_events": 7011,
+      "tracks": 2,
+      "valid_time_groups": 204,
+      "slope_pairs": 2808,
+      "slope_q99": 0.5930208333333317,
+      "slope_max": 0.875
+    },
+    {
+      "file": "train_097.npz",
+      "positive_events": 6330,
+      "tracks": 2,
+      "valid_time_groups": 177,
+      "slope_pairs": 2346,
+      "slope_q99": 0.75,
+      "slope_max": 2.3125
+    },
+    {
+      "file": "train_098.npz",
+      "positive_events": 4557,
+      "tracks": 3,
+      "valid_time_groups": 168,
+      "slope_pairs": 2077,
+      "slope_q99": 0.6468333333333325,
+      "slope_max": 4.25
+    }
+  ],
+  "json_report": "docs/cone_slope_analysis_50ms.json"
+}

@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import numpy as np
 
-from huav.analysis.cone_slopes import analyze_event_array, summarize_measurements
+from huav.analysis.cone_slopes import (
+    analyze_event_array,
+    render_markdown,
+    summarize_measurements,
+)
 
 EVENT_DTYPE = [
     ("x", "<i2"),
@@ -117,3 +121,32 @@ def test_summary_uses_block_per_time_block_units_and_recommends_four_heads() -> 
     assert summary["raw_slope_quantiles"]["q50"] == 1.0
     assert summary["recommended_cone_slopes"] == [0.5, 1.0, 1.5, 2.0]
     assert summary["recommended_base_radii"] == [1, 1, 2, 2]
+
+
+def test_markdown_reports_selected_50ms_geometry() -> None:
+    summary = summarize_measurements(
+        slopes=np.array([0.5, 0.75]),
+        required_slope_base_1=np.array([0.25]),
+        required_slope_base_2=np.array([0.1]),
+        target_half_extents=np.array([0.8]),
+    )
+    summary["recommended_cone_slopes"] = [0.2, 0.4, 0.6, 0.8]
+    payload = {
+        "configuration": {
+            "spatial_block_size_x": 8,
+            "spatial_block_size_y": 8,
+            "num_time_blocks": 160,
+            "duration_ms": 8000.0,
+            "milliseconds_per_time_block": 50.0,
+            "selected_max_time_distances": [10, 10, 15, 20],
+        },
+        "dataset": {"files": 99, "positive_events": 1},
+        "summary": summary,
+        "json_report": "docs/cone_slope_analysis_50ms.json",
+    }
+
+    markdown = render_markdown(payload)
+
+    assert "`0.2, 0.4, 0.6, 0.8`" in markdown
+    assert "`10, 10, 15, 20`" in markdown
+    assert "docs/cone_slope_analysis_50ms.json" in markdown

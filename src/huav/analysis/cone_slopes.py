@@ -280,6 +280,16 @@ def render_markdown(payload: dict[str, Any]) -> str:
     base_1 = summary["required_slope_base_radius_1_quantiles"]
     base_2 = summary["required_slope_base_radius_2_quantiles"]
     extent = summary["target_90pct_half_extent_quantiles"]
+    slopes = ", ".join(str(value) for value in summary["recommended_cone_slopes"])
+    radii = ", ".join(str(value) for value in summary["recommended_base_radii"])
+    selected_distances = config.get("selected_max_time_distances")
+    distance_line = (
+        "- Maximum time distances: `"
+        + ", ".join(str(value) for value in selected_distances)
+        + "` blocks."
+        if selected_distances is not None
+        else ""
+    )
     return "\n".join(
         (
             "# HUAV Training-Set Spatiotemporal Cone Slope Analysis",
@@ -318,15 +328,16 @@ def render_markdown(payload: dict[str, Any]) -> str:
             "",
             "## Configuration decision",
             "",
-            "- Cone slopes: `0.5, 1.0, 1.5, 2.0`.",
-            "- Base radii: `1, 1, 2, 2` blocks.",
-            "- The first two heads model common motion; the 1.5 and 2.0 heads cover "
-            "approximately the 95th and 99th percentile tails.",
+            f"- Cone slopes: `{slopes}`.",
+            f"- Base radii: `{radii}` blocks.",
+            distance_line,
+            "- The highest-slope head covers the robust q99 motion estimate.",
             "- The observed maximum is retained in the report but treated as a sparse-group "
             "outlier; neighbor caps and attention scores handle such cases without a "
             "globally oversized hard cone.",
             "",
-            "The full per-lag and per-sequence values are in `docs/cone_slope_analysis.json`.",
+            "The full per-lag and per-sequence values are in "
+            f"`{payload.get('json_report', 'docs/cone_slope_analysis.json')}`.",
             "",
         )
     )
@@ -342,6 +353,9 @@ def main() -> None:
     parser.add_argument("--time-blocks", type=int, default=128)
     parser.add_argument("--duration-ms", type=float, default=8000.0)
     parser.add_argument("--max-time-distance", type=int, default=8)
+    parser.add_argument("--cone-slopes", type=float, nargs=4)
+    parser.add_argument("--base-radii", type=float, nargs=4)
+    parser.add_argument("--selected-max-time-distances", type=int, nargs=4)
     arguments = parser.parse_args()
     payload = analyze_training_split(
         arguments.train_root,
@@ -351,6 +365,15 @@ def main() -> None:
         duration_ms=arguments.duration_ms,
         max_time_distance=arguments.max_time_distance,
     )
+    if arguments.cone_slopes is not None:
+        payload["summary"]["recommended_cone_slopes"] = arguments.cone_slopes
+    if arguments.base_radii is not None:
+        payload["summary"]["recommended_base_radii"] = arguments.base_radii
+    if arguments.selected_max_time_distances is not None:
+        payload["configuration"]["selected_max_time_distances"] = (
+            arguments.selected_max_time_distances
+        )
+    payload["json_report"] = arguments.json.as_posix()
     arguments.json.parent.mkdir(parents=True, exist_ok=True)
     arguments.markdown.parent.mkdir(parents=True, exist_ok=True)
     arguments.json.write_text(

@@ -57,6 +57,31 @@ def test_batch_index_is_part_of_sparse_cell_identity() -> None:
     assert output.token_coords.tolist() == [[0, 0, 0], [0, 0, 0]]
 
 
+def test_160_time_blocks_map_eight_seconds_to_exact_50_ms_bins() -> None:
+    tokenizer = EventTokenizer(
+        width=16,
+        height=12,
+        spatial_block_size_x=8,
+        spatial_block_size_y=8,
+        num_time_blocks=160,
+        event_embed_dim=8,
+        token_dim=16,
+    )
+    events = torch.tensor(
+        [
+            [0.0, 1.0, 1.0, 0.0, 1.0],
+            [0.0, 1.0, 1.0, 49.999 / 8000.0, 1.0],
+            [0.0, 1.0, 1.0, 50.0 / 8000.0, 1.0],
+            [0.0, 1.0, 1.0, 7999.0 / 8000.0, 1.0],
+        ]
+    )
+
+    output = tokenizer(events)
+
+    assert output.event_token_indices.tolist() == [0, 0, 1, 2]
+    assert output.token_coords[:, 2].tolist() == [0, 1, 159]
+
+
 def test_token_statistics_include_sequence_relative_polarity_and_entropy() -> None:
     events = torch.tensor(
         [
