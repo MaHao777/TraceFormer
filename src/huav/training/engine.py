@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import random
+import sys
 from dataclasses import asdict
 from hashlib import sha256
 from pathlib import Path
@@ -29,6 +30,7 @@ from huav.inference import (
     write_prediction_txt,
 )
 from huav.models import SpatioTemporalConeDetector
+from huav.visualization import render_training_curves
 
 from .losses import EventFocalDiceLoss
 from .metrics import (
@@ -40,6 +42,23 @@ from .runtime import prepare_device
 from .sampling import sample_event_indices
 
 CHECKPOINT_SCHEMA_VERSION = 6
+
+
+def _update_training_curves(
+    run_dir: Path, history: list[dict[str, Any]]
+) -> None:
+    try:
+        render_training_curves(
+            history,
+            run_dir / "training_curves.png",
+            run_name=run_dir.name,
+        )
+    except Exception as error:
+        print(
+            f"warning: training curves were not updated: {error}",
+            file=sys.stderr,
+            flush=True,
+        )
 
 
 def build_model(config: HUAVConfig) -> SpatioTemporalConeDetector:
@@ -635,6 +654,7 @@ def _run_training_impl(
         }
         history.append(epoch_record)
         _write_json(run_dir / "history.json", history)
+        _update_training_curves(run_dir, history)
         competition = metrics["competition"]
         score = float(competition["score"])
         print(
@@ -993,6 +1013,7 @@ def _resume_training_impl(
         }
         history.append(epoch_record)
         _write_json(run_dir / "history.json", history)
+        _update_training_curves(run_dir, history)
         competition = metrics["competition"]
         score = float(competition["score"])
         print(

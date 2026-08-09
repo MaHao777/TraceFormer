@@ -146,6 +146,9 @@ def test_cpu_training_writes_reproducible_metrics_and_checkpoint() -> None:
         assert summary["device"] == "cpu"
         assert (run_dir / "best.pt").is_file()
         assert (run_dir / "history.json").is_file()
+        assert (run_dir / "training_curves.png").read_bytes().startswith(
+            b"\x89PNG\r\n\x1a\n"
+        )
         assert (run_dir / "metrics.json").is_file()
         assert (run_dir / "metrics.md").is_file()
         manifest = json.loads(
@@ -221,6 +224,35 @@ def test_cpu_training_writes_reproducible_metrics_and_checkpoint() -> None:
             )
         with pytest.raises(FileExistsError, match="not empty"):
             run_training(_config(data_root, output_root), output_dir=run_dir)
+
+
+def test_training_curve_failure_warns_without_aborting_training(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with TemporaryDirectory(dir=Path.cwd()) as directory:
+        temporary_root = Path(directory)
+        data_root = temporary_root / "data"
+        train_root = data_root / "train"
+        val_root = data_root / "val"
+        train_root.mkdir(parents=True)
+        val_root.mkdir(parents=True)
+        _write_sequence(train_root / "train_000.npz", 0)
+        _write_sequence(val_root / "val_000.npz", 1)
+
+        def fail_render(*_args, **_kwargs):
+            raise OSError("plot filesystem unavailable")
+
+        monkeypatch.setattr(
+            "huav.training.engine.render_training_curves", fail_render
+        )
+        summary = run_training(
+            _config(data_root, temporary_root / "outputs"),
+            output_dir=temporary_root / "outputs" / "run",
+        )
+
+        assert (Path(summary["run_dir"]) / "best.pt").is_file()
+        assert "warning: training curves were not updated" in capsys.readouterr().err
 
 
 def test_training_records_note_and_success_in_experiment() -> None:
@@ -386,6 +418,9 @@ def test_resumed_training_records_validation_loss() -> None:
             value >= 0.0 for value in history[0]["validation_loss"].values()
         )
         assert "loss" not in history[0]["validation"]
+        assert (resumed_dir / "training_curves.png").read_bytes().startswith(
+            b"\x89PNG\r\n\x1a\n"
+        )
 
 
 def test_failed_resume_keeps_readable_checkpoint_source_epoch(
