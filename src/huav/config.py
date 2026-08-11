@@ -90,21 +90,13 @@ class TrainingConfig:
 class LossConfig:
     focal_alpha: float = 0.75
     focal_gamma: float = 2.0
-    lambda_dice: float = 0.75
-    lambda_object_frame: float = 0.25
-    object_frame_logit_margin: float = 2.0
+    lambda_dice: float = 0.5
     lambda_false_alarm: float = 0.05
     false_alarm_logit_margin: float = 0.0
     false_alarm_topk_per_frame: int = 32
-    lambda_stc: float = 0.1
-    gamma_stc: float = 2.0
-    # STC geometry uses raw source pixels and retained millisecond timestamps.
-    stc_tau: float = 50.0
-    stc_r0: float = 8.0
-    stc_vmax: float = 0.128
-    stc_sigma_xy: float = 8.0
-    stc_sigma_t: float = 25.0
-    stc_max_neighbors: int = 32
+    lambda_trajectory_position: float = 1.0
+    lambda_trajectory_velocity: float = 0.5
+    trajectory_roi_radius: float = 16.0
 
 
 @dataclass(frozen=True)
@@ -279,30 +271,25 @@ class HUAVConfig:
             raise ValueError("loss focal_alpha must be in [0,1]")
         for name in (
             "focal_gamma",
-            "gamma_stc",
-            "stc_r0",
-            "stc_vmax",
-            "lambda_object_frame",
             "lambda_false_alarm",
+            "lambda_trajectory_position",
+            "lambda_trajectory_velocity",
         ):
             if _finite_real(getattr(self.loss, name), f"loss {name}") < 0:
                 raise ValueError(f"loss {name} must be non-negative")
         if _finite_real(self.loss.lambda_dice, "loss lambda_dice") <= 0:
             raise ValueError("loss lambda_dice must be positive")
-        lambda_stc = _finite_real(self.loss.lambda_stc, "loss lambda_stc")
-        if not 0 <= lambda_stc <= 1:
-            raise ValueError("loss lambda_stc must be in [0,1]")
-        for name in ("stc_tau", "stc_sigma_xy", "stc_sigma_t"):
-            if _finite_real(getattr(self.loss, name), f"loss {name}") <= 0:
-                raise ValueError(f"loss {name} must be positive")
-        _positive_integer(self.loss.stc_max_neighbors, "loss stc_max_neighbors")
+        if (
+            _finite_real(
+                self.loss.trajectory_roi_radius,
+                "loss trajectory_roi_radius",
+            )
+            <= 0
+        ):
+            raise ValueError("loss trajectory_roi_radius must be positive")
         _positive_integer(
             self.loss.false_alarm_topk_per_frame,
             "loss false_alarm_topk_per_frame",
-        )
-        _finite_real(
-            self.loss.object_frame_logit_margin,
-            "loss object_frame_logit_margin",
         )
         _finite_real(
             self.loss.false_alarm_logit_margin,

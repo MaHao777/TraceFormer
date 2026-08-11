@@ -4,7 +4,7 @@ resolution:
 model:
   spatial_block_size_x: 8
   spatial_block_size_y: 8
-  num_time_blocks: 160
+  num_time_blocks: 64
   token_dim: 64
   event_embed_dim: 64
   num_pool_queries: 4
@@ -13,10 +13,10 @@ model:
   mlp_ratio: 2.0
   dropout: 0.1
   cone_heads:
-    - {base_radius: 1.0, slope: 0.2, max_time_distance: 10}
-    - {base_radius: 1.0, slope: 0.4, max_time_distance: 10}
-    - {base_radius: 2.0, slope: 0.6, max_time_distance: 15}
-    - {base_radius: 2.0, slope: 0.8, max_time_distance: 20}
+    - {base_radius: 1.0, slope: 0.5, max_time_distance: 4}
+    - {base_radius: 1.0, slope: 1.0, max_time_distance: 4}
+    - {base_radius: 2.0, slope: 1.5, max_time_distance: 6}
+    - {base_radius: 2.0, slope: 2.0, max_time_distance: 8}
   layer_time_scales: [0.5, 0.75, 1.0]
   max_neighbors_per_cone: 8
   causal_mode: false
@@ -50,20 +50,13 @@ training:
 loss:
   focal_alpha: 0.75
   focal_gamma: 2.0
-  lambda_dice: 0.75
-  lambda_object_frame: 0.25
-  object_frame_logit_margin: 2.0
+  lambda_dice: 0.5
   lambda_false_alarm: 0.05
   false_alarm_logit_margin: 0.0
   false_alarm_topk_per_frame: 32
-  lambda_stc: 0.1
-  gamma_stc: 2.0
-  stc_tau: 50.0
-  stc_r0: 8.0
-  stc_vmax: 0.128
-  stc_sigma_xy: 8.0
-  stc_sigma_t: 25.0
-  stc_max_neighbors: 32
+  lambda_trajectory_position: 1.0
+  lambda_trajectory_velocity: 0.5
+  trajectory_roi_radius: 16.0
 evaluation:
   optimize_threshold: true
   threshold_steps: 19

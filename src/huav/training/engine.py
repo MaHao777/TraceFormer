@@ -41,7 +41,7 @@ from .metrics import (
 from .runtime import prepare_device
 from .sampling import sample_event_indices
 
-CHECKPOINT_SCHEMA_VERSION = 6
+CHECKPOINT_SCHEMA_VERSION = 7
 
 
 def _update_training_curves(
@@ -271,9 +271,9 @@ def evaluate_model(
             "total": 0.0,
             "focal": 0.0,
             "dice": 0.0,
-            "object_frame": 0.0,
             "false_alarm": 0.0,
-            "stc_weight_mean": 0.0,
+            "trajectory_position": 0.0,
+            "trajectory_velocity": 0.0,
         }
         if criterion is not None
         else None
@@ -312,6 +312,7 @@ def evaluate_model(
                 frame_ms=config.evaluation.frame_ms,
                 full_logits=output["event_logits"],
                 full_targets=labels,
+                full_object_ids=object_ids,
                 full_batch_indices=batch_indices,
                 full_timestamps_ms=timestamps_ms,
                 full_coordinates=events[:, :2],
@@ -498,22 +499,17 @@ def _run_training_impl(
     _write_json(run_dir / "dataset_manifest.json", manifest)
     model = build_model(config).to(torch_device)
     criterion = EventFocalDiceLoss(
+        image_width=config.resolution.width,
+        image_height=config.resolution.height,
         focal_alpha=config.loss.focal_alpha,
         focal_gamma=config.loss.focal_gamma,
         lambda_dice=config.loss.lambda_dice,
-        lambda_object_frame=config.loss.lambda_object_frame,
-        object_frame_logit_margin=config.loss.object_frame_logit_margin,
         lambda_false_alarm=config.loss.lambda_false_alarm,
         false_alarm_logit_margin=config.loss.false_alarm_logit_margin,
         false_alarm_topk_per_frame=config.loss.false_alarm_topk_per_frame,
-        lambda_stc=config.loss.lambda_stc,
-        gamma_stc=config.loss.gamma_stc,
-        stc_tau=config.loss.stc_tau,
-        stc_r0=config.loss.stc_r0,
-        stc_vmax=config.loss.stc_vmax,
-        stc_sigma_xy=config.loss.stc_sigma_xy,
-        stc_sigma_t=config.loss.stc_sigma_t,
-        stc_max_neighbors=config.loss.stc_max_neighbors,
+        lambda_trajectory_position=config.loss.lambda_trajectory_position,
+        lambda_trajectory_velocity=config.loss.lambda_trajectory_velocity,
+        trajectory_roi_radius=config.loss.trajectory_roi_radius,
     )
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -551,9 +547,9 @@ def _run_training_impl(
             "total": 0.0,
             "focal": 0.0,
             "dice": 0.0,
-            "object_frame": 0.0,
             "false_alarm": 0.0,
-            "stc_weight_mean": 0.0,
+            "trajectory_position": 0.0,
+            "trajectory_velocity": 0.0,
         }
         learning_rate = float(optimizer.param_groups[0]["lr"])
         order = torch.randperm(
@@ -597,6 +593,7 @@ def _run_training_impl(
                     frame_ms=config.evaluation.frame_ms,
                     full_logits=output["event_logits"],
                     full_targets=labels,
+                    full_object_ids=object_ids,
                     full_batch_indices=batch_indices,
                     full_timestamps_ms=timestamps_ms,
                     full_coordinates=events[:, :2],
@@ -848,22 +845,17 @@ def _resume_training_impl(
 
     # ── Loss, optimiser, scheduler ──────────────────────────────────────
     criterion = EventFocalDiceLoss(
+        image_width=config.resolution.width,
+        image_height=config.resolution.height,
         focal_alpha=config.loss.focal_alpha,
         focal_gamma=config.loss.focal_gamma,
         lambda_dice=config.loss.lambda_dice,
-        lambda_object_frame=config.loss.lambda_object_frame,
-        object_frame_logit_margin=config.loss.object_frame_logit_margin,
         lambda_false_alarm=config.loss.lambda_false_alarm,
         false_alarm_logit_margin=config.loss.false_alarm_logit_margin,
         false_alarm_topk_per_frame=config.loss.false_alarm_topk_per_frame,
-        lambda_stc=config.loss.lambda_stc,
-        gamma_stc=config.loss.gamma_stc,
-        stc_tau=config.loss.stc_tau,
-        stc_r0=config.loss.stc_r0,
-        stc_vmax=config.loss.stc_vmax,
-        stc_sigma_xy=config.loss.stc_sigma_xy,
-        stc_sigma_t=config.loss.stc_sigma_t,
-        stc_max_neighbors=config.loss.stc_max_neighbors,
+        lambda_trajectory_position=config.loss.lambda_trajectory_position,
+        lambda_trajectory_velocity=config.loss.lambda_trajectory_velocity,
+        trajectory_roi_radius=config.loss.trajectory_roi_radius,
     )
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -908,9 +900,9 @@ def _resume_training_impl(
             "total": 0.0,
             "focal": 0.0,
             "dice": 0.0,
-            "object_frame": 0.0,
             "false_alarm": 0.0,
-            "stc_weight_mean": 0.0,
+            "trajectory_position": 0.0,
+            "trajectory_velocity": 0.0,
         }
         learning_rate = float(optimizer.param_groups[0]["lr"])
         order = torch.randperm(
@@ -954,6 +946,7 @@ def _resume_training_impl(
                     frame_ms=config.evaluation.frame_ms,
                     full_logits=output["event_logits"],
                     full_targets=labels,
+                    full_object_ids=object_ids,
                     full_batch_indices=batch_indices,
                     full_timestamps_ms=timestamps_ms,
                     full_coordinates=events[:, :2],

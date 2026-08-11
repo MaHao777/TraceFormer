@@ -8,8 +8,8 @@ from huav.training.losses import (
     binary_dice_loss,
     binary_focal_loss,
     false_alarm_pixel_loss,
-    object_frame_recall_loss,
-    spatiotemporal_continuity_weight,
+    trajectory_position_loss,
+    trajectory_velocity_loss,
 )
 from huav.training.metrics import (
     EventMetricAccumulator,
@@ -63,98 +63,168 @@ def test_focal_and_dice_losses_prefer_correct_logits() -> None:
     assert binary_dice_loss(correct, targets) < binary_dice_loss(wrong, targets)
 
 
-def test_lambda_stc_zero_matches_original_focal_value_and_gradient() -> None:
+def test_event_loss_uses_unweighted_focal_value_and_gradient() -> None:
     targets = torch.tensor([1.0, 0.0, 1.0, 0.0])
-    coordinates = _loss_coordinates(4)
-    timestamps = torch.tensor([1.0, 2.0, 3.0, 4.0])
     batches = torch.zeros(4, dtype=torch.long)
     baseline_logits = torch.tensor([0.2, -0.4, 1.1, -1.3], requires_grad=True)
-    stc_logits = baseline_logits.detach().clone().requires_grad_(True)
+    criterion_logits = baseline_logits.detach().clone().requires_grad_(True)
 
     baseline = binary_focal_loss(
         baseline_logits, targets, alpha=0.75, gamma=2.0
     )
     criterion = EventFocalDiceLoss(
-        lambda_stc=0.0,
-        lambda_object_frame=0.0,
+        lambda_trajectory_position=0.0,
+        lambda_trajectory_velocity=0.0,
         lambda_false_alarm=0.0,
     )
-    weighted = criterion(
-        stc_logits,
+    focal = criterion(
+        criterion_logits,
         targets,
         batches,
-        coordinates=coordinates,
-        timestamps_ms=timestamps,
     )["focal"]
     baseline.backward()
-    weighted.backward()
+    focal.backward()
 
-    torch.testing.assert_close(weighted, baseline)
-    torch.testing.assert_close(stc_logits.grad, baseline_logits.grad)
-
-
-def test_stc_weight_range_and_no_neighbor_behavior() -> None:
-    weights = spatiotemporal_continuity_weight(
-        torch.tensor([0.0, 0.0]),
-        torch.tensor([1.0, 0.0]),
-        torch.tensor([[0.0, 0.0], [100.0, 100.0]]),
-        torch.tensor([0.0, 1000.0]),
-        torch.zeros(2, dtype=torch.long),
-        lambda_stc=0.1,
-    )
-
-    torch.testing.assert_close(weights, torch.tensor([1.1, 1.0]))
-    assert float(weights.min()) >= 1.0
-    assert float(weights.max()) <= 1.1
+    torch.testing.assert_close(focal, baseline)
+    torch.testing.assert_close(criterion_logits.grad, baseline_logits.grad)
 
 
-def test_stc_weight_does_not_link_different_batches() -> None:
-    logits = torch.tensor([4.0, 4.0])
-    targets = torch.ones(2)
-    coordinates = torch.tensor([[4.0, 4.0], [4.0, 4.0]])
-    timestamps = torch.tensor([10.0, 11.0])
-    split = spatiotemporal_continuity_weight(
-        logits, targets, coordinates, timestamps, torch.tensor([0, 1])
-    )
-    isolated = spatiotemporal_continuity_weight(
-        logits,
+def test_trajectory_position_loss_prefers_probability_mass_at_gt_center() -> None:
+    targets = torch.tensor([1.0, 0.0])
+    coordinates = torch.tensor([[2.0, 2.0], [8.0, 2.0]])
+    object_ids = torch.tensor([1, 0])
+    timestamps_ms = torch.tensor([10.0, 10.0])
+
+    accurate = trajectory_position_loss(
+        torch.tensor([5.0, -5.0]),
         targets,
-        torch.tensor([[4.0, 4.0], [200.0, 200.0]]),
-        torch.tensor([10.0, 500.0]),
-        torch.zeros(2, dtype=torch.long),
+        coordinates,
+        object_ids,
+        timestamps_ms,
+        image_width=11,
+        image_height=11,
+        roi_radius=8.0,
+    )
+    inaccurate = trajectory_position_loss(
+        torch.tensor([-5.0, 5.0]),
+        targets,
+        coordinates,
+        object_ids,
+        timestamps_ms,
+        image_width=11,
+        image_height=11,
+        roi_radius=8.0,
     )
 
-    torch.testing.assert_close(split, isolated)
+    assert accurate < inaccurate
 
 
-def test_stc_neighbor_support_is_detached() -> None:
-    logits = torch.tensor([2.0, -2.0], requires_grad=True)
-    weights = spatiotemporal_continuity_weight(
+def test_trajectory_position_loss_is_differentiable_without_thresholding() -> None:
+    logits = torch.tensor([0.2, -0.3], requires_grad=True)
+    loss = trajectory_position_loss(
         logits,
         torch.tensor([1.0, 0.0]),
-        torch.tensor([[5.0, 5.0], [6.0, 5.0]]),
-        torch.tensor([10.0, 20.0]),
-        torch.zeros(2, dtype=torch.long),
+        torch.tensor([[2.0, 2.0], [8.0, 2.0]]),
+        torch.tensor([1, 0]),
+        torch.tensor([10.0, 10.0]),
+        image_width=11,
+        image_height=11,
+        roi_radius=8.0,
     )
 
-    assert weights.requires_grad is False
+    loss.backward()
+
+    assert logits.grad is not None
+    assert torch.isfinite(logits.grad).all()
+    assert bool((logits.grad != 0).any())
 
 
-def test_object_frame_loss_requires_one_confident_event_per_object_frame() -> None:
-    labels = torch.ones(4)
-    object_ids = torch.tensor([1, 1, 2, 2])
-    timestamps_ms = torch.tensor([1.0, 2.0, 51.0, 52.0])
-    confident = torch.tensor([3.0, -3.0, 3.0, -3.0])
-    missed = torch.full((4,), -3.0)
-
-    confident_loss = object_frame_recall_loss(
-        confident, labels, object_ids, timestamps_ms, frame_ms=50.0, logit_margin=2.0
+def test_trajectory_velocity_loss_prefers_matching_adjacent_frame_delta() -> None:
+    targets = torch.tensor([1.0, 0.0, 1.0, 0.0])
+    coordinates = torch.tensor(
+        [[2.0, 2.0], [6.0, 2.0], [4.0, 2.0], [2.0, 2.0]]
     )
-    missed_loss = object_frame_recall_loss(
-        missed, labels, object_ids, timestamps_ms, frame_ms=50.0, logit_margin=2.0
+    object_ids = torch.tensor([1, 0, 1, 0])
+    timestamps_ms = torch.tensor([10.0, 10.0, 60.0, 60.0])
+
+    accurate = trajectory_velocity_loss(
+        torch.tensor([5.0, -5.0, 5.0, -5.0]),
+        targets,
+        coordinates,
+        object_ids,
+        timestamps_ms,
+        image_width=11,
+        image_height=11,
+        roi_radius=8.0,
+    )
+    stationary = trajectory_velocity_loss(
+        torch.tensor([5.0, -5.0, -5.0, 5.0]),
+        targets,
+        coordinates,
+        object_ids,
+        timestamps_ms,
+        image_width=11,
+        image_height=11,
+        roi_radius=8.0,
     )
 
-    assert confident_loss < missed_loss
+    assert accurate < stationary
+
+
+def test_trajectory_velocity_ignores_nonadjacent_frames_and_different_batches() -> None:
+    logits = torch.tensor([0.5, 0.5], requires_grad=True)
+    common = {
+        "targets": torch.ones(2),
+        "coordinates": torch.tensor([[2.0, 2.0], [4.0, 2.0]]),
+        "object_ids": torch.ones(2, dtype=torch.long),
+        "image_width": 11,
+        "image_height": 11,
+        "roi_radius": 8.0,
+    }
+    frame_gap = trajectory_velocity_loss(
+        logits,
+        timestamps_ms=torch.tensor([10.0, 110.0]),
+        batch_indices=torch.zeros(2, dtype=torch.long),
+        **common,
+    )
+    split_batch = trajectory_velocity_loss(
+        logits,
+        timestamps_ms=torch.tensor([10.0, 60.0]),
+        batch_indices=torch.tensor([0, 1]),
+        **common,
+    )
+
+    torch.testing.assert_close(frame_gap, logits.sum() * 0.0)
+    torch.testing.assert_close(split_batch, logits.sum() * 0.0)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"frame_ms": 0.0}, "frame_ms"),
+        ({"roi_radius": 0.0}, "roi_radius"),
+        ({"image_width": 1}, "image_width"),
+        ({"image_height": 1}, "image_height"),
+    ],
+)
+def test_trajectory_losses_validate_geometry(
+    overrides: dict[str, float | int], message: str
+) -> None:
+    arguments = {
+        "image_width": 11,
+        "image_height": 11,
+        "roi_radius": 8.0,
+        **overrides,
+    }
+    with pytest.raises(ValueError, match=message):
+        trajectory_position_loss(
+            torch.tensor([0.0]),
+            torch.tensor([1.0]),
+            torch.tensor([[2.0, 2.0]]),
+            torch.tensor([1]),
+            torch.tensor([10.0]),
+            **arguments,
+        )
 
 
 def test_false_alarm_pixel_loss_penalizes_high_background_responses() -> None:
@@ -244,17 +314,20 @@ def test_false_alarm_pixel_loss_accepts_top_k_larger_than_pixel_count() -> None:
     assert torch.isfinite(loss)
 
 
-def test_total_loss_restores_best_components_and_reports_stc_weight() -> None:
+def test_total_loss_combines_focal_dice_false_alarm_and_trajectory_terms() -> None:
     sampled_logits = torch.tensor([2.0, -2.0], requires_grad=True)
     sampled_labels = torch.tensor([1.0, 0.0])
     full_logits = torch.tensor([2.0, -2.0, 3.0], requires_grad=True)
     full_labels = torch.tensor([1.0, 0.0, 0.0])
     criterion = EventFocalDiceLoss(
-        lambda_dice=0.75,
-        lambda_object_frame=0.25,
+        image_width=11,
+        image_height=11,
+        lambda_dice=0.5,
         lambda_false_alarm=0.05,
         false_alarm_topk_per_frame=2,
-        lambda_stc=0.1,
+        lambda_trajectory_position=1.0,
+        lambda_trajectory_velocity=0.5,
+        trajectory_roi_radius=8.0,
     )
 
     losses = criterion(
@@ -266,6 +339,7 @@ def test_total_loss_restores_best_components_and_reports_stc_weight() -> None:
         timestamps_ms=torch.tensor([1.0, 1.0]),
         full_logits=full_logits,
         full_targets=full_labels,
+        full_object_ids=torch.tensor([1, 0, 0]),
         full_batch_indices=torch.zeros(3, dtype=torch.long),
         full_timestamps_ms=torch.tensor([1.0, 1.0, 51.0]),
         full_coordinates=torch.tensor(
@@ -276,29 +350,29 @@ def test_total_loss_restores_best_components_and_reports_stc_weight() -> None:
 
     expected = (
         losses["focal"]
-        + 0.75 * losses["dice"]
-        + 0.25 * losses["object_frame"]
+        + 0.5 * losses["dice"]
         + 0.05 * losses["false_alarm"]
+        + losses["trajectory_position"]
+        + 0.5 * losses["trajectory_velocity"]
     )
     assert torch.allclose(losses["total"], expected)
     assert set(losses) == {
         "total",
         "focal",
         "dice",
-        "object_frame",
         "false_alarm",
-        "stc_weight_mean",
+        "trajectory_position",
+        "trajectory_velocity",
     }
-    assert 1.0 <= float(losses["stc_weight_mean"]) <= 1.1
     losses["total"].backward()
     assert torch.isfinite(sampled_logits.grad).all()
     assert torch.isfinite(full_logits.grad).all()
 
 
 @pytest.mark.parametrize("target", [0.0, 1.0])
-def test_restored_loss_is_stable_for_empty_and_single_class(target: float) -> None:
+def test_trajectory_loss_is_stable_for_empty_and_single_class(target: float) -> None:
     empty_logits = torch.empty(0, requires_grad=True)
-    criterion = EventFocalDiceLoss(lambda_stc=0.1)
+    criterion = EventFocalDiceLoss(image_width=11, image_height=11)
     empty = criterion(
         empty_logits,
         torch.empty(0),
@@ -325,6 +399,11 @@ def test_restored_loss_is_stable_for_empty_and_single_class(target: float) -> No
             timestamps_ms=timestamps,
             full_logits=logits,
             full_targets=targets,
+            full_object_ids=torch.where(
+                targets > 0.5,
+                torch.ones(4, dtype=torch.long),
+                torch.zeros(4, dtype=torch.long),
+            ),
             full_batch_indices=batches,
             full_timestamps_ms=timestamps,
             full_coordinates=coordinates,

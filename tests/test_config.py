@@ -53,37 +53,31 @@ def test_base_yaml_exposes_cone_training_and_loss_configuration() -> None:
     assert config.training.mixed_precision_dtype == "float16"
     assert config.loss.focal_alpha == 0.75
     assert config.loss.focal_gamma == 2.0
-    assert config.loss.lambda_dice == 0.75
-    assert config.loss.lambda_object_frame == 0.25
-    assert config.loss.object_frame_logit_margin == 2.0
+    assert config.loss.lambda_dice == 0.5
     assert config.loss.lambda_false_alarm == 0.05
     assert config.loss.false_alarm_logit_margin == 0.0
     assert config.loss.false_alarm_topk_per_frame == 32
-    assert config.loss.gamma_stc == 2.0
-    assert config.loss.lambda_stc == 0.1
-    assert config.loss.stc_tau == 50.0
-    assert config.loss.stc_r0 == 8.0
-    assert config.loss.stc_vmax == 0.128
-    assert config.loss.stc_sigma_xy == 8.0
-    assert config.loss.stc_sigma_t == 25.0
-    assert config.loss.stc_max_neighbors == 32
+    assert config.loss.lambda_trajectory_position == 1.0
+    assert config.loss.lambda_trajectory_velocity == 0.5
+    assert config.loss.trajectory_roi_radius == 16.0
     assert config.evaluation.frame_ms == 50
 
 
 def test_score_optimized_yaml_exposes_dense_domain_training_configuration() -> None:
     config = load_config(Path("configs/huav_score_optimized.yaml"))
+    smoke = load_config(Path("configs/huav_score_optimized_smoke.yaml"))
 
     assert config.model.spatial_block_size_x == 8
     assert config.model.spatial_block_size_y == 8
-    assert config.model.num_time_blocks == 160
+    assert config.model.num_time_blocks == 64
     assert config.model.token_dim == 64
     assert config.model.event_embed_dim == 64
     assert config.model.num_pool_queries == 4
     assert config.model.num_layers == 3
     assert tuple(config.model.layer_time_scales) == (0.5, 0.75, 1.0)
     assert config.model.max_neighbors_per_cone == 8
-    assert [head.slope for head in config.model.cone_heads] == [0.2, 0.4, 0.6, 0.8]
-    assert [head.max_time_distance for head in config.model.cone_heads] == [10, 10, 15, 20]
+    assert [head.slope for head in config.model.cone_heads] == [0.5, 1.0, 1.5, 2.0]
+    assert [head.max_time_distance for head in config.model.cone_heads] == [4, 4, 6, 8]
     assert config.training.epochs == 18
     assert config.training.hard_negative_fraction == 0.5
     assert config.training.dense_sequence_event_threshold == 300000
@@ -92,10 +86,13 @@ def test_score_optimized_yaml_exposes_dense_domain_training_configuration() -> N
     assert config.training.min_learning_rate_ratio == 0.1
     assert config.loss.focal_alpha == 0.75
     assert config.loss.focal_gamma == 2.0
-    assert config.loss.lambda_dice == 0.75
-    assert config.loss.lambda_object_frame == 0.25
+    assert config.loss.lambda_dice == 0.5
     assert config.loss.lambda_false_alarm == 0.05
-    assert config.loss.lambda_stc == 0.1
+    assert config.loss.lambda_trajectory_position == 1.0
+    assert config.loss.lambda_trajectory_velocity == 0.5
+    assert config.loss.trajectory_roi_radius == 16.0
+    assert smoke.model == config.model
+    assert smoke.loss == config.loss
 
 
 def test_autodl_configs_preserve_score_model_and_select_cuda_bfloat16() -> None:
@@ -105,11 +102,23 @@ def test_autodl_configs_preserve_score_model_and_select_cuda_bfloat16() -> None:
     for config in (smoke, full):
         assert config.model.spatial_block_size_x == 8
         assert config.model.spatial_block_size_y == 8
-        assert config.model.num_time_blocks == 160
+        assert config.model.num_time_blocks == 64
         assert config.model.token_dim == 64
         assert config.model.event_embed_dim == 64
         assert config.model.num_pool_queries == 4
         assert config.model.num_layers == 3
+        assert [head.slope for head in config.model.cone_heads] == [
+            0.5,
+            1.0,
+            1.5,
+            2.0,
+        ]
+        assert [head.max_time_distance for head in config.model.cone_heads] == [
+            4,
+            4,
+            6,
+            8,
+        ]
         assert config.training.device == "cuda"
         assert config.training.mixed_precision is True
         assert config.training.mixed_precision_dtype == "bfloat16"
@@ -117,7 +126,9 @@ def test_autodl_configs_preserve_score_model_and_select_cuda_bfloat16() -> None:
         assert config.loss.lambda_false_alarm == 0.05
         assert config.loss.false_alarm_logit_margin == 0.0
         assert config.loss.false_alarm_topk_per_frame == 32
-        assert config.loss.lambda_stc == 0.1
+        assert config.loss.lambda_trajectory_position == 1.0
+        assert config.loss.lambda_trajectory_velocity == 0.5
+        assert config.loss.trajectory_roi_radius == 16.0
     assert smoke.training.max_train_files == 4
     assert smoke.training.max_val_files == 2
     assert full.training.epochs == 18
@@ -174,13 +185,6 @@ def test_cross_field_config_validation_rejects_inconsistent_values() -> None:
         ValueError,
         lambda: replace(
             valid,
-            loss=replace(valid.loss, stc_tau=0.0),
-        ).validate(),
-    )
-    raises(
-        ValueError,
-        lambda: replace(
-            valid,
             training=replace(valid.training, hard_negative_fraction=1.1),
         ).validate(),
     )
@@ -202,7 +206,7 @@ def test_cross_field_config_validation_rejects_inconsistent_values() -> None:
         ValueError,
         lambda: replace(
             valid,
-            loss=replace(valid.loss, lambda_stc=1.1),
+            loss=replace(valid.loss, lambda_trajectory_position=-0.1),
         ).validate(),
     )
     raises(
@@ -223,14 +227,7 @@ def test_cross_field_config_validation_rejects_inconsistent_values() -> None:
         ValueError,
         lambda: replace(
             valid,
-            loss=replace(valid.loss, stc_sigma_t=0.0),
-        ).validate(),
-    )
-    raises(
-        ValueError,
-        lambda: replace(
-            valid,
-            loss=replace(valid.loss, stc_max_neighbors=0),
+            loss=replace(valid.loss, trajectory_roi_radius=0.0),
         ).validate(),
     )
 

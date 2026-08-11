@@ -272,47 +272,17 @@ def render_training_curves(
             learning_rates.append(
                 _finite_number(record["learning_rate"], f"history[{index}].learning_rate")
             )
-        train_stc = _optional_series(records, "train_loss", "stc_weight_mean")
-        validation_stc = _optional_series(records, "validation_loss", "stc_weight_mean")
-        if not learning_rates and train_stc is None and validation_stc is None:
-            _show_unavailable(flat_axes[5], "Learning rate and STC weight")
+        if not learning_rates:
+            _show_unavailable(flat_axes[5], "Learning rate")
         else:
-            _style_axis(flat_axes[5], "Learning rate and STC weight", "Learning rate")
-            diagnostic_lines = []
-            if learning_rates:
-                diagnostic_lines.extend(
-                    flat_axes[5].plot(
-                        epochs, learning_rates, label="Learning rate", marker=marker
-                    )
-                )
-            stc_axis = flat_axes[5].twinx()
-            if train_stc is not None:
-                diagnostic_lines.extend(
-                    stc_axis.plot(
-                        epochs,
-                        train_stc,
-                        label="Train STC weight",
-                        color="tab:orange",
-                        marker=marker,
-                    )
-                )
-            if validation_stc is not None:
-                diagnostic_lines.extend(
-                    stc_axis.plot(
-                        epochs,
-                        validation_stc,
-                        label="Validation STC weight",
-                        color="tab:green",
-                        marker=marker,
-                    )
-                )
-            if train_stc is not None or validation_stc is not None:
-                stc_axis.set_ylabel("STC weight mean")
-            flat_axes[5].legend(
-                diagnostic_lines,
-                [line.get_label() for line in diagnostic_lines],
-                fontsize="small",
+            flat_axes[5].plot(
+                epochs,
+                learning_rates,
+                label="Learning rate",
+                marker=marker,
             )
+            _style_axis(flat_axes[5], "Learning rate", "Learning rate")
+            flat_axes[5].legend(fontsize="small")
 
         figure.suptitle(
             f"{run_name} | best epoch {best_epoch:g} | "

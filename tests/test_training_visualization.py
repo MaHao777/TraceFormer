@@ -20,17 +20,17 @@ def _current_record(epoch: int, score: float) -> dict[str, object]:
             "total": 1.0 / epoch,
             "focal": 0.2 / epoch,
             "dice": 0.4 / epoch,
-            "object_frame": 0.3 / epoch,
             "false_alarm": 0.1 / epoch,
-            "stc_weight_mean": 1.01,
+            "trajectory_position": 0.3 / epoch,
+            "trajectory_velocity": 0.2 / epoch,
         },
         "validation_loss": {
             "total": 0.9 / epoch,
             "focal": 0.18 / epoch,
             "dice": 0.36 / epoch,
-            "object_frame": 0.27 / epoch,
             "false_alarm": 0.09 / epoch,
-            "stc_weight_mean": 1.02,
+            "trajectory_position": 0.27 / epoch,
+            "trajectory_velocity": 0.18 / epoch,
         },
         "validation": {
             "threshold": 0.5 + epoch * 0.05,
@@ -73,7 +73,7 @@ def test_render_training_curves_accepts_one_epoch_and_missing_optional_fields(
     record.pop("validation_loss")
     train_loss = record["train_loss"]
     assert isinstance(train_loss, dict)
-    train_loss.pop("stc_weight_mean")
+    train_loss.pop("trajectory_velocity")
 
     output = tmp_path / "training_curves.png"
     render_training_curves([record], output, run_name="resume_example")
