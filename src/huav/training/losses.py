@@ -151,8 +151,14 @@ def _trajectory_centers(
     image_height: int = 260,
     roi_radius: float = 16.0,
     eps: float = 1e-6,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Return keys, GT centers, and soft predicted centers per object-frame."""
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]:
+    """Return object-frame keys plus local and velocity-scaled centers."""
     if batch_indices is None:
         batch_indices = torch.zeros(
             len(logits), dtype=torch.long, device=logits.device
@@ -194,14 +200,26 @@ def _trajectory_centers(
         (0, 2), dtype=torch.float32, device=logits.device
     )
     if len(logits) == 0:
-        return empty_keys, empty_centers, empty_centers
+        return (
+            empty_keys,
+            empty_centers,
+            empty_centers,
+            empty_centers,
+            empty_centers,
+        )
 
     frame_indices = torch.div(
         timestamps_ms.to(dtype=torch.float64), frame_ms, rounding_mode="floor"
     ).long()
     positive = (targets > 0.5) & (object_ids > 0)
     if not bool(positive.any()):
-        return empty_keys, empty_centers, empty_centers
+        return (
+            empty_keys,
+            empty_centers,
+            empty_centers,
+            empty_centers,
+            empty_centers,
+        )
 
     group_keys, positive_inverse = torch.unique(
         torch.stack(
@@ -215,22 +233,17 @@ def _trajectory_centers(
         dim=0,
         return_inverse=True,
     )
-    coordinate_scale = torch.tensor(
-        [image_width - 1, image_height - 1],
-        dtype=torch.float32,
-        device=coordinates.device,
-    )
-    normalized_coordinates = coordinates.float() / coordinate_scale
     gt_center_sums = torch.zeros(
         (len(group_keys), 2), dtype=torch.float32, device=logits.device
     )
-    gt_center_sums.index_add_(
-        0, positive_inverse, normalized_coordinates[positive]
-    )
+    gt_center_sums.index_add_(0, positive_inverse, coordinates[positive].float())
     gt_counts = torch.bincount(
         positive_inverse, minlength=len(group_keys)
     ).to(dtype=torch.float32)
-    gt_centers = gt_center_sums / gt_counts[:, None]
+    gt_centers_pixels = gt_center_sums / gt_counts[:, None]
+    roi_diameter = 2.0 * roi_radius
+    gt_centers_local = torch.full_like(gt_centers_pixels, 0.5)
+    gt_centers_velocity = gt_centers_pixels / roi_diameter
 
     event_frame_keys = torch.stack(
         (batch_indices.long(), frame_indices), dim=1
@@ -253,7 +266,8 @@ def _trajectory_centers(
     group_starts = torch.cumsum(group_counts, dim=0) - group_counts
     probabilities = torch.sigmoid(logits.float())
     occupied_frames = torch.nonzero(group_counts > 0, as_tuple=False).flatten()
-    frame_predictions: list[torch.Tensor] = []
+    frame_predictions_local: list[torch.Tensor] = []
+    frame_predictions_velocity: list[torch.Tensor] = []
     for event_frame_index in occupied_frames.detach().cpu().tolist():
         event_start = int(frame_starts[event_frame_index])
         event_count = int(frame_counts[event_frame_index])
@@ -261,28 +275,39 @@ def _trajectory_centers(
         group_start = int(group_starts[event_frame_index])
         group_count = int(group_counts[event_frame_index])
         frame_groups = group_order[group_start : group_start + group_count]
-        gt_center_pixels = gt_centers[frame_groups] * coordinate_scale
-        in_roi = (
-            (
-                coordinates[frame_events].float()[None, :, :]
-                - gt_center_pixels[:, None, :]
-            )
-            .abs()
-            .le(roi_radius)
-            .all(dim=2)
-        )
+        frame_coordinates = coordinates[frame_events].float()
+        gt_center_pixels = gt_centers_pixels[frame_groups]
+        offsets = frame_coordinates[None, :, :] - gt_center_pixels[:, None, :]
+        in_roi = offsets.square().sum(dim=2).le(roi_radius * roi_radius)
         roi_probabilities = probabilities[frame_events][None, :] * in_roi.to(
             dtype=probabilities.dtype
         )
-        frame_predictions.append(
-            roi_probabilities @ normalized_coordinates[frame_events]
+        predicted_centers_pixels = (
+            roi_probabilities @ frame_coordinates
             / (roi_probabilities.sum(dim=1, keepdim=True) + eps)
         )
-    predictions_in_group_order = torch.cat(frame_predictions, dim=0)
-    predicted_centers = torch.empty_like(predictions_in_group_order).index_copy(
-        0, group_order, predictions_in_group_order
+        frame_predictions_local.append(
+            0.5
+            + (predicted_centers_pixels - gt_center_pixels) / roi_diameter
+        )
+        frame_predictions_velocity.append(predicted_centers_pixels / roi_diameter)
+    local_predictions_in_group_order = torch.cat(frame_predictions_local, dim=0)
+    velocity_predictions_in_group_order = torch.cat(
+        frame_predictions_velocity, dim=0
     )
-    return group_keys, gt_centers, predicted_centers
+    predicted_centers_local = torch.empty_like(
+        local_predictions_in_group_order
+    ).index_copy(0, group_order, local_predictions_in_group_order)
+    predicted_centers_velocity = torch.empty_like(
+        velocity_predictions_in_group_order
+    ).index_copy(0, group_order, velocity_predictions_in_group_order)
+    return (
+        group_keys,
+        gt_centers_local,
+        predicted_centers_local,
+        gt_centers_velocity,
+        predicted_centers_velocity,
+    )
 
 
 def _trajectory_position_from_centers(
@@ -332,7 +357,7 @@ def trajectory_position_loss(
     eps: float = 1e-6,
 ) -> torch.Tensor:
     """Penalize differentiable soft-centroid error in each GT-centered ROI."""
-    _, gt_centers, predicted_centers = _trajectory_centers(
+    _, gt_centers, predicted_centers, _, _ = _trajectory_centers(
         logits,
         targets,
         coordinates,
@@ -363,7 +388,7 @@ def trajectory_velocity_loss(
     eps: float = 1e-6,
 ) -> torch.Tensor:
     """Penalize first-order centroid differences over adjacent valid frames."""
-    group_keys, gt_centers, predicted_centers = _trajectory_centers(
+    group_keys, _, _, gt_centers, predicted_centers = _trajectory_centers(
         logits,
         targets,
         coordinates,
@@ -590,7 +615,13 @@ class EventFocalDiceLoss(nn.Module):
                     "full-event logits, targets, coordinates, object ids, "
                     "timestamps and batches are required for trajectory loss"
                 )
-            group_keys, gt_centers, predicted_centers = _trajectory_centers(
+            (
+                group_keys,
+                gt_centers_local,
+                predicted_centers_local,
+                gt_centers_velocity,
+                predicted_centers_velocity,
+            ) = _trajectory_centers(
                 full_logits,  # type: ignore[arg-type]
                 full_targets,  # type: ignore[arg-type]
                 full_coordinates,  # type: ignore[arg-type]
@@ -604,14 +635,14 @@ class EventFocalDiceLoss(nn.Module):
             )
             trajectory_position = _trajectory_position_from_centers(
                 full_logits,  # type: ignore[arg-type]
-                gt_centers,
-                predicted_centers,
+                gt_centers_local,
+                predicted_centers_local,
             )
             trajectory_velocity = _trajectory_velocity_from_centers(
                 full_logits,  # type: ignore[arg-type]
                 group_keys,
-                gt_centers,
-                predicted_centers,
+                gt_centers_velocity,
+                predicted_centers_velocity,
             )
         else:
             trajectory_position = logits.sum() * 0.0

@@ -139,6 +139,68 @@ def test_trajectory_position_loss_is_differentiable_without_thresholding() -> No
     assert bool((logits.grad != 0).any())
 
 
+def test_trajectory_position_loss_excludes_square_roi_corners() -> None:
+    common = {
+        "targets": torch.tensor([1.0, 0.0]),
+        "coordinates": torch.tensor([[5.0, 5.0], [9.0, 9.0]]),
+        "object_ids": torch.tensor([1, 0]),
+        "timestamps_ms": torch.tensor([10.0, 10.0]),
+        "image_width": 11,
+        "image_height": 11,
+        "roi_radius": 5.0,
+    }
+
+    low_corner_probability = trajectory_position_loss(
+        torch.tensor([5.0, -5.0]), **common
+    )
+    high_corner_probability = trajectory_position_loss(
+        torch.tensor([5.0, 5.0]), **common
+    )
+
+    torch.testing.assert_close(high_corner_probability, low_corner_probability)
+
+
+def test_trajectory_position_loss_uses_roi_diameter_scale() -> None:
+    common = {
+        "logits": torch.tensor([-5.0, 5.0]),
+        "targets": torch.tensor([1.0, 0.0]),
+        "coordinates": torch.tensor([[5.0, 5.0], [6.0, 5.0]]),
+        "object_ids": torch.tensor([1, 0]),
+        "timestamps_ms": torch.tensor([10.0, 10.0]),
+        "roi_radius": 4.0,
+    }
+
+    small_image = trajectory_position_loss(
+        image_width=11, image_height=11, **common
+    )
+    large_image = trajectory_position_loss(
+        image_width=101, image_height=201, **common
+    )
+
+    torch.testing.assert_close(small_image, large_image)
+
+
+def test_trajectory_position_loss_keeps_fixed_scale_at_image_edge() -> None:
+    common = {
+        "logits": torch.tensor([-5.0, 5.0]),
+        "targets": torch.tensor([1.0, 0.0]),
+        "object_ids": torch.tensor([1, 0]),
+        "timestamps_ms": torch.tensor([10.0, 10.0]),
+        "image_width": 11,
+        "image_height": 11,
+        "roi_radius": 4.0,
+    }
+
+    image_edge = trajectory_position_loss(
+        coordinates=torch.tensor([[0.0, 5.0], [1.0, 5.0]]), **common
+    )
+    image_interior = trajectory_position_loss(
+        coordinates=torch.tensor([[5.0, 5.0], [6.0, 5.0]]), **common
+    )
+
+    torch.testing.assert_close(image_edge, image_interior)
+
+
 def test_trajectory_velocity_loss_prefers_matching_adjacent_frame_delta() -> None:
     targets = torch.tensor([1.0, 0.0, 1.0, 0.0])
     coordinates = torch.tensor(
@@ -169,6 +231,28 @@ def test_trajectory_velocity_loss_prefers_matching_adjacent_frame_delta() -> Non
     )
 
     assert accurate < stationary
+
+
+def test_trajectory_velocity_loss_uses_roi_diameter_scale() -> None:
+    common = {
+        "logits": torch.tensor([-5.0, 5.0, -5.0, 5.0]),
+        "targets": torch.tensor([1.0, 0.0, 1.0, 0.0]),
+        "coordinates": torch.tensor(
+            [[2.0, 2.0], [3.0, 2.0], [4.0, 2.0], [6.0, 2.0]]
+        ),
+        "object_ids": torch.tensor([1, 0, 1, 0]),
+        "timestamps_ms": torch.tensor([10.0, 10.0, 60.0, 60.0]),
+        "roi_radius": 8.0,
+    }
+
+    small_image = trajectory_velocity_loss(
+        image_width=11, image_height=11, **common
+    )
+    large_image = trajectory_velocity_loss(
+        image_width=101, image_height=201, **common
+    )
+
+    torch.testing.assert_close(small_image, large_image)
 
 
 def test_trajectory_velocity_ignores_nonadjacent_frames_and_different_batches() -> None:
