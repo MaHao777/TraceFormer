@@ -41,7 +41,7 @@ from .metrics import (
 from .runtime import prepare_device
 from .sampling import sample_event_indices
 
-CHECKPOINT_SCHEMA_VERSION = 7
+CHECKPOINT_SCHEMA_VERSION = 8
 
 
 def _update_training_curves(
@@ -78,6 +78,15 @@ def build_model(config: HUAVConfig) -> SpatioTemporalConeDetector:
         cone_heads=tuple(config.model.cone_heads),
         layer_time_scales=tuple(config.model.layer_time_scales),
         max_neighbors_per_cone=config.model.max_neighbors_per_cone,
+        token_importance_enabled=config.model.token_importance_enabled,
+        token_importance_topk_ratio=config.model.token_importance_topk_ratio,
+        token_importance_density_weight=(
+            config.model.token_importance_density_weight
+        ),
+        token_importance_attention_weight=(
+            config.model.token_importance_attention_weight
+        ),
+        token_importance_track_weight=config.model.token_importance_track_weight,
         causal_mode=config.model.causal_mode,
         direction_dropout=config.model.direction_dropout,
         debug_attention_stats=config.model.debug_attention_stats,

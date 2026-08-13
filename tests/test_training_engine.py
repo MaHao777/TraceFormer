@@ -189,7 +189,7 @@ def test_cpu_training_writes_reproducible_metrics_and_checkpoint() -> None:
         checkpoint = __import__("torch").load(
             run_dir / "best.pt", map_location="cpu", weights_only=True
         )
-        assert checkpoint["schema_version"] == 7
+        assert checkpoint["schema_version"] == 8
         assert checkpoint["decision_threshold"] == metrics["threshold"]
         changed_config = replace(
             _config(data_root, output_root),

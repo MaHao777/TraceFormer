@@ -48,6 +48,11 @@ class SpatioTemporalConeDetector(nn.Module):
         direction_dropout: float,
         debug_attention_stats: bool,
         num_pool_queries: int = 4,
+        token_importance_enabled: bool = True,
+        token_importance_topk_ratio: float = 0.5,
+        token_importance_density_weight: float = 0.3,
+        token_importance_attention_weight: float = 0.3,
+        token_importance_track_weight: float = 0.4,
     ) -> None:
         super().__init__()
         if num_layers != len(layer_time_scales):
@@ -75,6 +80,11 @@ class SpatioTemporalConeDetector(nn.Module):
             causal_mode=causal_mode,
             direction_dropout=direction_dropout,
             debug_attention_stats=debug_attention_stats,
+            token_importance_enabled=token_importance_enabled,
+            token_importance_topk_ratio=token_importance_topk_ratio,
+            token_importance_density_weight=token_importance_density_weight,
+            token_importance_attention_weight=token_importance_attention_weight,
+            token_importance_track_weight=token_importance_track_weight,
         )
         self.decoder = EventDecoder(token_dim=token_dim, dropout=dropout)
 
@@ -84,10 +94,15 @@ class SpatioTemporalConeDetector(nn.Module):
         batch_indices: torch.Tensor | None = None,
     ) -> dict[str, Any]:
         tokenized = self.tokenizer(events, batch_indices)
+        token_event_counts = torch.bincount(
+            tokenized.event_token_indices,
+            minlength=len(tokenized.tokens),
+        )
         encoded = self.encoder(
             tokenized.tokens,
             tokenized.token_coords,
             tokenized.token_batch_indices,
+            token_event_counts,
         )
         event_logits = self.decoder(
             encoded.token_features,

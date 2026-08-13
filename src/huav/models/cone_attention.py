@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 from torch import nn
@@ -12,8 +13,9 @@ from huav.config import ConeHeadConfig
 
 from .cone_neighbor_builder import ConeNeighborBuilder
 from .relative_position import RelativePositionEncoder
+from .token_importance import TokenImportance, TokenImportanceScores
 
-AttentionStats = dict[str, torch.Tensor]
+AttentionStats = dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -38,6 +40,11 @@ class BidirectionalConeAttention(nn.Module):
         causal_mode: bool = False,
         direction_dropout: float = 0.0,
         debug_attention_stats: bool = False,
+        token_importance_enabled: bool = True,
+        token_importance_topk_ratio: float = 0.5,
+        token_importance_density_weight: float = 0.3,
+        token_importance_attention_weight: float = 0.3,
+        token_importance_track_weight: float = 0.4,
     ) -> None:
         super().__init__()
         if token_dim <= 0 or num_heads <= 0 or token_dim % num_heads:
@@ -52,6 +59,16 @@ class BidirectionalConeAttention(nn.Module):
         self.causal_mode = bool(causal_mode)
         self.direction_dropout = float(direction_dropout)
         self.debug_attention_stats = bool(debug_attention_stats)
+        self.token_importance = (
+            TokenImportance(
+                topk_ratio=token_importance_topk_ratio,
+                density_weight=token_importance_density_weight,
+                attention_weight=token_importance_attention_weight,
+                track_weight=token_importance_track_weight,
+            )
+            if token_importance_enabled
+            else None
+        )
         self.neighbor_builder = ConeNeighborBuilder(
             cone_heads=cone_heads,
             max_neighbors_per_cone=max_neighbors_per_cone,
@@ -76,12 +93,11 @@ class BidirectionalConeAttention(nn.Module):
     def _reshape_heads(self, features: torch.Tensor) -> torch.Tensor:
         return features.reshape(len(features), self.num_heads, self.head_dim)
 
-    def _attend_direction(
+    def _direction_weights(
         self,
         *,
         query: torch.Tensor,
         key: torch.Tensor,
-        value: torch.Tensor,
         token_coords: torch.Tensor,
         neighbor_indices: torch.Tensor,
         direction_index: int,
@@ -92,7 +108,6 @@ class BidirectionalConeAttention(nn.Module):
             self.num_heads, device=query.device
         ).view(1, self.num_heads, 1)
         neighbor_keys = key[safe_indices, head_indices]
-        neighbor_values = value[safe_indices, head_indices]
         neighbor_keys = neighbor_keys + self.direction_embeddings[
             direction_index
         ].view(1, self.num_heads, 1, self.head_dim)
@@ -113,9 +128,23 @@ class BidirectionalConeAttention(nn.Module):
         scores = torch.where(has_neighbors, scores, torch.zeros_like(scores))
         weights = torch.softmax(scores, dim=-1)
         weights = torch.where(mask, weights, torch.zeros_like(weights))
+        return weights, mask.sum(dim=-1)
+
+    def _aggregate_direction(
+        self,
+        *,
+        value: torch.Tensor,
+        neighbor_indices: torch.Tensor,
+        weights: torch.Tensor,
+    ) -> torch.Tensor:
+        safe_indices = neighbor_indices.clamp_min(0)
+        head_indices = torch.arange(
+            self.num_heads, device=value.device
+        ).view(1, self.num_heads, 1)
+        neighbor_values = value[safe_indices, head_indices]
         weights = self.attention_dropout(weights)
         aggregate = (weights[..., None] * neighbor_values).sum(dim=-2)
-        return aggregate, mask.sum(dim=-1)
+        return aggregate
 
     def _apply_direction_dropout(
         self,
@@ -136,8 +165,11 @@ class BidirectionalConeAttention(nn.Module):
         self,
         counts: torch.Tensor,
         gate_weights: torch.Tensor,
+        *,
+        original_counts: torch.Tensor | None = None,
+        importance: TokenImportanceScores | None = None,
     ) -> AttentionStats:
-        return {
+        stats = {
             "neighbor_counts": counts.detach(),
             "edge_count": counts.sum().detach(),
             "mean_neighbors": (
@@ -150,17 +182,35 @@ class BidirectionalConeAttention(nn.Module):
             ),
             "gate_weights": gate_weights.detach(),
         }
+        if original_counts is not None:
+            stats["original_neighbor_counts"] = original_counts.detach()
+            stats["original_edge_count"] = original_counts.sum().detach()
+        if importance is not None:
+            stats["importance"] = {
+                "density": importance.density.detach(),
+                "attention": importance.attention.detach(),
+                "track": importance.track.detach(),
+                "final": importance.final.detach(),
+            }
+        return stats
 
     def forward(
         self,
         tokens: torch.Tensor,
         token_coords: torch.Tensor,
         token_batch_indices: torch.Tensor,
+        token_event_counts: torch.Tensor | None = None,
     ) -> ConeAttentionOutput:
         if tokens.ndim != 2 or tokens.shape[1] != self.token_dim:
             raise ValueError(f"tokens must have shape [M,{self.token_dim}]")
         if len(tokens) != len(token_coords):
             raise ValueError("tokens and token_coords must have equal length")
+        if token_event_counts is None:
+            token_event_counts = torch.ones(
+                len(tokens), dtype=torch.long, device=tokens.device
+            )
+        if token_event_counts.shape != (len(tokens),):
+            raise ValueError("token_event_counts must have shape [M]")
         if len(tokens) == 0:
             empty_counts = torch.empty(
                 (0, self.num_heads), dtype=torch.long, device=tokens.device
@@ -177,21 +227,69 @@ class BidirectionalConeAttention(nn.Module):
         query = self._reshape_heads(self.query_projection(tokens))
         key = self._reshape_heads(self.key_projection(tokens))
         value = self._reshape_heads(self.value_projection(tokens))
-        past, past_counts = self._attend_direction(
+        full_past_weights, original_past_counts = self._direction_weights(
             query=query,
             key=key,
-            value=value,
             token_coords=token_coords,
             neighbor_indices=neighborhoods.past_indices,
             direction_index=0,
         )
-        future, future_counts = self._attend_direction(
+        full_future_weights, original_future_counts = self._direction_weights(
             query=query,
             key=key,
-            value=value,
             token_coords=token_coords,
             neighbor_indices=neighborhoods.future_indices,
             direction_index=1,
+        )
+        importance: TokenImportanceScores | None = None
+        past_indices = neighborhoods.past_indices
+        future_indices = neighborhoods.future_indices
+        if self.token_importance is not None:
+            importance = self.token_importance(
+                tokens=tokens,
+                event_counts=token_event_counts,
+                token_coords=token_coords,
+                token_batch_indices=token_batch_indices,
+                past_indices=past_indices,
+                future_indices=future_indices,
+                past_attention_weights=full_past_weights,
+                future_attention_weights=full_future_weights,
+            )
+            past_indices = self.token_importance.select_topk(
+                past_indices, importance.final
+            )
+            future_indices = self.token_importance.select_topk(
+                future_indices, importance.final
+            )
+            past_weights, past_counts = self._direction_weights(
+                query=query,
+                key=key,
+                token_coords=token_coords,
+                neighbor_indices=past_indices,
+                direction_index=0,
+            )
+            future_weights, future_counts = self._direction_weights(
+                query=query,
+                key=key,
+                token_coords=token_coords,
+                neighbor_indices=future_indices,
+                direction_index=1,
+            )
+        else:
+            past_weights, past_counts = full_past_weights, original_past_counts
+            future_weights, future_counts = (
+                full_future_weights,
+                original_future_counts,
+            )
+        past = self._aggregate_direction(
+            value=value,
+            neighbor_indices=past_indices,
+            weights=past_weights,
+        )
+        future = self._aggregate_direction(
+            value=value,
+            neighbor_indices=future_indices,
+            weights=future_weights,
         )
         past_flat = past.reshape(len(tokens), self.token_dim)
         future_flat = future.reshape(len(tokens), self.token_dim)
@@ -216,12 +314,22 @@ class BidirectionalConeAttention(nn.Module):
         fused = gates[:, :1] * past_flat + gates[:, 1:] * future_flat
         features = self.output_projection(fused)
         past_stats = (
-            self._stats(past_counts, gates[:, 0])
+            self._stats(
+                past_counts,
+                gates[:, 0],
+                original_counts=original_past_counts,
+                importance=importance,
+            )
             if self.debug_attention_stats
             else None
         )
         future_stats = (
-            self._stats(future_counts, gates[:, 1])
+            self._stats(
+                future_counts,
+                gates[:, 1],
+                original_counts=original_future_counts,
+                importance=importance,
+            )
             if self.debug_attention_stats
             else None
         )

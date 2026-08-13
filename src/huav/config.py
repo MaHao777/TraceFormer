@@ -47,6 +47,11 @@ class ModelConfig:
     cone_heads: tuple[ConeHeadConfig, ...] = DEFAULT_CONE_HEADS
     layer_time_scales: tuple[float, ...] = (0.5, 0.75, 1.0)
     max_neighbors_per_cone: int = 8
+    token_importance_enabled: bool = True
+    token_importance_topk_ratio: float = 0.5
+    token_importance_density_weight: float = 0.3
+    token_importance_attention_weight: float = 0.3
+    token_importance_track_weight: float = 0.4
     causal_mode: bool = False
     direction_dropout: float = 0.0
     debug_attention_stats: bool = False
@@ -186,6 +191,26 @@ class HUAVConfig:
             if value < previous_scale:
                 raise ValueError("layer_time_scales must be non-decreasing")
             previous_scale = value
+        if not isinstance(self.model.token_importance_enabled, bool):
+            raise ValueError("token_importance_enabled must be boolean")
+        importance_ratio = _finite_real(
+            self.model.token_importance_topk_ratio,
+            "token_importance_topk_ratio",
+        )
+        if not 0 < importance_ratio <= 1:
+            raise ValueError("token_importance_topk_ratio must be in (0,1]")
+        importance_weights = tuple(
+            _finite_real(getattr(self.model, name), name)
+            for name in (
+                "token_importance_density_weight",
+                "token_importance_attention_weight",
+                "token_importance_track_weight",
+            )
+        )
+        if any(weight < 0 for weight in importance_weights):
+            raise ValueError("token importance weights must be non-negative")
+        if sum(importance_weights) <= 0:
+            raise ValueError("at least one token importance weight must be positive")
         if not isinstance(self.model.causal_mode, bool):
             raise ValueError("causal_mode must be boolean")
         direction_dropout = _finite_real(

@@ -19,6 +19,7 @@ def _attention(*, causal_mode: bool = False, debug: bool = True) -> Bidirectiona
         dropout=0.0,
         causal_mode=causal_mode,
         debug_attention_stats=debug,
+        token_importance_topk_ratio=0.5,
     )
 
 
@@ -65,6 +66,34 @@ def test_debug_stats_show_separate_past_future_counts_and_normalized_gates() -> 
     torch.testing.assert_close(center_gate_sum, torch.tensor(1.0))
     assert output.past_attention_stats["edge_count"].item() > 0
     assert output.future_attention_stats["edge_count"].item() > 0
+    assert torch.all(
+        output.past_attention_stats["neighbor_counts"]
+        <= output.past_attention_stats["original_neighbor_counts"]
+    )
+    assert torch.all(
+        output.future_attention_stats["neighbor_counts"]
+        <= output.future_attention_stats["original_neighbor_counts"]
+    )
+    assert output.past_attention_stats["importance"]["final"].shape == (3,)
+
+
+def test_all_tokens_remain_queries_when_only_half_of_each_cone_is_key_value() -> None:
+    attention = _attention()
+    tokens = torch.randn(5, 8, requires_grad=True)
+    coords = torch.tensor(
+        [[0, 0, 0], [0, 0, 1], [0, 0, 2], [0, 0, 3], [0, 0, 4]],
+        dtype=torch.long,
+    )
+    batches = torch.zeros(5, dtype=torch.long)
+    event_counts = torch.tensor([1, 2, 3, 4, 5])
+
+    output = attention(tokens, coords, batches, event_counts)
+    output.features.sum().backward()
+
+    assert output.features.shape == tokens.shape
+    assert tokens.grad is not None and torch.isfinite(tokens.grad).all()
+    assert output.past_attention_stats["neighbor_counts"].shape[0] == len(tokens)
+    assert output.future_attention_stats["neighbor_counts"].shape[0] == len(tokens)
 
 
 def test_causal_attention_suppresses_future_branch() -> None:

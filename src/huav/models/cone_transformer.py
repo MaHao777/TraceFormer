@@ -33,6 +33,11 @@ class ConeTransformerBlock(nn.Module):
         causal_mode: bool,
         direction_dropout: float,
         debug_attention_stats: bool,
+        token_importance_enabled: bool,
+        token_importance_topk_ratio: float,
+        token_importance_density_weight: float,
+        token_importance_attention_weight: float,
+        token_importance_track_weight: float,
     ) -> None:
         super().__init__()
         hidden_dim = max(1, int(round(token_dim * mlp_ratio)))
@@ -47,6 +52,11 @@ class ConeTransformerBlock(nn.Module):
             causal_mode=causal_mode,
             direction_dropout=direction_dropout,
             debug_attention_stats=debug_attention_stats,
+            token_importance_enabled=token_importance_enabled,
+            token_importance_topk_ratio=token_importance_topk_ratio,
+            token_importance_density_weight=token_importance_density_weight,
+            token_importance_attention_weight=token_importance_attention_weight,
+            token_importance_track_weight=token_importance_track_weight,
         )
         self.feed_forward_norm = nn.LayerNorm(token_dim)
         self.feed_forward = nn.Sequential(
@@ -62,11 +72,13 @@ class ConeTransformerBlock(nn.Module):
         tokens: torch.Tensor,
         token_coords: torch.Tensor,
         token_batch_indices: torch.Tensor,
+        token_event_counts: torch.Tensor,
     ) -> tuple[torch.Tensor, AttentionStats | None, AttentionStats | None]:
         attention = self.attention(
             self.attention_norm(tokens),
             token_coords,
             token_batch_indices,
+            token_event_counts,
         )
         tokens = tokens + self.residual_dropout(attention.features)
         tokens = tokens + self.residual_dropout(
@@ -93,6 +105,11 @@ class ConeTransformerEncoder(nn.Module):
         causal_mode: bool,
         direction_dropout: float,
         debug_attention_stats: bool,
+        token_importance_enabled: bool = True,
+        token_importance_topk_ratio: float = 0.5,
+        token_importance_density_weight: float = 0.3,
+        token_importance_attention_weight: float = 0.3,
+        token_importance_track_weight: float = 0.4,
     ) -> None:
         super().__init__()
         if not layer_time_scales:
@@ -111,6 +128,15 @@ class ConeTransformerEncoder(nn.Module):
                     causal_mode=causal_mode,
                     direction_dropout=direction_dropout,
                     debug_attention_stats=debug_attention_stats,
+                    token_importance_enabled=token_importance_enabled,
+                    token_importance_topk_ratio=token_importance_topk_ratio,
+                    token_importance_density_weight=(
+                        token_importance_density_weight
+                    ),
+                    token_importance_attention_weight=(
+                        token_importance_attention_weight
+                    ),
+                    token_importance_track_weight=token_importance_track_weight,
                 )
                 for scale in layer_time_scales
             ]
@@ -122,12 +148,13 @@ class ConeTransformerEncoder(nn.Module):
         tokens: torch.Tensor,
         token_coords: torch.Tensor,
         token_batch_indices: torch.Tensor,
+        token_event_counts: torch.Tensor,
     ) -> ConeTransformerOutput:
         past_stats: list[AttentionStats] = []
         future_stats: list[AttentionStats] = []
         for layer in self.layers:
             tokens, layer_past, layer_future = layer(
-                tokens, token_coords, token_batch_indices
+                tokens, token_coords, token_batch_indices, token_event_counts
             )
             if self.debug_attention_stats:
                 if layer_past is None or layer_future is None:
