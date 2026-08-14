@@ -41,7 +41,7 @@ class BidirectionalConeAttention(nn.Module):
         direction_dropout: float = 0.0,
         debug_attention_stats: bool = False,
         token_importance_enabled: bool = True,
-        token_importance_topk_ratio: float = 0.5,
+        token_importance_topk_ratio: float = 0.75,
         token_importance_density_weight: float = 0.3,
         token_importance_attention_weight: float = 0.3,
         token_importance_track_weight: float = 0.4,

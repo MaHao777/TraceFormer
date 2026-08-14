@@ -48,7 +48,7 @@ class ModelConfig:
     layer_time_scales: tuple[float, ...] = (0.5, 0.75, 1.0)
     max_neighbors_per_cone: int = 8
     token_importance_enabled: bool = True
-    token_importance_topk_ratio: float = 0.5
+    token_importance_topk_ratio: float = 0.75
     token_importance_density_weight: float = 0.3
     token_importance_attention_weight: float = 0.3
     token_importance_track_weight: float = 0.4

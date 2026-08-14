@@ -26,7 +26,7 @@ class TokenImportance(nn.Module):
     def __init__(
         self,
         *,
-        topk_ratio: float = 0.5,
+        topk_ratio: float = 0.75,
         density_weight: float = 0.3,
         attention_weight: float = 0.3,
         track_weight: float = 0.4,

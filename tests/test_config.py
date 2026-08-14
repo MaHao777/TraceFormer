@@ -42,7 +42,7 @@ def test_base_yaml_exposes_cone_training_and_loss_configuration() -> None:
     assert [head.base_radius for head in config.model.cone_heads] == [1.0, 1.0, 2.0, 2.0]
     assert config.model.max_neighbors_per_cone == 8
     assert config.model.token_importance_enabled is True
-    assert config.model.token_importance_topk_ratio == 0.5
+    assert config.model.token_importance_topk_ratio == 0.75
     assert config.model.token_importance_density_weight == 0.3
     assert config.model.token_importance_attention_weight == 0.3
     assert config.model.token_importance_track_weight == 0.4
@@ -82,7 +82,7 @@ def test_score_optimized_yaml_exposes_dense_domain_training_configuration() -> N
     assert tuple(config.model.layer_time_scales) == (0.5, 0.75, 1.0)
     assert config.model.max_neighbors_per_cone == 8
     assert config.model.token_importance_enabled is True
-    assert config.model.token_importance_topk_ratio == 0.5
+    assert config.model.token_importance_topk_ratio == 0.75
     assert [head.slope for head in config.model.cone_heads] == [0.5, 1.0, 1.5, 2.0]
     assert [head.max_time_distance for head in config.model.cone_heads] == [4, 4, 6, 8]
     assert config.training.epochs == 18

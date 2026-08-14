@@ -14,6 +14,10 @@ def _importance(*, topk_ratio: float = 0.5) -> TokenImportance:
     )
 
 
+def test_default_topk_ratio_retains_three_quarters() -> None:
+    assert TokenImportance().topk_ratio == 0.75
+
+
 def test_scores_are_sample_normalized_and_combined_with_positive_weights() -> None:
     tokens = torch.tensor(
         [
