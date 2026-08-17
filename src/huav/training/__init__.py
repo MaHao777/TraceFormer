@@ -10,8 +10,7 @@ from .losses import (
     binary_dice_loss,
     binary_focal_loss,
     false_alarm_pixel_loss,
-    trajectory_position_loss,
-    trajectory_velocity_loss,
+    object_frame_recall_loss,
 )
 from .metrics import EventMetricAccumulator, EVUAVMetricAccumulator, competition_metrics
 from .sampling import sample_event_indices
@@ -46,11 +45,10 @@ __all__ = [
     "EVUAVMetricAccumulator",
     "EventMetricAccumulator",
     "Trainer",
-    "competition_metrics",
     "binary_dice_loss",
     "binary_focal_loss",
+    "competition_metrics",
     "false_alarm_pixel_loss",
+    "object_frame_recall_loss",
     "sample_event_indices",
-    "trajectory_position_loss",
-    "trajectory_velocity_loss",
 ]

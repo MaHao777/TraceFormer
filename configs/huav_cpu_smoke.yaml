@@ -45,13 +45,7 @@ training:
 loss:
   focal_alpha: 0.75
   focal_gamma: 2.0
-  lambda_dice: 0.5
-  lambda_false_alarm: 0.05
-  false_alarm_logit_margin: 0.0
-  false_alarm_topk_per_frame: 32
-  lambda_trajectory_position: 1.0
-  lambda_trajectory_velocity: 0.5
-  trajectory_roi_radius: 16.0
+  lambda_dice: 1.0
 evaluation:
   optimize_threshold: true
   threshold_steps: 19

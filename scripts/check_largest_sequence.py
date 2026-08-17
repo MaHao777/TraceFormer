@@ -57,17 +57,14 @@ def main() -> None:
     sequence = dataset[matching[0]]
     model = build_model(config).to(device).train()
     criterion = EventFocalDiceLoss(
-        image_width=config.resolution.width,
-        image_height=config.resolution.height,
         focal_alpha=config.loss.focal_alpha,
         focal_gamma=config.loss.focal_gamma,
         lambda_dice=config.loss.lambda_dice,
+        lambda_object_frame=config.loss.lambda_object_frame,
+        object_frame_logit_margin=config.loss.object_frame_logit_margin,
         lambda_false_alarm=config.loss.lambda_false_alarm,
         false_alarm_logit_margin=config.loss.false_alarm_logit_margin,
         false_alarm_topk_per_frame=config.loss.false_alarm_topk_per_frame,
-        lambda_trajectory_position=config.loss.lambda_trajectory_position,
-        lambda_trajectory_velocity=config.loss.lambda_trajectory_velocity,
-        trajectory_roi_radius=config.loss.trajectory_roi_radius,
     )
     events = sequence.events.to(device)
     labels = sequence.labels.to(device)
@@ -102,13 +99,11 @@ def main() -> None:
             output["event_logits"][query_indices],
             labels[query_indices],
             batch_indices[query_indices],
-            coordinates=events[query_indices, :2],
             object_ids=object_ids[query_indices],
             timestamps_ms=timestamps_ms[query_indices],
             frame_ms=config.evaluation.frame_ms,
             full_logits=output["event_logits"],
             full_targets=labels,
-            full_object_ids=object_ids,
             full_batch_indices=batch_indices,
             full_timestamps_ms=timestamps_ms,
             full_coordinates=events[:, :2],
@@ -131,11 +126,8 @@ def main() -> None:
         },
         "false_alarm": float(losses["false_alarm"].detach().float().item()),
         "focal": float(losses["focal"].detach().float().item()),
-        "trajectory_position": float(
-            losses["trajectory_position"].detach().float().item()
-        ),
-        "trajectory_velocity": float(
-            losses["trajectory_velocity"].detach().float().item()
+        "object_frame": float(
+            losses["object_frame"].detach().float().item()
         ),
         "max_memory_allocated_bytes": peak_memory,
         "runtime": runtime.metadata,

@@ -19,11 +19,6 @@ model:
     - {base_radius: 2.0, slope: 2.0, max_time_distance: 8}
   layer_time_scales: [0.5, 0.75, 1.0]
   max_neighbors_per_cone: 8
-  token_importance_enabled: true
-  token_importance_topk_ratio: 0.75
-  token_importance_density_weight: 0.3
-  token_importance_attention_weight: 0.3
-  token_importance_track_weight: 0.4
   causal_mode: false
   direction_dropout: 0.0
   debug_attention_stats: false
@@ -50,13 +45,7 @@ training:
 loss:
   focal_alpha: 0.75
   focal_gamma: 2.0
-  lambda_dice: 0.5
-  lambda_false_alarm: 0.05
-  false_alarm_logit_margin: 0.0
-  false_alarm_topk_per_frame: 32
-  lambda_trajectory_position: 1.0
-  lambda_trajectory_velocity: 0.5
-  trajectory_roi_radius: 16.0
+  lambda_dice: 1.0
 evaluation:
   optimize_threshold: true
   threshold_steps: 19

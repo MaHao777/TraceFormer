@@ -47,11 +47,6 @@ class ModelConfig:
     cone_heads: tuple[ConeHeadConfig, ...] = DEFAULT_CONE_HEADS
     layer_time_scales: tuple[float, ...] = (0.5, 0.75, 1.0)
     max_neighbors_per_cone: int = 8
-    token_importance_enabled: bool = True
-    token_importance_topk_ratio: float = 0.75
-    token_importance_density_weight: float = 0.3
-    token_importance_attention_weight: float = 0.3
-    token_importance_track_weight: float = 0.4
     causal_mode: bool = False
     direction_dropout: float = 0.0
     debug_attention_stats: bool = False
@@ -95,13 +90,12 @@ class TrainingConfig:
 class LossConfig:
     focal_alpha: float = 0.75
     focal_gamma: float = 2.0
-    lambda_dice: float = 0.5
-    lambda_false_alarm: float = 0.05
+    lambda_dice: float = 1.0
+    lambda_object_frame: float = 0.0
+    object_frame_logit_margin: float = 2.0
+    lambda_false_alarm: float = 0.0
     false_alarm_logit_margin: float = 0.0
     false_alarm_topk_per_frame: int = 32
-    lambda_trajectory_position: float = 1.0
-    lambda_trajectory_velocity: float = 0.5
-    trajectory_roi_radius: float = 16.0
 
 
 @dataclass(frozen=True)
@@ -191,26 +185,6 @@ class HUAVConfig:
             if value < previous_scale:
                 raise ValueError("layer_time_scales must be non-decreasing")
             previous_scale = value
-        if not isinstance(self.model.token_importance_enabled, bool):
-            raise ValueError("token_importance_enabled must be boolean")
-        importance_ratio = _finite_real(
-            self.model.token_importance_topk_ratio,
-            "token_importance_topk_ratio",
-        )
-        if not 0 < importance_ratio <= 1:
-            raise ValueError("token_importance_topk_ratio must be in (0,1]")
-        importance_weights = tuple(
-            _finite_real(getattr(self.model, name), name)
-            for name in (
-                "token_importance_density_weight",
-                "token_importance_attention_weight",
-                "token_importance_track_weight",
-            )
-        )
-        if any(weight < 0 for weight in importance_weights):
-            raise ValueError("token importance weights must be non-negative")
-        if sum(importance_weights) <= 0:
-            raise ValueError("at least one token importance weight must be positive")
         if not isinstance(self.model.causal_mode, bool):
             raise ValueError("causal_mode must be boolean")
         direction_dropout = _finite_real(
@@ -296,25 +270,20 @@ class HUAVConfig:
             raise ValueError("loss focal_alpha must be in [0,1]")
         for name in (
             "focal_gamma",
+            "lambda_object_frame",
             "lambda_false_alarm",
-            "lambda_trajectory_position",
-            "lambda_trajectory_velocity",
         ):
             if _finite_real(getattr(self.loss, name), f"loss {name}") < 0:
                 raise ValueError(f"loss {name} must be non-negative")
         if _finite_real(self.loss.lambda_dice, "loss lambda_dice") <= 0:
             raise ValueError("loss lambda_dice must be positive")
-        if (
-            _finite_real(
-                self.loss.trajectory_roi_radius,
-                "loss trajectory_roi_radius",
-            )
-            <= 0
-        ):
-            raise ValueError("loss trajectory_roi_radius must be positive")
         _positive_integer(
             self.loss.false_alarm_topk_per_frame,
             "loss false_alarm_topk_per_frame",
+        )
+        _finite_real(
+            self.loss.object_frame_logit_margin,
+            "loss object_frame_logit_margin",
         )
         _finite_real(
             self.loss.false_alarm_logit_margin,

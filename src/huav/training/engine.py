@@ -41,7 +41,7 @@ from .metrics import (
 from .runtime import prepare_device
 from .sampling import sample_event_indices
 
-CHECKPOINT_SCHEMA_VERSION = 8
+CHECKPOINT_SCHEMA_VERSION = 4
 
 
 def _update_training_curves(
@@ -78,15 +78,6 @@ def build_model(config: HUAVConfig) -> SpatioTemporalConeDetector:
         cone_heads=tuple(config.model.cone_heads),
         layer_time_scales=tuple(config.model.layer_time_scales),
         max_neighbors_per_cone=config.model.max_neighbors_per_cone,
-        token_importance_enabled=config.model.token_importance_enabled,
-        token_importance_topk_ratio=config.model.token_importance_topk_ratio,
-        token_importance_density_weight=(
-            config.model.token_importance_density_weight
-        ),
-        token_importance_attention_weight=(
-            config.model.token_importance_attention_weight
-        ),
-        token_importance_track_weight=config.model.token_importance_track_weight,
         causal_mode=config.model.causal_mode,
         direction_dropout=config.model.direction_dropout,
         debug_attention_stats=config.model.debug_attention_stats,
@@ -280,9 +271,8 @@ def evaluate_model(
             "total": 0.0,
             "focal": 0.0,
             "dice": 0.0,
+            "object_frame": 0.0,
             "false_alarm": 0.0,
-            "trajectory_position": 0.0,
-            "trajectory_velocity": 0.0,
         }
         if criterion is not None
         else None
@@ -315,13 +305,11 @@ def evaluate_model(
                 output["event_logits"][query_indices],
                 labels[query_indices],
                 batch_indices[query_indices],
-                coordinates=events[query_indices, :2],
                 object_ids=object_ids[query_indices],
                 timestamps_ms=timestamps_ms[query_indices],
                 frame_ms=config.evaluation.frame_ms,
                 full_logits=output["event_logits"],
                 full_targets=labels,
-                full_object_ids=object_ids,
                 full_batch_indices=batch_indices,
                 full_timestamps_ms=timestamps_ms,
                 full_coordinates=events[:, :2],
@@ -508,17 +496,14 @@ def _run_training_impl(
     _write_json(run_dir / "dataset_manifest.json", manifest)
     model = build_model(config).to(torch_device)
     criterion = EventFocalDiceLoss(
-        image_width=config.resolution.width,
-        image_height=config.resolution.height,
         focal_alpha=config.loss.focal_alpha,
         focal_gamma=config.loss.focal_gamma,
         lambda_dice=config.loss.lambda_dice,
+        lambda_object_frame=config.loss.lambda_object_frame,
+        object_frame_logit_margin=config.loss.object_frame_logit_margin,
         lambda_false_alarm=config.loss.lambda_false_alarm,
         false_alarm_logit_margin=config.loss.false_alarm_logit_margin,
         false_alarm_topk_per_frame=config.loss.false_alarm_topk_per_frame,
-        lambda_trajectory_position=config.loss.lambda_trajectory_position,
-        lambda_trajectory_velocity=config.loss.lambda_trajectory_velocity,
-        trajectory_roi_radius=config.loss.trajectory_roi_radius,
     )
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -556,9 +541,8 @@ def _run_training_impl(
             "total": 0.0,
             "focal": 0.0,
             "dice": 0.0,
+            "object_frame": 0.0,
             "false_alarm": 0.0,
-            "trajectory_position": 0.0,
-            "trajectory_velocity": 0.0,
         }
         learning_rate = float(optimizer.param_groups[0]["lr"])
         order = torch.randperm(
@@ -596,13 +580,11 @@ def _run_training_impl(
                     output["event_logits"][query_indices],
                     labels[query_indices],
                     batch_indices[query_indices],
-                    coordinates=events[query_indices, :2],
                     object_ids=object_ids[query_indices],
                     timestamps_ms=timestamps_ms[query_indices],
                     frame_ms=config.evaluation.frame_ms,
                     full_logits=output["event_logits"],
                     full_targets=labels,
-                    full_object_ids=object_ids,
                     full_batch_indices=batch_indices,
                     full_timestamps_ms=timestamps_ms,
                     full_coordinates=events[:, :2],
@@ -854,17 +836,14 @@ def _resume_training_impl(
 
     # ── Loss, optimiser, scheduler ──────────────────────────────────────
     criterion = EventFocalDiceLoss(
-        image_width=config.resolution.width,
-        image_height=config.resolution.height,
         focal_alpha=config.loss.focal_alpha,
         focal_gamma=config.loss.focal_gamma,
         lambda_dice=config.loss.lambda_dice,
+        lambda_object_frame=config.loss.lambda_object_frame,
+        object_frame_logit_margin=config.loss.object_frame_logit_margin,
         lambda_false_alarm=config.loss.lambda_false_alarm,
         false_alarm_logit_margin=config.loss.false_alarm_logit_margin,
         false_alarm_topk_per_frame=config.loss.false_alarm_topk_per_frame,
-        lambda_trajectory_position=config.loss.lambda_trajectory_position,
-        lambda_trajectory_velocity=config.loss.lambda_trajectory_velocity,
-        trajectory_roi_radius=config.loss.trajectory_roi_radius,
     )
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -909,9 +888,8 @@ def _resume_training_impl(
             "total": 0.0,
             "focal": 0.0,
             "dice": 0.0,
+            "object_frame": 0.0,
             "false_alarm": 0.0,
-            "trajectory_position": 0.0,
-            "trajectory_velocity": 0.0,
         }
         learning_rate = float(optimizer.param_groups[0]["lr"])
         order = torch.randperm(
@@ -949,13 +927,11 @@ def _resume_training_impl(
                     output["event_logits"][query_indices],
                     labels[query_indices],
                     batch_indices[query_indices],
-                    coordinates=events[query_indices, :2],
                     object_ids=object_ids[query_indices],
                     timestamps_ms=timestamps_ms[query_indices],
                     frame_ms=config.evaluation.frame_ms,
                     full_logits=output["event_logits"],
                     full_targets=labels,
-                    full_object_ids=object_ids,
                     full_batch_indices=batch_indices,
                     full_timestamps_ms=timestamps_ms,
                     full_coordinates=events[:, :2],

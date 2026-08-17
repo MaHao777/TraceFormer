@@ -177,9 +177,8 @@ def test_cpu_training_writes_reproducible_metrics_and_checkpoint() -> None:
             "total",
             "focal",
             "dice",
+            "object_frame",
             "false_alarm",
-            "trajectory_position",
-            "trajectory_velocity",
         }
         assert all(
             value >= 0.0 for value in history[0]["validation_loss"].values()
@@ -189,7 +188,7 @@ def test_cpu_training_writes_reproducible_metrics_and_checkpoint() -> None:
         checkpoint = __import__("torch").load(
             run_dir / "best.pt", map_location="cpu", weights_only=True
         )
-        assert checkpoint["schema_version"] == 8
+        assert checkpoint["schema_version"] == 4
         assert checkpoint["decision_threshold"] == metrics["threshold"]
         changed_config = replace(
             _config(data_root, output_root),
@@ -410,9 +409,8 @@ def test_resumed_training_records_validation_loss() -> None:
             "total",
             "focal",
             "dice",
+            "object_frame",
             "false_alarm",
-            "trajectory_position",
-            "trajectory_velocity",
         }
         assert all(
             value >= 0.0 for value in history[0]["validation_loss"].values()

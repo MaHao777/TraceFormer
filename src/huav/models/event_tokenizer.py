@@ -206,7 +206,7 @@ class EventTokenizer(nn.Module):
             return self._empty(events)
 
         x, y, normalized_time, polarity = event_features.unbind(dim=1)
-        # 这后面也没必要接入数据安全检查啊，这个数据都经过处理了，有问题说明那块有问题，或者数据集就有问题（不可能，因为数据集是官方的）
+
         if (
             torch.any(x < 0)
             or torch.any(x >= self.width)

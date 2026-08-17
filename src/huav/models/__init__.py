@@ -10,7 +10,6 @@ import torch
 from huav.data import EventBatch
 
 from .spatiotemporal_cone import SpatioTemporalConeDetector
-from .token_importance import TokenImportance, TokenImportanceScores
 
 
 @dataclass(frozen=True)
@@ -42,6 +41,4 @@ __all__ = [
     "EventSegmenter",
     "ModelOutput",
     "SpatioTemporalConeDetector",
-    "TokenImportance",
-    "TokenImportanceScores",
 ]
