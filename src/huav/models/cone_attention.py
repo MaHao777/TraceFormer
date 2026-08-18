@@ -83,39 +83,42 @@ class BidirectionalConeAttention(nn.Module):
         key: torch.Tensor,
         value: torch.Tensor,
         token_coords: torch.Tensor,
-        neighbor_indices: torch.Tensor,
+        neighbor_indices: tuple[torch.Tensor, ...],
         direction_index: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        mask = neighbor_indices >= 0
-        safe_indices = neighbor_indices.clamp_min(0)
-        head_indices = torch.arange(
-            self.num_heads, device=query.device
-        ).view(1, self.num_heads, 1)
-        neighbor_keys = key[safe_indices, head_indices]
-        neighbor_values = value[safe_indices, head_indices]
-        neighbor_keys = neighbor_keys + self.direction_embeddings[
-            direction_index
-        ].view(1, self.num_heads, 1, self.head_dim)
+        if len(neighbor_indices) != self.num_heads:
+            raise ValueError("neighbor_indices must contain one tensor per head")
+        aggregates: list[torch.Tensor] = []
+        counts: list[torch.Tensor] = []
+        center_coords = token_coords.to(dtype=query.dtype)[:, None, :]
+        for head_index, head_neighbors in enumerate(neighbor_indices):
+            mask = head_neighbors >= 0
+            safe_indices = head_neighbors.clamp_min(0)
+            neighbor_keys = key[safe_indices, head_index]
+            neighbor_values = value[safe_indices, head_index]
+            neighbor_keys = neighbor_keys + self.direction_embeddings[
+                direction_index, head_index
+            ].view(1, 1, self.head_dim)
 
-        neighbor_coords = token_coords[safe_indices].to(dtype=query.dtype)
-        center_coords = token_coords.to(dtype=query.dtype)[:, None, None, :]
-        relative_features = RelativePositionEncoder.build_features(
-            center_coords, neighbor_coords
-        )
-        relative_bias = self.relative_position(relative_features)
-        scores = (
-            (query[:, :, None, :] * neighbor_keys).sum(dim=-1)
-            / math.sqrt(self.head_dim)
-            + relative_bias
-        )
-        scores = scores.masked_fill(~mask, -torch.inf)
-        has_neighbors = mask.any(dim=-1, keepdim=True)
-        scores = torch.where(has_neighbors, scores, torch.zeros_like(scores))
-        weights = torch.softmax(scores, dim=-1)
-        weights = torch.where(mask, weights, torch.zeros_like(weights))
-        weights = self.attention_dropout(weights)
-        aggregate = (weights[..., None] * neighbor_values).sum(dim=-2)
-        return aggregate, mask.sum(dim=-1)
+            neighbor_coords = token_coords[safe_indices].to(dtype=query.dtype)
+            relative_features = RelativePositionEncoder.build_features(
+                center_coords, neighbor_coords
+            )
+            relative_bias = self.relative_position(relative_features)
+            scores = (
+                (query[:, head_index, None, :] * neighbor_keys).sum(dim=-1)
+                / math.sqrt(self.head_dim)
+                + relative_bias
+            )
+            scores = scores.masked_fill(~mask, -torch.inf)
+            has_neighbors = mask.any(dim=-1, keepdim=True)
+            scores = torch.where(has_neighbors, scores, torch.zeros_like(scores))
+            weights = torch.softmax(scores, dim=-1)
+            weights = torch.where(mask, weights, torch.zeros_like(weights))
+            weights = self.attention_dropout(weights)
+            aggregates.append((weights[..., None] * neighbor_values).sum(dim=-2))
+            counts.append(mask.sum(dim=-1))
+        return torch.stack(aggregates, dim=1), torch.stack(counts, dim=1)
 
     def _apply_direction_dropout(
         self,

@@ -14,8 +14,8 @@ from huav.config import ConeHeadConfig
 
 @dataclass(frozen=True)
 class ConeNeighborhoods:
-    past_indices: torch.Tensor
-    future_indices: torch.Tensor
+    past_indices: tuple[torch.Tensor, ...]
+    future_indices: tuple[torch.Tensor, ...]
 
 
 class ConeNeighborBuilder:
@@ -48,7 +48,6 @@ class ConeNeighborBuilder:
         head: ConeHeadConfig,
         direction: int,
         output: np.ndarray,
-        head_index: int,
     ) -> None:
         horizon = max(
             1,
@@ -66,8 +65,6 @@ class ConeNeighborBuilder:
                 for time, indices in by_time.items()
             }
             for source_time, source_indices in by_time.items():
-                candidate_indices: list[np.ndarray] = []
-                candidate_scores: list[np.ndarray] = []
                 source_xy = coordinates[source_indices, :2].astype(
                     np.float64, copy=False
                 )
@@ -98,30 +95,11 @@ class ConeNeighborBuilder:
                     )
                     global_indices = np.full(local_indices.shape, -1, dtype=np.int64)
                     global_indices[valid] = target_indices[local_indices[valid]]
-                    scores = np.full(distances.shape, np.inf, dtype=np.float64)
-                    rank_priority = np.broadcast_to(
-                        ranks[None, :], distances.shape
-                    )
-                    scores[valid] = (
-                        rank_priority[valid] * 1_000_000.0
-                        + time_distance * 1_000.0
-                        + distances[valid]
-                    )
-                    candidate_indices.append(global_indices)
-                    candidate_scores.append(scores)
-
-                if not candidate_indices:
-                    continue
-                joined_indices = np.concatenate(candidate_indices, axis=1)
-                joined_scores = np.concatenate(candidate_scores, axis=1)
-                order = np.argsort(joined_scores, axis=1, kind="stable")
-                keep = order[:, : self.max_neighbors_per_cone]
-                selected = np.take_along_axis(joined_indices, keep, axis=1)
-                output[
-                    source_indices,
-                    head_index,
-                    : selected.shape[1],
-                ] = selected
+                    start = (time_distance - 1) * self.max_neighbors_per_cone
+                    output[
+                        source_indices,
+                        start : start + query_count,
+                    ] = global_indices
 
     def __call__(
         self,
@@ -136,13 +114,19 @@ class ConeNeighborBuilder:
         ):
             raise ValueError("token_batch_indices must have shape [M]")
         token_count = len(token_coords)
-        shape = (
-            token_count,
-            len(self.cone_heads),
-            self.max_neighbors_per_cone,
+        horizons = tuple(
+            max(1, int(math.ceil(head.max_time_distance * self.layer_time_scale)))
+            for head in self.cone_heads
         )
-        past = np.full(shape, -1, dtype=np.int64)
-        future = np.full(shape, -1, dtype=np.int64)
+        past = tuple(
+            np.full(
+                (token_count, horizon * self.max_neighbors_per_cone),
+                -1,
+                dtype=np.int64,
+            )
+            for horizon in horizons
+        )
+        future = tuple(array.copy() for array in past)
         if token_count:
             coordinates = token_coords.detach().cpu().numpy().astype(
                 np.int64, copy=False
@@ -156,8 +140,7 @@ class ConeNeighborBuilder:
                     batch_indices=batch_indices,
                     head=head,
                     direction=-1,
-                    output=past,
-                    head_index=head_index,
+                    output=past[head_index],
                 )
                 if not self.causal_mode:
                     self._query_direction(
@@ -165,13 +148,16 @@ class ConeNeighborBuilder:
                         batch_indices=batch_indices,
                         head=head,
                         direction=1,
-                        output=future,
-                        head_index=head_index,
+                        output=future[head_index],
                     )
         device = token_coords.device
         return ConeNeighborhoods(
-            past_indices=torch.from_numpy(past).to(device=device),
-            future_indices=torch.from_numpy(future).to(device=device),
+            past_indices=tuple(
+                torch.from_numpy(array).to(device=device) for array in past
+            ),
+            future_indices=tuple(
+                torch.from_numpy(array).to(device=device) for array in future
+            ),
         )
 
 

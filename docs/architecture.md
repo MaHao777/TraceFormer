@@ -64,20 +64,20 @@ d_space <= base_radius + slope * dt
 
 ## 3. 稀疏邻域
 
-`ConeNeighborBuilder` 对每个 `(batch,time_block)` 的非空空间坐标建立一个 `cKDTree`。每个中心 Token 只查询同 batch、配置时间范围内的过去或未来切片，`p=∞` 对应 Chebyshev 距离。候选按时间距离、空间距离排序并截断到配置的 `K`。
+`ConeNeighborBuilder` 对每个 `(batch,time_block)` 的非空空间坐标建立一个 `cKDTree`。每个中心 Token 只查询同 batch、配置时间范围内的过去或未来切片，`p=∞` 对应 Chebyshev 距离。每个目标时间切片独立保留空间距离最近的至多 `K` 个候选，不再把不同时间切片合并后第二次截断到 `K`；因此较长时间间隔的局部近邻不会被较近切片占满。
 
 输出索引：
 
 ```text
-past_indices[M,H,K]
-future_indices[M,H,K]
+past_indices[h][M,K*layer_horizon[h]]
+future_indices[h][M,K*layer_horizon[h]]
 ```
 
-无邻居位置填 `-1`。该过程的存储量与 `M×H×K` 成正比，不构造完整 `M×M` 关系。
+无邻居位置填 `-1`。不同 Head 使用各自的实际时间范围，避免短锥填充到最长锥的宽度；该过程的存储量与 `M×K×sum(layer_horizon)` 成正比，不构造完整 `M×M` 关系。
 
 ## 4. 双向多锥中心注意力
 
-中心 Token 只产生 Query。全部 Token 经过同一组 Key/Value 投影，过去和未来复用这些参数，但分别加入可学习的方向 embedding 并执行独立 softmax。
+中心 Token 只产生 Query。全部 Token 经过同一组 Key/Value 投影，过去和未来复用这些参数，但分别加入可学习的方向 embedding；每个 Head 在其所有目标时间切片保留下来的候选集合上执行一次独立 softmax。
 
 每条边的相对特征为：
 

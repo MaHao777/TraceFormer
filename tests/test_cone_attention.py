@@ -67,6 +67,40 @@ def test_debug_stats_show_separate_past_future_counts_and_normalized_gates() -> 
     assert output.future_attention_stats["edge_count"].item() > 0
 
 
+def test_attention_keeps_the_local_cap_from_every_target_time_slice() -> None:
+    attention = BidirectionalConeAttention(
+        token_dim=4,
+        num_heads=1,
+        cone_heads=(ConeHeadConfig(4.0, 0.0, 3),),
+        max_neighbors_per_cone=2,
+        dropout=0.0,
+        debug_attention_stats=True,
+    )
+    coords = torch.tensor(
+        [
+            [0, 0, 0],
+            [1, 0, 0],
+            [2, 0, 0],
+            [0, 0, 1],
+            [1, 0, 1],
+            [2, 0, 1],
+            [0, 0, 2],
+            [1, 0, 2],
+            [2, 0, 2],
+            [0, 0, 3],
+        ],
+        dtype=torch.long,
+    )
+    tokens = torch.randn(len(coords), 4, requires_grad=True)
+
+    output = attention(tokens, coords, torch.zeros(len(coords), dtype=torch.long))
+
+    assert output.past_attention_stats["neighbor_counts"][9, 0].item() == 6
+    output.features.square().mean().backward()
+    assert tokens.grad is not None
+    assert torch.isfinite(tokens.grad).all()
+
+
 def test_causal_attention_suppresses_future_branch() -> None:
     attention = _attention(causal_mode=True)
     tokens = torch.randn(3, 8)
