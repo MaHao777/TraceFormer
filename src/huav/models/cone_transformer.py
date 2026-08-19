@@ -1,4 +1,4 @@
-"""Residual transformer blocks built from bidirectional sparse cone attention."""
+"""Pre-LN residual blocks for iterative fixed-local-cone propagation."""
 
 from __future__ import annotations
 
@@ -7,27 +7,27 @@ from dataclasses import dataclass
 import torch
 from torch import nn
 
-from huav.config import ConeHeadConfig
+from huav.config import LocalConeConfig
 
-from .cone_attention import AttentionStats, BidirectionalConeAttention
+from .cone_attention import AttentionStats, LocalConeAttention
 
 
 @dataclass(frozen=True)
-class ConeTransformerOutput:
+class LocalConeEncoderOutput:
     token_features: torch.Tensor
     past_attention_stats: list[AttentionStats] | None
     future_attention_stats: list[AttentionStats] | None
 
 
-class ConeTransformerBlock(nn.Module):
+class LocalConeAttentionBlock(nn.Module):
+    """Synchronously update all tokens from one fixed local cone."""
+
     def __init__(
         self,
         *,
         token_dim: int,
         num_heads: int,
-        cone_heads: tuple[ConeHeadConfig, ...],
-        max_neighbors_per_cone: int,
-        layer_time_scale: float,
+        local_cone: LocalConeConfig,
         mlp_ratio: float,
         dropout: float,
         causal_mode: bool,
@@ -37,19 +37,18 @@ class ConeTransformerBlock(nn.Module):
         super().__init__()
         hidden_dim = max(1, int(round(token_dim * mlp_ratio)))
         self.attention_norm = nn.LayerNorm(token_dim)
-        self.attention = BidirectionalConeAttention(
+        self.attention = LocalConeAttention(
             token_dim=token_dim,
             num_heads=num_heads,
-            cone_heads=cone_heads,
-            max_neighbors_per_cone=max_neighbors_per_cone,
-            layer_time_scale=layer_time_scale,
+            local_cone=local_cone,
             dropout=dropout,
             causal_mode=causal_mode,
             direction_dropout=direction_dropout,
             debug_attention_stats=debug_attention_stats,
         )
-        self.feed_forward_norm = nn.LayerNorm(token_dim)
-        self.feed_forward = nn.Sequential(
+        self.attn_scale = nn.Parameter(torch.ones(1))
+        self.ffn_norm = nn.LayerNorm(token_dim)
+        self.ffn = nn.Sequential(
             nn.Linear(token_dim, hidden_dim),
             nn.GELU(),
             nn.Dropout(dropout),
@@ -68,26 +67,27 @@ class ConeTransformerBlock(nn.Module):
             token_coords,
             token_batch_indices,
         )
-        tokens = tokens + self.residual_dropout(attention.features)
-        tokens = tokens + self.residual_dropout(
-            self.feed_forward(self.feed_forward_norm(tokens))
+        attended_tokens = tokens + self.attn_scale * self.residual_dropout(
+            attention.features
+        )
+        output_tokens = attended_tokens + self.residual_dropout(
+            self.ffn(self.ffn_norm(attended_tokens))
         )
         return (
-            tokens,
+            output_tokens,
             attention.past_attention_stats,
             attention.future_attention_stats,
         )
 
 
-class ConeTransformerEncoder(nn.Module):
+class LocalConeEncoder(nn.Module):
     def __init__(
         self,
         *,
         token_dim: int,
         num_heads: int,
-        cone_heads: tuple[ConeHeadConfig, ...],
-        layer_time_scales: tuple[float, ...],
-        max_neighbors_per_cone: int,
+        num_cone_blocks: int,
+        local_cone: LocalConeConfig,
         mlp_ratio: float,
         dropout: float,
         causal_mode: bool,
@@ -95,24 +95,22 @@ class ConeTransformerEncoder(nn.Module):
         debug_attention_stats: bool,
     ) -> None:
         super().__init__()
-        if not layer_time_scales:
-            raise ValueError("layer_time_scales must not be empty")
+        if num_cone_blocks <= 0:
+            raise ValueError("num_cone_blocks must be positive")
         self.debug_attention_stats = bool(debug_attention_stats)
-        self.layers = nn.ModuleList(
+        self.blocks = nn.ModuleList(
             [
-                ConeTransformerBlock(
+                LocalConeAttentionBlock(
                     token_dim=token_dim,
                     num_heads=num_heads,
-                    cone_heads=cone_heads,
-                    max_neighbors_per_cone=max_neighbors_per_cone,
-                    layer_time_scale=scale,
+                    local_cone=local_cone,
                     mlp_ratio=mlp_ratio,
                     dropout=dropout,
                     causal_mode=causal_mode,
                     direction_dropout=direction_dropout,
                     debug_attention_stats=debug_attention_stats,
                 )
-                for scale in layer_time_scales
+                for _ in range(num_cone_blocks)
             ]
         )
         self.final_norm = nn.LayerNorm(token_dim)
@@ -122,27 +120,29 @@ class ConeTransformerEncoder(nn.Module):
         tokens: torch.Tensor,
         token_coords: torch.Tensor,
         token_batch_indices: torch.Tensor,
-    ) -> ConeTransformerOutput:
+    ) -> LocalConeEncoderOutput:
         past_stats: list[AttentionStats] = []
         future_stats: list[AttentionStats] = []
-        for layer in self.layers:
-            tokens, layer_past, layer_future = layer(
+        for block in self.blocks:
+            tokens, block_past, block_future = block(
                 tokens, token_coords, token_batch_indices
             )
             if self.debug_attention_stats:
-                if layer_past is None or layer_future is None:
+                if block_past is None or block_future is None:
                     raise RuntimeError("debug attention statistics were not returned")
-                past_stats.append(layer_past)
-                future_stats.append(layer_future)
-        return ConeTransformerOutput(
+                past_stats.append(block_past)
+                future_stats.append(block_future)
+        return LocalConeEncoderOutput(
             token_features=self.final_norm(tokens),
             past_attention_stats=past_stats if self.debug_attention_stats else None,
-            future_attention_stats=future_stats if self.debug_attention_stats else None,
+            future_attention_stats=(
+                future_stats if self.debug_attention_stats else None
+            ),
         )
 
 
 __all__ = [
-    "ConeTransformerBlock",
-    "ConeTransformerEncoder",
-    "ConeTransformerOutput",
+    "LocalConeAttentionBlock",
+    "LocalConeEncoder",
+    "LocalConeEncoderOutput",
 ]

@@ -7,9 +7,9 @@ from typing import Any
 import torch
 from torch import nn
 
-from huav.config import ConeHeadConfig
+from huav.config import LocalConeConfig
 
-from .cone_transformer import ConeTransformerEncoder
+from .cone_transformer import LocalConeEncoder
 from .event_decoder import EventDecoder
 from .event_tokenizer import EventTokenizer
 
@@ -37,23 +37,19 @@ class SpatioTemporalConeDetector(nn.Module):
         num_time_blocks: int,
         token_dim: int,
         event_embed_dim: int,
-        num_layers: int,
+        num_cone_blocks: int,
         num_heads: int,
         mlp_ratio: float,
         dropout: float,
-        cone_heads: tuple[ConeHeadConfig, ...],
-        layer_time_scales: tuple[float, ...],
-        max_neighbors_per_cone: int,
+        local_cone: LocalConeConfig,
         causal_mode: bool,
         direction_dropout: float,
         debug_attention_stats: bool,
         num_pool_queries: int = 4,
     ) -> None:
         super().__init__()
-        if num_layers != len(layer_time_scales):
-            raise ValueError("num_layers must equal len(layer_time_scales)")
         self.token_dim = int(token_dim)
-        self.num_layers = int(num_layers)
+        self.num_cone_blocks = int(num_cone_blocks)
         self.tokenizer = EventTokenizer(
             width=width,
             height=height,
@@ -64,12 +60,11 @@ class SpatioTemporalConeDetector(nn.Module):
             token_dim=token_dim,
             num_pool_queries=num_pool_queries,
         )
-        self.encoder = ConeTransformerEncoder(
+        self.encoder = LocalConeEncoder(
             token_dim=token_dim,
             num_heads=num_heads,
-            cone_heads=cone_heads,
-            layer_time_scales=layer_time_scales,
-            max_neighbors_per_cone=max_neighbors_per_cone,
+            num_cone_blocks=num_cone_blocks,
+            local_cone=local_cone,
             mlp_ratio=mlp_ratio,
             dropout=dropout,
             causal_mode=causal_mode,

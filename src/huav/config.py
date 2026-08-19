@@ -18,18 +18,12 @@ class ResolutionConfig:
 
 
 @dataclass(frozen=True)
-class ConeHeadConfig:
-    base_radius: float
-    slope: float
-    max_time_distance: int
+class LocalConeConfig:
+    """Fixed ``t-1/t/t+1`` quadrangular-pyramid neighborhood geometry."""
 
-
-DEFAULT_CONE_HEADS = (
-    ConeHeadConfig(base_radius=1.0, slope=0.5, max_time_distance=4),
-    ConeHeadConfig(base_radius=1.0, slope=1.0, max_time_distance=4),
-    ConeHeadConfig(base_radius=2.0, slope=1.5, max_time_distance=6),
-    ConeHeadConfig(base_radius=2.0, slope=2.0, max_time_distance=8),
-)
+    base_radius: float = 1.0
+    slope: float = 1.0
+    max_neighbors_per_time_slice: int = 8
 
 
 @dataclass(frozen=True)
@@ -40,13 +34,11 @@ class ModelConfig:
     token_dim: int = 32
     event_embed_dim: int = 16
     num_pool_queries: int = 4
-    num_layers: int = 3
+    num_cone_blocks: int = 5
     num_heads: int = 4
     mlp_ratio: float = 2.0
     dropout: float = 0.1
-    cone_heads: tuple[ConeHeadConfig, ...] = DEFAULT_CONE_HEADS
-    layer_time_scales: tuple[float, ...] = (0.5, 0.75, 1.0)
-    max_neighbors_per_cone: int = 8
+    local_cone: LocalConeConfig = LocalConeConfig()
     causal_mode: bool = False
     direction_dropout: float = 0.0
     debug_attention_stats: bool = False
@@ -148,9 +140,8 @@ class HUAVConfig:
             "token_dim",
             "event_embed_dim",
             "num_pool_queries",
-            "num_layers",
+            "num_cone_blocks",
             "num_heads",
-            "max_neighbors_per_cone",
         ):
             _positive_integer(getattr(self.model, name), f"model {name}")
         if self.model.token_dim % self.model.num_heads:
@@ -160,31 +151,16 @@ class HUAVConfig:
         dropout = _finite_real(self.model.dropout, "dropout")
         if not 0 <= dropout < 1:
             raise ValueError("dropout must be in [0,1)")
-        if not isinstance(self.model.cone_heads, (tuple, list)):
-            raise ValueError("cone_heads must be a tuple or list")
-        if len(self.model.cone_heads) != self.model.num_heads:
-            raise ValueError("cone_heads must contain exactly one configuration per head")
-        for index, cone in enumerate(self.model.cone_heads):
-            if not isinstance(cone, ConeHeadConfig):
-                raise ValueError(f"cone_heads[{index}] must be a ConeHeadConfig")
-            if _finite_real(cone.base_radius, "cone base_radius") < 0:
-                raise ValueError("cone base_radius must be non-negative")
-            if _finite_real(cone.slope, "cone slope") < 0:
-                raise ValueError("cone slope must be non-negative")
-            _positive_integer(cone.max_time_distance, "cone max_time_distance")
-        if (
-            not isinstance(self.model.layer_time_scales, (tuple, list))
-            or len(self.model.layer_time_scales) != self.model.num_layers
-        ):
-            raise ValueError("layer_time_scales must contain one value per layer")
-        previous_scale = 0.0
-        for scale in self.model.layer_time_scales:
-            value = _finite_real(scale, "layer_time_scale")
-            if value <= 0 or value > 1:
-                raise ValueError("layer_time_scales must be in (0,1]")
-            if value < previous_scale:
-                raise ValueError("layer_time_scales must be non-decreasing")
-            previous_scale = value
+        if not isinstance(self.model.local_cone, LocalConeConfig):
+            raise ValueError("local_cone must be a LocalConeConfig")
+        if _finite_real(self.model.local_cone.base_radius, "local cone base_radius") < 0:
+            raise ValueError("local cone base_radius must be non-negative")
+        if _finite_real(self.model.local_cone.slope, "local cone slope") < 0:
+            raise ValueError("local cone slope must be non-negative")
+        _positive_integer(
+            self.model.local_cone.max_neighbors_per_time_slice,
+            "local cone max_neighbors_per_time_slice",
+        )
         if not isinstance(self.model.causal_mode, bool):
             raise ValueError("causal_mode must be boolean")
         direction_dropout = _finite_real(
@@ -339,16 +315,11 @@ def load_config(path: Path | str) -> HUAVConfig:
         raise ValueError(f"unknown configuration section(s): {names}")
     try:
         raw_model = dict(raw.get("model", {}))
-        if "cone_heads" in raw_model:
-            cone_values = raw_model["cone_heads"]
-            if not isinstance(cone_values, list):
-                raise ValueError("model cone_heads must be a list")
-            raw_model["cone_heads"] = tuple(
-                ConeHeadConfig(**value) if isinstance(value, dict) else value
-                for value in cone_values
-            )
-        if "layer_time_scales" in raw_model:
-            raw_model["layer_time_scales"] = tuple(raw_model["layer_time_scales"])
+        if "local_cone" in raw_model:
+            local_cone = raw_model["local_cone"]
+            if not isinstance(local_cone, dict):
+                raise ValueError("model local_cone must be a mapping")
+            raw_model["local_cone"] = LocalConeConfig(**local_cone)
         config = HUAVConfig(
             resolution=ResolutionConfig(**raw.get("resolution", {})),
             model=ModelConfig(**raw_model),

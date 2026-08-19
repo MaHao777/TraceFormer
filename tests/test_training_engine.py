@@ -11,9 +11,9 @@ import pytest
 import torch
 
 from huav.config import (
-    ConeHeadConfig,
     DatasetConfig,
     HUAVConfig,
+    LocalConeConfig,
     ModelConfig,
     TrainingConfig,
 )
@@ -91,16 +91,15 @@ def _config(data_root: Path, output_root: Path) -> HUAVConfig:
             num_time_blocks=4,
             token_dim=8,
             event_embed_dim=4,
-            num_layers=1,
+            num_cone_blocks=1,
             num_heads=2,
             mlp_ratio=2.0,
             dropout=0.0,
-            cone_heads=(
-                ConeHeadConfig(1.0, 1.0, 2),
-                ConeHeadConfig(2.0, 2.0, 2),
+            local_cone=LocalConeConfig(
+                base_radius=1.0,
+                slope=1.0,
+                max_neighbors_per_time_slice=2,
             ),
-            layer_time_scales=(1.0,),
-            max_neighbors_per_cone=2,
             causal_mode=False,
             direction_dropout=0.0,
             debug_attention_stats=False,
@@ -188,7 +187,7 @@ def test_cpu_training_writes_reproducible_metrics_and_checkpoint() -> None:
         checkpoint = __import__("torch").load(
             run_dir / "best.pt", map_location="cpu", weights_only=True
         )
-        assert checkpoint["schema_version"] == 5
+        assert checkpoint["schema_version"] == 6
         assert checkpoint["decision_threshold"] == metrics["threshold"]
         changed_config = replace(
             _config(data_root, output_root),
@@ -207,7 +206,10 @@ def test_cpu_training_writes_reproducible_metrics_and_checkpoint() -> None:
             _config(data_root, output_root),
             model=replace(
                 _config(data_root, output_root).model,
-                max_neighbors_per_cone=3,
+                local_cone=replace(
+                    _config(data_root, output_root).model.local_cone,
+                    max_neighbors_per_time_slice=3,
+                ),
             ),
         )
         with pytest.raises(ValueError, match="model configuration"):

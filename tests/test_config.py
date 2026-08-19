@@ -7,7 +7,7 @@ from tempfile import TemporaryDirectory
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from huav.config import ConeHeadConfig, HUAVConfig, load_config
+from huav.config import HUAVConfig, LocalConeConfig, load_config
 
 
 def raises(exc_type: type[Exception], fn: object) -> None:
@@ -35,12 +35,13 @@ def test_base_yaml_exposes_cone_training_and_loss_configuration() -> None:
     assert config.model.token_dim == 32
     assert config.model.event_embed_dim == 16
     assert config.model.num_pool_queries == 4
-    assert config.model.num_layers == 3
+    assert config.model.num_cone_blocks == 5
     assert config.model.num_heads == 4
-    assert tuple(config.model.layer_time_scales) == (0.5, 0.75, 1.0)
-    assert [head.slope for head in config.model.cone_heads] == [0.5, 1.0, 1.5, 2.0]
-    assert [head.base_radius for head in config.model.cone_heads] == [1.0, 1.0, 2.0, 2.0]
-    assert config.model.max_neighbors_per_cone == 8
+    assert config.model.local_cone == LocalConeConfig(
+        base_radius=1.0,
+        slope=1.0,
+        max_neighbors_per_time_slice=8,
+    )
     assert not any(
         name.startswith("token_importance")
         for name in config.model.__dataclass_fields__
@@ -76,11 +77,12 @@ def test_score_optimized_yaml_exposes_dense_domain_training_configuration() -> N
     assert config.model.token_dim == 64
     assert config.model.event_embed_dim == 64
     assert config.model.num_pool_queries == 4
-    assert config.model.num_layers == 3
-    assert tuple(config.model.layer_time_scales) == (0.5, 0.75, 1.0)
-    assert config.model.max_neighbors_per_cone == 8
-    assert [head.slope for head in config.model.cone_heads] == [0.5, 1.0, 1.5, 2.0]
-    assert [head.max_time_distance for head in config.model.cone_heads] == [4, 4, 6, 8]
+    assert config.model.num_cone_blocks == 5
+    assert config.model.local_cone == LocalConeConfig(
+        base_radius=1.0,
+        slope=1.0,
+        max_neighbors_per_time_slice=8,
+    )
     assert config.training.epochs == 18
     assert config.training.hard_negative_fraction == 0.5
     assert config.training.dense_sequence_event_threshold == 300000
@@ -97,6 +99,27 @@ def test_score_optimized_yaml_exposes_dense_domain_training_configuration() -> N
     assert smoke.loss == config.loss
 
 
+def test_local_cone_depth_supports_requested_ablation_values() -> None:
+    valid = HUAVConfig.default()
+
+    for depth in (1, 3, 5, 7):
+        configured = replace(
+            valid,
+            model=replace(valid.model, num_cone_blocks=depth),
+        ).validate()
+
+        assert configured.model.num_cone_blocks == depth
+
+
+def test_model_config_no_longer_exposes_multi_cone_or_layer_scale_fields() -> None:
+    fields = HUAVConfig.default().model.__dataclass_fields__
+
+    assert "cone_heads" not in fields
+    assert "layer_time_scales" not in fields
+    assert "num_layers" not in fields
+    assert "max_neighbors_per_cone" not in fields
+
+
 def test_autodl_configs_preserve_score_model_and_select_cuda_bfloat16() -> None:
     smoke = load_config(Path("configs/huav_score_optimized_autodl_smoke.yaml"))
     full = load_config(Path("configs/huav_score_optimized_autodl.yaml"))
@@ -108,19 +131,12 @@ def test_autodl_configs_preserve_score_model_and_select_cuda_bfloat16() -> None:
         assert config.model.token_dim == 64
         assert config.model.event_embed_dim == 64
         assert config.model.num_pool_queries == 4
-        assert config.model.num_layers == 3
-        assert [head.slope for head in config.model.cone_heads] == [
-            0.5,
-            1.0,
-            1.5,
-            2.0,
-        ]
-        assert [head.max_time_distance for head in config.model.cone_heads] == [
-            4,
-            4,
-            6,
-            8,
-        ]
+        assert config.model.num_cone_blocks == 5
+        assert config.model.local_cone == LocalConeConfig(
+            base_radius=1.0,
+            slope=1.0,
+            max_neighbors_per_time_slice=8,
+        )
         assert config.training.device == "cuda"
         assert config.training.mixed_precision is True
         assert config.training.mixed_precision_dtype == "bfloat16"
@@ -160,7 +176,10 @@ def test_cross_field_config_validation_rejects_inconsistent_values() -> None:
         ValueError,
         lambda: replace(
             valid,
-            model=replace(valid.model, cone_heads=valid.model.cone_heads[:2]),
+            model=replace(
+                valid.model,
+                local_cone=replace(valid.model.local_cone, slope=-0.1),
+            ),
         ).validate(),
     )
     raises(
@@ -169,10 +188,10 @@ def test_cross_field_config_validation_rejects_inconsistent_values() -> None:
             valid,
             model=replace(
                 valid.model,
-                cone_heads=(
-                    ConeHeadConfig(base_radius=1.0, slope=-0.1, max_time_distance=2),
-                )
-                + valid.model.cone_heads[1:],
+                local_cone=replace(
+                    valid.model.local_cone,
+                    max_neighbors_per_time_slice=0,
+                ),
             ),
         ).validate(),
     )

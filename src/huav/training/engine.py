@@ -41,7 +41,7 @@ from .metrics import (
 from .runtime import prepare_device
 from .sampling import sample_event_indices
 
-CHECKPOINT_SCHEMA_VERSION = 5
+CHECKPOINT_SCHEMA_VERSION = 6
 
 
 def _update_training_curves(
@@ -71,13 +71,11 @@ def build_model(config: HUAVConfig) -> SpatioTemporalConeDetector:
         token_dim=config.model.token_dim,
         event_embed_dim=config.model.event_embed_dim,
         num_pool_queries=config.model.num_pool_queries,
-        num_layers=config.model.num_layers,
+        num_cone_blocks=config.model.num_cone_blocks,
         num_heads=config.model.num_heads,
         mlp_ratio=config.model.mlp_ratio,
         dropout=config.model.dropout,
-        cone_heads=tuple(config.model.cone_heads),
-        layer_time_scales=tuple(config.model.layer_time_scales),
-        max_neighbors_per_cone=config.model.max_neighbors_per_cone,
+        local_cone=config.model.local_cone,
         causal_mode=config.model.causal_mode,
         direction_dropout=config.model.direction_dropout,
         debug_attention_stats=config.model.debug_attention_stats,

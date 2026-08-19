@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import torch
 
-from huav.config import ConeHeadConfig
+from huav.config import LocalConeConfig
 from huav.models import SpatioTemporalConeDetector
 
 
-def _model(*, causal_mode: bool = False, debug: bool = True) -> SpatioTemporalConeDetector:
+def _model(
+    *,
+    num_cone_blocks: int = 3,
+    causal_mode: bool = False,
+    debug: bool = True,
+) -> SpatioTemporalConeDetector:
     return SpatioTemporalConeDetector(
         width=16,
         height=12,
@@ -15,18 +20,15 @@ def _model(*, causal_mode: bool = False, debug: bool = True) -> SpatioTemporalCo
         num_time_blocks=4,
         token_dim=16,
         event_embed_dim=8,
-        num_layers=3,
+        num_cone_blocks=num_cone_blocks,
         num_heads=4,
         mlp_ratio=2.0,
         dropout=0.0,
-        cone_heads=(
-            ConeHeadConfig(1.0, 0.5, 2),
-            ConeHeadConfig(1.0, 1.0, 2),
-            ConeHeadConfig(2.0, 1.5, 3),
-            ConeHeadConfig(2.0, 2.0, 3),
+        local_cone=LocalConeConfig(
+            base_radius=1.0,
+            slope=1.0,
+            max_neighbors_per_time_slice=3,
         ),
-        layer_time_scales=(0.5, 0.75, 1.0),
-        max_neighbors_per_cone=3,
         causal_mode=causal_mode,
         direction_dropout=0.0,
         debug_attention_stats=debug,
@@ -45,7 +47,7 @@ def _events() -> torch.Tensor:
     )
 
 
-def test_forward_returns_required_event_token_and_attention_outputs() -> None:
+def test_forward_returns_unchanged_event_token_and_attention_shapes() -> None:
     output = _model()(_events())
 
     assert {
@@ -62,6 +64,61 @@ def test_forward_returns_required_event_token_and_attention_outputs() -> None:
     assert output["token_features"].shape[1] == 16
     assert len(output["past_attention_stats"]) == 3
     assert len(output["future_attention_stats"]) == 3
+
+
+def test_requested_block_depths_preserve_forward_shapes() -> None:
+    for depth in (1, 3, 5, 7):
+        output = _model(num_cone_blocks=depth)(_events())
+
+        assert output["event_logits"].shape == (5,)
+        assert output["event_token_indices"].shape == (5,)
+        assert output["token_features"].shape[1] == 16
+        assert len(output["past_attention_stats"]) == depth
+
+
+def test_every_block_uses_the_previous_blocks_complete_updated_tokens() -> None:
+    model = _model(num_cone_blocks=3, debug=False)
+    block_inputs: list[torch.Tensor] = []
+    block_outputs: list[torch.Tensor] = []
+    handles = []
+    for block in model.encoder.blocks:
+        handles.append(
+            block.register_forward_pre_hook(
+                lambda _module, args: block_inputs.append(args[0].detach().clone())
+            )
+        )
+        handles.append(
+            block.register_forward_hook(
+                lambda _module, _args, output: block_outputs.append(
+                    output[0].detach().clone()
+                )
+            )
+        )
+
+    model(_events())
+
+    for handle in handles:
+        handle.remove()
+    assert len(block_inputs) == len(block_outputs) == 3
+    torch.testing.assert_close(block_inputs[1], block_outputs[0])
+    torch.testing.assert_close(block_inputs[2], block_outputs[1])
+    assert not torch.equal(block_inputs[0], block_inputs[1])
+
+
+def test_blocks_share_geometry_but_not_attention_ffn_norm_or_scale_parameters() -> None:
+    model = _model(num_cone_blocks=3)
+    first, second, third = model.encoder.blocks
+
+    assert first.attention.neighbor_builder.base_radius == 1.0
+    assert second.attention.neighbor_builder.base_radius == 1.0
+    assert third.attention.neighbor_builder.base_radius == 1.0
+    for name in ("q_proj", "k_proj", "v_proj", "out_proj"):
+        assert getattr(first.attention, name) is not getattr(second.attention, name)
+    assert first.ffn is not second.ffn
+    assert first.attention_norm is not second.attention_norm
+    assert first.ffn_norm is not second.ffn_norm
+    assert first.attn_scale is not second.attn_scale
+    torch.testing.assert_close(first.attn_scale, torch.ones(1))
 
 
 def test_batch_column_is_preserved_and_never_merged_in_tokenization() -> None:
@@ -94,8 +151,8 @@ def test_causal_mode_has_no_future_attention_edges() -> None:
     output = _model(causal_mode=True)(_events())
 
     assert all(
-        layer["edge_count"].item() == 0
-        for layer in output["future_attention_stats"]
+        block["edge_count"].item() == 0
+        for block in output["future_attention_stats"]
     )
 
 

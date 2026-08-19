@@ -8,17 +8,14 @@ model:
   token_dim: 16
   event_embed_dim: 8
   num_pool_queries: 4
-  num_layers: 2
+  num_cone_blocks: 5
   num_heads: 4
   mlp_ratio: 2.0
   dropout: 0.1
-  cone_heads:
-    - {base_radius: 1.0, slope: 0.5, max_time_distance: 2}
-    - {base_radius: 1.0, slope: 1.0, max_time_distance: 2}
-    - {base_radius: 2.0, slope: 1.5, max_time_distance: 3}
-    - {base_radius: 2.0, slope: 2.0, max_time_distance: 4}
-  layer_time_scales: [0.5, 1.0]
-  max_neighbors_per_cone: 4
+  local_cone:
+    base_radius: 1.0
+    slope: 1.0
+    max_neighbors_per_time_slice: 4
   causal_mode: false
   direction_dropout: 0.0
   debug_attention_stats: false
