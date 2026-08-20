@@ -93,12 +93,16 @@ python -m huav.cli.train `
   --note "真实数据 smoke 链路检查"
 ```
 
+烟雾配置默认写入独立的 `smoke_outputs/<device>_YYYYMMDD_HHMMSS/`，不会进入正式训练的
+`outputs/` 或 `outputs/INDEX.md`。成功的 smoke 产物在完整训练启动后可以手工删除；程序不会
+自动删除，因为失败现场中的配置、日志、checkpoint 和指标常用于定位链路或资源问题。
+
 独立复评 checkpoint：
 
 ```powershell
 python -m huav.cli.evaluate `
-  --config outputs/<run>/config.yaml `
-  --checkpoint outputs/<run>/best.pt `
+  --config <run-root>/<run>/config.yaml `
+  --checkpoint <run-root>/<run>/best.pt `
   --device cpu
 ```
 
@@ -127,8 +131,9 @@ python -m huav.cli.index_outputs --output-root outputs
 - `reproduced_metrics.json`：同一轮 `best.pt` 的独立复评结果；
 - `submission/`：同一轮比赛 TXT 和根目录仅含 TXT 的 `submission.zip`。
 
-训练、复评和预测结束后会自动重建 `outputs/INDEX.md`。索引按时间倒序列出新旧运行；
-无法从历史产物可靠恢复的字段显示为“历史产物／未知”，不会猜测 checkpoint 归属。
+训练、复评和预测结束后会自动重建对应根目录的索引：正式训练使用 `outputs/INDEX.md`，
+烟雾训练使用 `smoke_outputs/INDEX.md`。索引按时间倒序列出新旧运行；无法从历史产物可靠
+恢复的字段显示为“历史产物／未知”，不会猜测 checkpoint 归属。
 
 ## 指标口径
 

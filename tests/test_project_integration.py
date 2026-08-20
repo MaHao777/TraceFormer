@@ -41,8 +41,16 @@ def test_autodl_launcher_preflights_gpu_and_uses_unique_run_directories() -> Non
     assert "huav_score_optimized_autodl_smoke.yaml" in contents
     assert "huav_score_optimized_autodl.yaml" in contents
     assert 'date +"%Y%m%d_%H%M%S"' in contents
+    assert 'RUN_ROOT="$PROJECT_ROOT/smoke_outputs"' in contents
+    assert 'RUN_ROOT="$PROJECT_ROOT/outputs"' in contents
     assert "--device cuda" in contents
     assert "tee" in contents
+
+
+def test_generated_smoke_outputs_are_ignored() -> None:
+    ignore_rules = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+
+    assert "/smoke_outputs/" in ignore_rules
 
 
 def test_largest_sequence_check_runs_forward_loss_backward_and_reports_memory() -> None:

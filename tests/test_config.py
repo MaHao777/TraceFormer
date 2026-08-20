@@ -9,6 +9,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from huav.config import HUAVConfig, LocalConeConfig, load_config
 
+ROOT = Path(__file__).resolve().parents[1]
+
 
 def raises(exc_type: type[Exception], fn: object) -> None:
     try:
@@ -97,6 +99,25 @@ def test_score_optimized_yaml_exposes_dense_domain_training_configuration() -> N
     assert config.loss.lambda_false_alarm == 0.05
     assert smoke.model == config.model
     assert smoke.loss == config.loss
+
+
+def test_smoke_configs_use_a_separate_output_root() -> None:
+    expected_smoke_root = (ROOT / "smoke_outputs").resolve()
+    expected_full_root = (ROOT / "outputs").resolve()
+
+    for path in (
+        "configs/huav_cpu_smoke.yaml",
+        "configs/huav_score_optimized_smoke.yaml",
+        "configs/huav_score_optimized_autodl_smoke.yaml",
+    ):
+        assert Path(load_config(Path(path)).training.output_root) == expected_smoke_root
+
+    for path in (
+        "configs/huav_base.yaml",
+        "configs/huav_score_optimized.yaml",
+        "configs/huav_score_optimized_autodl.yaml",
+    ):
+        assert Path(load_config(Path(path)).training.output_root) == expected_full_root
 
 
 def test_local_cone_depth_supports_requested_ablation_values() -> None:

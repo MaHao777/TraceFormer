@@ -17,8 +17,8 @@
 
 - 开始前先运行 `git status --short`，保留用户已有改动，不覆盖历史 `outputs/` 结果。
 - 每轮使用新的时间戳目录；全量训练、独立复评、提交 TXT 和 ZIP 必须能够对应到同一个 `best.pt`。
-- 默认运行目录统一为 `outputs/<device>_YYYYMMDD_HHMMSS/`，同秒冲突使用 `_02`、`_03`；smoke、full 和续训类型写入 `experiment.md`，不写入目录名。除兼容旧脚本外，不再手工拼接运行目录名。
-- 训练时使用 `--note` 记录本轮主要修改。复评默认写入同目录 `reproduced_metrics.json`，预测默认写入同目录 `submission/`；每个阶段结束后检查 `experiment.md` 和 `outputs/INDEX.md` 已更新。
+- 正式运行目录统一为 `outputs/<device>_YYYYMMDD_HHMMSS/`，烟雾运行目录统一为 `smoke_outputs/<device>_YYYYMMDD_HHMMSS/`，同秒冲突使用 `_02`、`_03`；训练和续训类型写入 `experiment.md`，不写入目录名。除兼容旧脚本外，不再手工拼接运行目录名。
+- 训练时使用 `--note` 记录本轮主要修改。复评默认写入同目录 `reproduced_metrics.json`，预测默认写入同目录 `submission/`；每个阶段结束后检查 `experiment.md` 和对应根目录的 `INDEX.md` 已更新。成功的烟雾产物可在完整训练启动后删除，但不得自动删除失败现场。
 - 当前生产配置使用 checkpoint schema `3`。旧 schema `2` 只作为历史产物保留，不能用当前模型代码直接加载。
 - 始终保持每个原始事件及其 `x y t p` 顺序不变，模型输出必须对应每个原始事件。背景采样只能影响损失样本选择，不能删减前向上下文或提交事件。
 - 新的锥体几何或邻域尺度必须先基于真实训练数据统计确定，不能根据单个极端样本拍脑袋设置。
@@ -66,7 +66,7 @@ python -m huav.cli.train `
   --device cpu `
   --note "真实数据 smoke 链路检查"
 
-$smokeDir = (Get-ChildItem outputs -Directory -Filter "cpu_*" |
+$smokeDir = (Get-ChildItem smoke_outputs -Directory -Filter "cpu_*" |
   Sort-Object LastWriteTime -Descending |
   Select-Object -First 1).FullName
 

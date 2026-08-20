@@ -38,7 +38,7 @@ training:
   dense_sequence_weight: 3.0
   min_learning_rate_ratio: 0.1
   num_threads: 8
-  output_root: ../outputs
+  output_root: ../smoke_outputs
   gradient_clip_norm: 1.0
   mixed_precision: true
   mixed_precision_dtype: bfloat16

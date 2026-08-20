@@ -33,7 +33,7 @@ training:
   background_ratio: 10
   max_background_without_positive: 4096
   num_threads: 14
-  output_root: ../outputs
+  output_root: ../smoke_outputs
   gradient_clip_norm: 1.0
   mixed_precision: false
   mixed_precision_dtype: float16

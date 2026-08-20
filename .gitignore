@@ -9,6 +9,7 @@ weights/
 *.pt
 *.pth
 outputs/
+/smoke_outputs/
 submissions/
 *.zip
 
