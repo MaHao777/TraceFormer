@@ -7,7 +7,12 @@ from tempfile import TemporaryDirectory
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from huav.config import HUAVConfig, LocalConeConfig, load_config
+from huav.config import (
+    HUAVConfig,
+    LocalConeConfig,
+    ThresholdAugmentationConfig,
+    load_config,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -27,6 +32,41 @@ def test_base_yaml_loads_with_phase_one_defaults() -> None:
     assert config.inference.sigmoid_threshold == 0.5
     assert Path(config.dataset.root).is_absolute()
     assert Path(config.dataset.root).name == "训练集、验证集"
+    assert not config.threshold_augmentation.enabled
+
+
+def test_score_config_enables_physical_threshold_augmentation() -> None:
+    config = load_config(Path("configs/huav_score_optimized.yaml"))
+
+    assert config.threshold_augmentation == ThresholdAugmentationConfig(
+        enabled=True,
+        min_events=300000,
+        max_polarity_fraction=0.65,
+        threshold_ratios=(1.5, 2.0),
+        warmup_epochs=3,
+        ramp_epochs=3,
+        sparse_loss_weight=0.5,
+        consistency_loss_weight=0.1,
+    )
+
+
+def test_threshold_augmentation_rejects_duplicate_or_nonphysical_ratios() -> None:
+    base = HUAVConfig.default()
+    duplicate = replace(
+        base,
+        threshold_augmentation=replace(
+            base.threshold_augmentation, threshold_ratios=(1.5, 1.5)
+        ),
+    )
+    nonphysical = replace(
+        base,
+        threshold_augmentation=replace(
+            base.threshold_augmentation, threshold_ratios=(1.0,)
+        ),
+    )
+
+    raises(ValueError, duplicate.validate)
+    raises(ValueError, nonphysical.validate)
 
 
 def test_base_yaml_exposes_cone_training_and_loss_configuration() -> None:

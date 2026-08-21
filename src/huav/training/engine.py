@@ -23,7 +23,14 @@ from huav.artifacts import (
     record_run_started,
 )
 from huav.config import HUAVConfig
-from huav.data import EventSequence, LoadedEventSequence, NPZEventDataset
+from huav.data import (
+    EventSequence,
+    HighThresholdView,
+    LoadedEventSequence,
+    NPZEventDataset,
+    is_dense_balanced_event_stream,
+    simulate_high_threshold_events,
+)
 from huav.inference import (
     generate_submission_rows,
     pack_submission_zip,
@@ -32,7 +39,7 @@ from huav.inference import (
 from huav.models import SpatioTemporalConeDetector
 from huav.visualization import render_training_curves
 
-from .losses import EventFocalDiceLoss
+from .losses import EventFocalDiceLoss, object_frame_threshold_consistency_loss
 from .metrics import (
     EventMetricAccumulator,
     EVUAVMetricAccumulator,
@@ -249,6 +256,131 @@ def _dense_sequence_loss_weight(
     if lower <= background_polarity <= upper:
         return float(training.dense_sequence_weight)
     return 1.0
+
+
+def _threshold_augmentation_weight(config: HUAVConfig, epoch: int) -> float:
+    """Return the deterministic auxiliary-loss ramp for a one-based epoch."""
+
+    augmentation = config.threshold_augmentation
+    if not augmentation.enabled or epoch <= augmentation.warmup_epochs:
+        return 0.0
+    ramp_position = epoch - augmentation.warmup_epochs
+    return float(min(1.0, ramp_position / augmentation.ramp_epochs))
+
+
+def _threshold_ratio_for_epoch(
+    config: HUAVConfig,
+    *,
+    epoch: int,
+    dataset_index: int,
+) -> float:
+    """Choose the moderate ratio during ramp, then alternate all ratios."""
+
+    augmentation = config.threshold_augmentation
+    ratios = tuple(float(value) for value in augmentation.threshold_ratios)
+    if epoch <= augmentation.warmup_epochs + augmentation.ramp_epochs:
+        return ratios[0]
+    return ratios[(epoch + dataset_index) % len(ratios)]
+
+
+def _threshold_view_statistics(
+    sequence: LoadedEventSequence,
+    view: HighThresholdView,
+    *,
+    frame_ms: float,
+) -> dict[str, int | float]:
+    indices = view.source_indices.detach().cpu()
+    labels = sequence.labels > 0.5
+    retained_labels = labels[indices]
+    integer_time = torch.floor(sequence.timestamps_ms.to(dtype=torch.float64))
+    within_frame = torch.remainder(integer_time, frame_ms)
+    positive = labels & (sequence.object_ids > 0) & (within_frame > 0)
+    retained_positive = positive[indices]
+
+    def group_count(
+        object_ids: torch.Tensor,
+        timestamps: torch.Tensor,
+        mask: torch.Tensor,
+    ) -> int:
+        if not bool(mask.any()):
+            return 0
+        frames = torch.div(
+            torch.floor(timestamps[mask].to(dtype=torch.float64)),
+            frame_ms,
+            rounding_mode="floor",
+        ).long()
+        groups = torch.stack((object_ids[mask].long(), frames), dim=1)
+        return int(torch.unique(groups, dim=0).shape[0])
+
+    source_groups = group_count(
+        sequence.object_ids,
+        sequence.timestamps_ms,
+        positive,
+    )
+    retained_groups = group_count(
+        sequence.object_ids[indices],
+        sequence.timestamps_ms[indices],
+        retained_positive,
+    )
+    return {
+        "source_events": sequence.length,
+        "retained_events": int(len(indices)),
+        "source_positive_events": int(labels.sum().item()),
+        "retained_positive_events": int(retained_labels.sum().item()),
+        "source_object_frames": source_groups,
+        "retained_object_frames": retained_groups,
+    }
+
+
+def _new_threshold_epoch_report(weight: float) -> dict[str, Any]:
+    return {
+        "weight": float(weight),
+        "eligible_files": 0,
+        "augmented_files": 0,
+        "ratio_usage": {},
+        "source_events": 0,
+        "retained_events": 0,
+        "source_positive_events": 0,
+        "retained_positive_events": 0,
+        "source_object_frames": 0,
+        "retained_object_frames": 0,
+    }
+
+
+def _record_threshold_view(
+    report: dict[str, Any],
+    view: HighThresholdView,
+    statistics: dict[str, int | float],
+) -> None:
+    report["augmented_files"] += 1
+    ratio_key = f"{view.threshold_ratio:g}"
+    ratio_usage = report["ratio_usage"]
+    ratio_usage[ratio_key] = int(ratio_usage.get(ratio_key, 0)) + 1
+    for name, value in statistics.items():
+        report[name] += value
+
+
+def _finalize_threshold_epoch_report(report: dict[str, Any]) -> dict[str, Any]:
+    result = dict(report)
+    pairs = (
+        ("event_retention", "retained_events", "source_events"),
+        (
+            "positive_event_retention",
+            "retained_positive_events",
+            "source_positive_events",
+        ),
+        (
+            "object_frame_retention",
+            "retained_object_frames",
+            "source_object_frames",
+        ),
+    )
+    for output_name, numerator_name, denominator_name in pairs:
+        denominator = int(result[denominator_name])
+        result[output_name] = (
+            float(result[numerator_name] / denominator) if denominator else 0.0
+        )
+    return result
 
 
 @torch.no_grad()
@@ -525,6 +657,7 @@ def _run_training_impl(
     scaler_enabled = _grad_scaler_is_enabled(amp_enabled, amp_dtype)
     scaler = torch.amp.GradScaler("cuda", enabled=scaler_enabled)
     history: list[dict[str, Any]] = []
+    threshold_augmentation_history: list[dict[str, Any]] = []
     best_score = -1.0
     best_metrics: dict[str, Any] | None = None
 
@@ -534,6 +667,9 @@ def _run_training_impl(
         flush=True,
     )
     for epoch in range(config.training.epochs):
+        epoch_number = epoch + 1
+        augmentation_weight = _threshold_augmentation_weight(config, epoch_number)
+        augmentation_report = _new_threshold_epoch_report(augmentation_weight)
         model.train()
         totals = {
             "total": 0.0,
@@ -541,6 +677,9 @@ def _run_training_impl(
             "dice": 0.0,
             "object_frame": 0.0,
             "false_alarm": 0.0,
+            "sparse_total": 0.0,
+            "threshold_consistency": 0.0,
+            "augmentation_weight": 0.0,
         }
         learning_rate = float(optimizer.param_groups[0]["lr"])
         order = torch.randperm(
@@ -548,6 +687,37 @@ def _run_training_impl(
         ).tolist()
         for step, dataset_index in enumerate(order):
             sequence = train_dataset[dataset_index]
+            threshold_view: HighThresholdView | None = None
+            threshold_eligible = is_dense_balanced_event_stream(
+                sequence.events,
+                min_events=config.threshold_augmentation.min_events,
+                max_polarity_fraction=(
+                    config.threshold_augmentation.max_polarity_fraction
+                ),
+            )
+            if threshold_eligible:
+                augmentation_report["eligible_files"] += 1
+            if threshold_eligible and augmentation_weight > 0:
+                ratio = _threshold_ratio_for_epoch(
+                    config,
+                    epoch=epoch_number,
+                    dataset_index=dataset_index,
+                )
+                threshold_view = simulate_high_threshold_events(
+                    sequence.events,
+                    width=config.resolution.width,
+                    height=config.resolution.height,
+                    threshold_ratio=ratio,
+                )
+                _record_threshold_view(
+                    augmentation_report,
+                    threshold_view,
+                    _threshold_view_statistics(
+                        sequence,
+                        threshold_view,
+                        frame_ms=config.evaluation.frame_ms,
+                    ),
+                )
             events = sequence.events.to(torch_device)
             labels = sequence.labels.to(torch_device)
             object_ids = sequence.object_ids.to(torch_device)
@@ -574,7 +744,7 @@ def _run_training_impl(
                         config.training.max_background_without_positive
                     ),
                 )
-                losses = criterion(
+                full_losses = criterion(
                     output["event_logits"][query_indices],
                     labels[query_indices],
                     batch_indices[query_indices],
@@ -592,7 +762,68 @@ def _run_training_impl(
                     labels,
                     config,
                 )
-                losses["total"] = losses["total"] * sequence_weight
+                sparse_total = full_losses["total"] * 0.0
+                threshold_consistency = full_losses["total"] * 0.0
+                if threshold_view is not None:
+                    source_indices = threshold_view.source_indices.to(torch_device)
+                    sparse_events = threshold_view.events.to(torch_device)
+                    sparse_labels = labels[source_indices]
+                    sparse_object_ids = object_ids[source_indices]
+                    sparse_timestamps_ms = timestamps_ms[source_indices]
+                    sparse_batch_indices = torch.zeros(
+                        len(sparse_events), dtype=torch.long, device=torch_device
+                    )
+                    sparse_output = model(sparse_events, sparse_batch_indices)
+                    sparse_query_indices = sample_event_indices(
+                        sparse_labels,
+                        logits=sparse_output["event_logits"],
+                        background_ratio=config.training.background_ratio,
+                        hard_negative_fraction=(
+                            config.training.hard_negative_fraction
+                        ),
+                        generator=sampling_generator,
+                        max_background_without_positive=(
+                            config.training.max_background_without_positive
+                        ),
+                    )
+                    sparse_losses = criterion(
+                        sparse_output["event_logits"][sparse_query_indices],
+                        sparse_labels[sparse_query_indices],
+                        sparse_batch_indices[sparse_query_indices],
+                        object_ids=sparse_object_ids[sparse_query_indices],
+                        timestamps_ms=sparse_timestamps_ms[sparse_query_indices],
+                        frame_ms=config.evaluation.frame_ms,
+                        full_logits=sparse_output["event_logits"],
+                        full_targets=sparse_labels,
+                        full_batch_indices=sparse_batch_indices,
+                        full_timestamps_ms=sparse_timestamps_ms,
+                        full_coordinates=sparse_events[:, :2],
+                    )
+                    sparse_total = sparse_losses["total"]
+                    threshold_consistency = (
+                        object_frame_threshold_consistency_loss(
+                            sparse_output["event_logits"],
+                            output["event_logits"],
+                            source_indices,
+                            labels,
+                            object_ids,
+                            timestamps_ms,
+                            frame_ms=config.evaluation.frame_ms,
+                        )
+                    )
+                combined_total = full_losses["total"] * sequence_weight
+                combined_total = combined_total + augmentation_weight * (
+                    config.threshold_augmentation.sparse_loss_weight * sparse_total
+                    + config.threshold_augmentation.consistency_loss_weight
+                    * threshold_consistency
+                )
+                losses = dict(full_losses)
+                losses["total"] = combined_total
+                losses["sparse_total"] = sparse_total
+                losses["threshold_consistency"] = threshold_consistency
+                losses["augmentation_weight"] = combined_total.new_tensor(
+                    augmentation_weight if threshold_view is not None else 0.0
+                )
             if amp_enabled:
                 scaler.scale(losses["total"]).backward()
                 scaler.unscale_(optimizer)
@@ -621,6 +852,10 @@ def _run_training_impl(
 
         for name in totals:
             totals[name] /= len(train_dataset)
+        finalized_augmentation_report = _finalize_threshold_epoch_report(
+            augmentation_report
+        )
+        threshold_augmentation_history.append(finalized_augmentation_report)
         validation_result = evaluate_model(
             model,
             validation_dataset,
@@ -637,9 +872,14 @@ def _run_training_impl(
             "train_loss": totals,
             "validation_loss": validation_loss,
             "validation": metrics,
+            "threshold_augmentation": finalized_augmentation_report,
         }
         history.append(epoch_record)
         _write_json(run_dir / "history.json", history)
+        _write_json(
+            run_dir / "threshold_augmentation.json",
+            threshold_augmentation_history,
+        )
         _update_training_curves(run_dir, history)
         competition = metrics["competition"]
         score = float(competition["score"])
@@ -686,6 +926,7 @@ def _run_training_impl(
         "gradient_scaling": scaler_enabled,
         "runtime": runtime.metadata,
         "parameter_count": sum(parameter.numel() for parameter in model.parameters()),
+        "threshold_augmentation": threshold_augmentation_history,
         "best_score": best_score,
         "best_iou": float(best_metrics["competition"]["iou"]),
         "metrics": best_metrics,
@@ -865,6 +1106,7 @@ def _resume_training_impl(
     scaler_enabled = _grad_scaler_is_enabled(amp_enabled, amp_dtype)
     scaler = torch.amp.GradScaler("cuda", enabled=scaler_enabled)
     history: list[dict[str, Any]] = []
+    threshold_augmentation_history: list[dict[str, Any]] = []
     best_score = -1.0
     best_metrics: dict[str, Any] | None = None
 
@@ -881,6 +1123,9 @@ def _resume_training_impl(
     )
 
     for epoch in range(additional_epochs):
+        epoch_number = source_epoch + epoch + 1
+        augmentation_weight = _threshold_augmentation_weight(config, epoch_number)
+        augmentation_report = _new_threshold_epoch_report(augmentation_weight)
         model.train()
         totals = {
             "total": 0.0,
@@ -888,6 +1133,9 @@ def _resume_training_impl(
             "dice": 0.0,
             "object_frame": 0.0,
             "false_alarm": 0.0,
+            "sparse_total": 0.0,
+            "threshold_consistency": 0.0,
+            "augmentation_weight": 0.0,
         }
         learning_rate = float(optimizer.param_groups[0]["lr"])
         order = torch.randperm(
@@ -895,6 +1143,37 @@ def _resume_training_impl(
         ).tolist()
         for step, dataset_index in enumerate(order):
             sequence = train_dataset[dataset_index]
+            threshold_view: HighThresholdView | None = None
+            threshold_eligible = is_dense_balanced_event_stream(
+                sequence.events,
+                min_events=config.threshold_augmentation.min_events,
+                max_polarity_fraction=(
+                    config.threshold_augmentation.max_polarity_fraction
+                ),
+            )
+            if threshold_eligible:
+                augmentation_report["eligible_files"] += 1
+            if threshold_eligible and augmentation_weight > 0:
+                ratio = _threshold_ratio_for_epoch(
+                    config,
+                    epoch=epoch_number,
+                    dataset_index=dataset_index,
+                )
+                threshold_view = simulate_high_threshold_events(
+                    sequence.events,
+                    width=config.resolution.width,
+                    height=config.resolution.height,
+                    threshold_ratio=ratio,
+                )
+                _record_threshold_view(
+                    augmentation_report,
+                    threshold_view,
+                    _threshold_view_statistics(
+                        sequence,
+                        threshold_view,
+                        frame_ms=config.evaluation.frame_ms,
+                    ),
+                )
             events = sequence.events.to(torch_device)
             labels = sequence.labels.to(torch_device)
             object_ids = sequence.object_ids.to(torch_device)
@@ -921,7 +1200,7 @@ def _resume_training_impl(
                         config.training.max_background_without_positive
                     ),
                 )
-                losses = criterion(
+                full_losses = criterion(
                     output["event_logits"][query_indices],
                     labels[query_indices],
                     batch_indices[query_indices],
@@ -939,7 +1218,68 @@ def _resume_training_impl(
                     labels,
                     config,
                 )
-                losses["total"] = losses["total"] * sequence_weight
+                sparse_total = full_losses["total"] * 0.0
+                threshold_consistency = full_losses["total"] * 0.0
+                if threshold_view is not None:
+                    source_indices = threshold_view.source_indices.to(torch_device)
+                    sparse_events = threshold_view.events.to(torch_device)
+                    sparse_labels = labels[source_indices]
+                    sparse_object_ids = object_ids[source_indices]
+                    sparse_timestamps_ms = timestamps_ms[source_indices]
+                    sparse_batch_indices = torch.zeros(
+                        len(sparse_events), dtype=torch.long, device=torch_device
+                    )
+                    sparse_output = model(sparse_events, sparse_batch_indices)
+                    sparse_query_indices = sample_event_indices(
+                        sparse_labels,
+                        logits=sparse_output["event_logits"],
+                        background_ratio=config.training.background_ratio,
+                        hard_negative_fraction=(
+                            config.training.hard_negative_fraction
+                        ),
+                        generator=sampling_generator,
+                        max_background_without_positive=(
+                            config.training.max_background_without_positive
+                        ),
+                    )
+                    sparse_losses = criterion(
+                        sparse_output["event_logits"][sparse_query_indices],
+                        sparse_labels[sparse_query_indices],
+                        sparse_batch_indices[sparse_query_indices],
+                        object_ids=sparse_object_ids[sparse_query_indices],
+                        timestamps_ms=sparse_timestamps_ms[sparse_query_indices],
+                        frame_ms=config.evaluation.frame_ms,
+                        full_logits=sparse_output["event_logits"],
+                        full_targets=sparse_labels,
+                        full_batch_indices=sparse_batch_indices,
+                        full_timestamps_ms=sparse_timestamps_ms,
+                        full_coordinates=sparse_events[:, :2],
+                    )
+                    sparse_total = sparse_losses["total"]
+                    threshold_consistency = (
+                        object_frame_threshold_consistency_loss(
+                            sparse_output["event_logits"],
+                            output["event_logits"],
+                            source_indices,
+                            labels,
+                            object_ids,
+                            timestamps_ms,
+                            frame_ms=config.evaluation.frame_ms,
+                        )
+                    )
+                combined_total = full_losses["total"] * sequence_weight
+                combined_total = combined_total + augmentation_weight * (
+                    config.threshold_augmentation.sparse_loss_weight * sparse_total
+                    + config.threshold_augmentation.consistency_loss_weight
+                    * threshold_consistency
+                )
+                losses = dict(full_losses)
+                losses["total"] = combined_total
+                losses["sparse_total"] = sparse_total
+                losses["threshold_consistency"] = threshold_consistency
+                losses["augmentation_weight"] = combined_total.new_tensor(
+                    augmentation_weight if threshold_view is not None else 0.0
+                )
             if amp_enabled:
                 scaler.scale(losses["total"]).backward()
                 scaler.unscale_(optimizer)
@@ -969,6 +1309,10 @@ def _resume_training_impl(
 
         for name in totals:
             totals[name] /= len(train_dataset)
+        finalized_augmentation_report = _finalize_threshold_epoch_report(
+            augmentation_report
+        )
+        threshold_augmentation_history.append(finalized_augmentation_report)
         validation_result = evaluate_model(
             model,
             validation_dataset,
@@ -986,9 +1330,14 @@ def _resume_training_impl(
             "train_loss": totals,
             "validation_loss": validation_loss,
             "validation": metrics,
+            "threshold_augmentation": finalized_augmentation_report,
         }
         history.append(epoch_record)
         _write_json(run_dir / "history.json", history)
+        _write_json(
+            run_dir / "threshold_augmentation.json",
+            threshold_augmentation_history,
+        )
         _update_training_curves(run_dir, history)
         competition = metrics["competition"]
         score = float(competition["score"])
@@ -1042,6 +1391,7 @@ def _resume_training_impl(
         "parameter_count": sum(
             parameter.numel() for parameter in model.parameters()
         ),
+        "threshold_augmentation": threshold_augmentation_history,
         "best_score": best_score,
         "best_iou": float(best_metrics["competition"]["iou"]),
         "metrics": best_metrics,

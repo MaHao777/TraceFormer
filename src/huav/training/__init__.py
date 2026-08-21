@@ -11,6 +11,7 @@ from .losses import (
     binary_focal_loss,
     false_alarm_pixel_loss,
     object_frame_recall_loss,
+    object_frame_threshold_consistency_loss,
 )
 from .metrics import EventMetricAccumulator, EVUAVMetricAccumulator, competition_metrics
 from .sampling import sample_event_indices
@@ -49,6 +50,7 @@ __all__ = [
     "binary_focal_loss",
     "competition_metrics",
     "false_alarm_pixel_loss",
+    "object_frame_threshold_consistency_loss",
     "object_frame_recall_loss",
     "sample_event_indices",
 ]

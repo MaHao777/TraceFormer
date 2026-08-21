@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 import torch
 
+from huav.analysis.threshold_robustness import evaluate_threshold_robustness
 from huav.config import (
     DatasetConfig,
     HUAVConfig,
@@ -25,6 +26,8 @@ from huav.training.engine import (
     _dense_sequence_loss_weight,
     _grad_scaler_is_enabled,
     _select_competition_threshold,
+    _threshold_augmentation_weight,
+    _threshold_ratio_for_epoch,
     evaluate_checkpoint,
     resume_training,
     run_training,
@@ -533,6 +536,79 @@ def test_dense_balanced_polarity_sequences_receive_configured_loss_weight() -> N
     weight = _dense_sequence_loss_weight(events, labels, config)
 
     assert weight == pytest.approx(3.0)
+
+
+def test_threshold_schedule_warms_then_alternates_deterministically() -> None:
+    base = HUAVConfig.default()
+    config = replace(
+        base,
+        threshold_augmentation=replace(
+            base.threshold_augmentation,
+            enabled=True,
+            threshold_ratios=(1.5, 2.0),
+            warmup_epochs=3,
+            ramp_epochs=3,
+        ),
+    ).validate()
+
+    assert [_threshold_augmentation_weight(config, epoch) for epoch in range(1, 8)] == [
+        0.0,
+        0.0,
+        0.0,
+        pytest.approx(1 / 3),
+        pytest.approx(2 / 3),
+        1.0,
+        1.0,
+    ]
+    assert _threshold_ratio_for_epoch(config, epoch=4, dataset_index=1) == 1.5
+    assert _threshold_ratio_for_epoch(config, epoch=7, dataset_index=0) == 2.0
+    assert _threshold_ratio_for_epoch(config, epoch=7, dataset_index=1) == 1.5
+
+
+def test_training_adds_sparse_branch_only_for_enabled_eligible_stream() -> None:
+    with TemporaryDirectory(dir=Path.cwd()) as directory:
+        temporary_root = Path(directory)
+        data_root = temporary_root / "data"
+        train_root = data_root / "train"
+        val_root = data_root / "val"
+        train_root.mkdir(parents=True)
+        val_root.mkdir(parents=True)
+        _write_imbalanced_sequence(train_root / "train_000.npz")
+        _write_sequence(val_root / "val_000.npz", 0)
+        output_root = temporary_root / "outputs"
+        config = _config(data_root, output_root)
+        config = replace(
+            config,
+            threshold_augmentation=replace(
+                config.threshold_augmentation,
+                enabled=True,
+                min_events=1,
+                max_polarity_fraction=1.0,
+                threshold_ratios=(1.5, 2.0),
+                warmup_epochs=0,
+                ramp_epochs=1,
+            ),
+        ).validate()
+
+        summary = run_training(config, output_dir=output_root / "run")
+        run_dir = Path(summary["run_dir"])
+        history = json.loads((run_dir / "history.json").read_text(encoding="utf-8"))
+        augmentation = json.loads(
+            (run_dir / "threshold_augmentation.json").read_text(encoding="utf-8")
+        )
+        stress = evaluate_threshold_robustness(
+            config,
+            run_dir / "best.pt",
+            threshold_ratios=(1.5,),
+            files=("val_000.npz",),
+        )
+
+    assert history[0]["train_loss"]["sparse_total"] >= 0.0
+    assert history[0]["train_loss"]["threshold_consistency"] >= 0.0
+    assert history[0]["threshold_augmentation"]["augmented_files"] == 1
+    assert augmentation[0]["ratio_usage"] == {"1.5": 1}
+    assert stress["validation_files"] == ["val_000.npz"]
+    assert stress["results"]["1.5"]["counts"]["source_events"] == 4
 
 
 def test_training_forwards_all_events_before_sampling_loss(

@@ -1,0 +1,1265 @@
+{
+  "method": {
+    "name": "per-pixel signed contrast integration",
+    "polarity_mapping": {
+      "0": -1,
+      "1": 1
+    },
+    "initial_residual": 0.0,
+    "reset_policy": "subtract crossed threshold and retain residual",
+    "uses_annotations": false
+  },
+  "configuration": {
+    "threshold_ratios": [
+      1.5,
+      2.0,
+      3.0
+    ],
+    "min_events": 300000,
+    "max_polarity_fraction": 0.65,
+    "width": 346,
+    "height": 260,
+    "frame_ms": 50.0
+  },
+  "dataset": {
+    "root": "D:\\VS_project\\TinyObjDetection\\HUAV\\data\\ev-uav\\train",
+    "files": 99,
+    "eligible_files": 11
+  },
+  "aggregate": {
+    "1.5": {
+      "source_events": 5717653,
+      "retained_events": 1277820,
+      "source_positive_events": 54192,
+      "retained_positive_events": 19435,
+      "source_object_frames": 2672,
+      "retained_object_frames": 2350,
+      "event_retention": 0.22348680481309377,
+      "positive_event_retention": 0.35863227044582224,
+      "object_frame_retention": 0.8794910179640718
+    },
+    "2": {
+      "source_events": 5717653,
+      "retained_events": 993773,
+      "source_positive_events": 54192,
+      "retained_positive_events": 14729,
+      "source_object_frames": 2672,
+      "retained_object_frames": 2262,
+      "event_retention": 0.17380785437661223,
+      "positive_event_retention": 0.27179288455860645,
+      "object_frame_retention": 0.8465568862275449
+    },
+    "3": {
+      "source_events": 5717653,
+      "retained_events": 355334,
+      "source_positive_events": 54192,
+      "retained_positive_events": 6849,
+      "source_object_frames": 2672,
+      "retained_object_frames": 1614,
+      "event_retention": 0.06214682842767828,
+      "positive_event_retention": 0.12638396811337466,
+      "object_frame_retention": 0.6040419161676647
+    }
+  },
+  "sequences": [
+    {
+      "file": "train_000.npz",
+      "events": 39169,
+      "positive_events": 2790,
+      "positive_polarity_fraction": 0.9648191171589777,
+      "maximum_polarity_fraction": 0.9648191171589777,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_001.npz",
+      "events": 42161,
+      "positive_events": 3015,
+      "positive_polarity_fraction": 0.9654419961575864,
+      "maximum_polarity_fraction": 0.9654419961575864,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_002.npz",
+      "events": 44571,
+      "positive_events": 3955,
+      "positive_polarity_fraction": 0.9565861210203944,
+      "maximum_polarity_fraction": 0.9565861210203944,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_003.npz",
+      "events": 47086,
+      "positive_events": 5155,
+      "positive_polarity_fraction": 0.947287941213949,
+      "maximum_polarity_fraction": 0.947287941213949,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_004.npz",
+      "events": 45755,
+      "positive_events": 1414,
+      "positive_polarity_fraction": 0.984591847885477,
+      "maximum_polarity_fraction": 0.984591847885477,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_005.npz",
+      "events": 46627,
+      "positive_events": 1147,
+      "positive_polarity_fraction": 0.9861453664185986,
+      "maximum_polarity_fraction": 0.9861453664185986,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_006.npz",
+      "events": 47857,
+      "positive_events": 1340,
+      "positive_polarity_fraction": 0.9768894832521888,
+      "maximum_polarity_fraction": 0.9768894832521888,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_007.npz",
+      "events": 51672,
+      "positive_events": 1078,
+      "positive_polarity_fraction": 0.9899752283635238,
+      "maximum_polarity_fraction": 0.9899752283635238,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_008.npz",
+      "events": 54078,
+      "positive_events": 1192,
+      "positive_polarity_fraction": 0.9886275380006657,
+      "maximum_polarity_fraction": 0.9886275380006657,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_009.npz",
+      "events": 55460,
+      "positive_events": 2485,
+      "positive_polarity_fraction": 0.9787234042553191,
+      "maximum_polarity_fraction": 0.9787234042553191,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_010.npz",
+      "events": 54478,
+      "positive_events": 1979,
+      "positive_polarity_fraction": 0.9819376629097984,
+      "maximum_polarity_fraction": 0.9819376629097984,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_011.npz",
+      "events": 55848,
+      "positive_events": 1894,
+      "positive_polarity_fraction": 0.9834550923936399,
+      "maximum_polarity_fraction": 0.9834550923936399,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_012.npz",
+      "events": 56081,
+      "positive_events": 1853,
+      "positive_polarity_fraction": 0.9842549169950607,
+      "maximum_polarity_fraction": 0.9842549169950607,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_013.npz",
+      "events": 57557,
+      "positive_events": 2667,
+      "positive_polarity_fraction": 0.9777959240405164,
+      "maximum_polarity_fraction": 0.9777959240405164,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_014.npz",
+      "events": 59011,
+      "positive_events": 3465,
+      "positive_polarity_fraction": 0.971767975462202,
+      "maximum_polarity_fraction": 0.971767975462202,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_015.npz",
+      "events": 25255,
+      "positive_events": 1240,
+      "positive_polarity_fraction": 0.9762423282518313,
+      "maximum_polarity_fraction": 0.9762423282518313,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_016.npz",
+      "events": 25111,
+      "positive_events": 1481,
+      "positive_polarity_fraction": 0.9707299589821194,
+      "maximum_polarity_fraction": 0.9707299589821194,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_017.npz",
+      "events": 25232,
+      "positive_events": 1873,
+      "positive_polarity_fraction": 0.9640139505389981,
+      "maximum_polarity_fraction": 0.9640139505389981,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_018.npz",
+      "events": 23457,
+      "positive_events": 1601,
+      "positive_polarity_fraction": 0.9657245172016882,
+      "maximum_polarity_fraction": 0.9657245172016882,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_019.npz",
+      "events": 22312,
+      "positive_events": 737,
+      "positive_polarity_fraction": 0.9826550735030477,
+      "maximum_polarity_fraction": 0.9826550735030477,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_020.npz",
+      "events": 23042,
+      "positive_events": 890,
+      "positive_polarity_fraction": 0.9802100512108324,
+      "maximum_polarity_fraction": 0.9802100512108324,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_021.npz",
+      "events": 22246,
+      "positive_events": 2034,
+      "positive_polarity_fraction": 0.9551380023374989,
+      "maximum_polarity_fraction": 0.9551380023374989,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_022.npz",
+      "events": 21165,
+      "positive_events": 715,
+      "positive_polarity_fraction": 0.9834632648240019,
+      "maximum_polarity_fraction": 0.9834632648240019,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_023.npz",
+      "events": 22268,
+      "positive_events": 1881,
+      "positive_polarity_fraction": 0.9585503862044189,
+      "maximum_polarity_fraction": 0.9585503862044189,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_024.npz",
+      "events": 21547,
+      "positive_events": 1538,
+      "positive_polarity_fraction": 0.9603657121641064,
+      "maximum_polarity_fraction": 0.9603657121641064,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_025.npz",
+      "events": 20673,
+      "positive_events": 1305,
+      "positive_polarity_fraction": 0.9683161611764137,
+      "maximum_polarity_fraction": 0.9683161611764137,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_026.npz",
+      "events": 21416,
+      "positive_events": 1062,
+      "positive_polarity_fraction": 0.9766996638027643,
+      "maximum_polarity_fraction": 0.9766996638027643,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_027.npz",
+      "events": 21238,
+      "positive_events": 1260,
+      "positive_polarity_fraction": 0.9706657877389585,
+      "maximum_polarity_fraction": 0.9706657877389585,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_028.npz",
+      "events": 56395,
+      "positive_events": 2600,
+      "positive_polarity_fraction": 0.6361202234240624,
+      "maximum_polarity_fraction": 0.6361202234240624,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_029.npz",
+      "events": 59392,
+      "positive_events": 3822,
+      "positive_polarity_fraction": 0.6320884967672413,
+      "maximum_polarity_fraction": 0.6320884967672413,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_030.npz",
+      "events": 54775,
+      "positive_events": 4752,
+      "positive_polarity_fraction": 0.6542400730260155,
+      "maximum_polarity_fraction": 0.6542400730260155,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_031.npz",
+      "events": 61472,
+      "positive_events": 2999,
+      "positive_polarity_fraction": 0.6339634305049453,
+      "maximum_polarity_fraction": 0.6339634305049453,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_032.npz",
+      "events": 30017,
+      "positive_events": 3242,
+      "positive_polarity_fraction": 0.7527734283905787,
+      "maximum_polarity_fraction": 0.7527734283905787,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_033.npz",
+      "events": 26806,
+      "positive_events": 3869,
+      "positive_polarity_fraction": 0.760240244721331,
+      "maximum_polarity_fraction": 0.760240244721331,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_034.npz",
+      "events": 20849,
+      "positive_events": 4020,
+      "positive_polarity_fraction": 0.8096791213007818,
+      "maximum_polarity_fraction": 0.8096791213007818,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_035.npz",
+      "events": 19075,
+      "positive_events": 4133,
+      "positive_polarity_fraction": 0.840262123197903,
+      "maximum_polarity_fraction": 0.840262123197903,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_036.npz",
+      "events": 18486,
+      "positive_events": 3767,
+      "positive_polarity_fraction": 0.8504273504273504,
+      "maximum_polarity_fraction": 0.8504273504273504,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_037.npz",
+      "events": 20914,
+      "positive_events": 3406,
+      "positive_polarity_fraction": 0.8338911733766855,
+      "maximum_polarity_fraction": 0.8338911733766855,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_038.npz",
+      "events": 17867,
+      "positive_events": 3466,
+      "positive_polarity_fraction": 0.8867185313706833,
+      "maximum_polarity_fraction": 0.8867185313706833,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_039.npz",
+      "events": 20340,
+      "positive_events": 4747,
+      "positive_polarity_fraction": 0.8580137659783678,
+      "maximum_polarity_fraction": 0.8580137659783678,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_040.npz",
+      "events": 44502,
+      "positive_events": 1574,
+      "positive_polarity_fraction": 0.9840231899689902,
+      "maximum_polarity_fraction": 0.9840231899689902,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_041.npz",
+      "events": 44937,
+      "positive_events": 2353,
+      "positive_polarity_fraction": 0.9755435387320026,
+      "maximum_polarity_fraction": 0.9755435387320026,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_042.npz",
+      "events": 43563,
+      "positive_events": 1652,
+      "positive_polarity_fraction": 0.9818194339232835,
+      "maximum_polarity_fraction": 0.9818194339232835,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_043.npz",
+      "events": 44220,
+      "positive_events": 2192,
+      "positive_polarity_fraction": 0.9773405698778833,
+      "maximum_polarity_fraction": 0.9773405698778833,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_044.npz",
+      "events": 297725,
+      "positive_events": 2753,
+      "positive_polarity_fraction": 0.9880157863800487,
+      "maximum_polarity_fraction": 0.9880157863800487,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_045.npz",
+      "events": 278956,
+      "positive_events": 5092,
+      "positive_polarity_fraction": 0.8983459757094309,
+      "maximum_polarity_fraction": 0.8983459757094309,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_046.npz",
+      "events": 272501,
+      "positive_events": 4322,
+      "positive_polarity_fraction": 0.9087452890081137,
+      "maximum_polarity_fraction": 0.9087452890081137,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_047.npz",
+      "events": 252604,
+      "positive_events": 1841,
+      "positive_polarity_fraction": 0.9871340121296575,
+      "maximum_polarity_fraction": 0.9871340121296575,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_048.npz",
+      "events": 20433,
+      "positive_events": 3793,
+      "positive_polarity_fraction": 0.9112709832134293,
+      "maximum_polarity_fraction": 0.9112709832134293,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_049.npz",
+      "events": 22833,
+      "positive_events": 4674,
+      "positive_polarity_fraction": 0.9033854508824947,
+      "maximum_polarity_fraction": 0.9033854508824947,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_050.npz",
+      "events": 18300,
+      "positive_events": 2243,
+      "positive_polarity_fraction": 0.9412021857923497,
+      "maximum_polarity_fraction": 0.9412021857923497,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_051.npz",
+      "events": 18574,
+      "positive_events": 1849,
+      "positive_polarity_fraction": 0.9491762679013676,
+      "maximum_polarity_fraction": 0.9491762679013676,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_052.npz",
+      "events": 17631,
+      "positive_events": 1797,
+      "positive_polarity_fraction": 0.9527536725086495,
+      "maximum_polarity_fraction": 0.9527536725086495,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_053.npz",
+      "events": 17763,
+      "positive_events": 1491,
+      "positive_polarity_fraction": 0.9568203569216912,
+      "maximum_polarity_fraction": 0.9568203569216912,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_054.npz",
+      "events": 12322,
+      "positive_events": 1180,
+      "positive_polarity_fraction": 0.9521181626359357,
+      "maximum_polarity_fraction": 0.9521181626359357,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_055.npz",
+      "events": 20090,
+      "positive_events": 4162,
+      "positive_polarity_fraction": 0.9051767048282727,
+      "maximum_polarity_fraction": 0.9051767048282727,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_056.npz",
+      "events": 24294,
+      "positive_events": 2890,
+      "positive_polarity_fraction": 0.832180785379106,
+      "maximum_polarity_fraction": 0.832180785379106,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_057.npz",
+      "events": 18076,
+      "positive_events": 2887,
+      "positive_polarity_fraction": 0.9214981190528878,
+      "maximum_polarity_fraction": 0.9214981190528878,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_058.npz",
+      "events": 14707,
+      "positive_events": 1468,
+      "positive_polarity_fraction": 0.9502277826885157,
+      "maximum_polarity_fraction": 0.9502277826885157,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_059.npz",
+      "events": 44257,
+      "positive_events": 888,
+      "positive_polarity_fraction": 0.9900128793185259,
+      "maximum_polarity_fraction": 0.9900128793185259,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_060.npz",
+      "events": 43606,
+      "positive_events": 1229,
+      "positive_polarity_fraction": 0.9868366738522222,
+      "maximum_polarity_fraction": 0.9868366738522222,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_061.npz",
+      "events": 43318,
+      "positive_events": 1294,
+      "positive_polarity_fraction": 0.9755067177616695,
+      "maximum_polarity_fraction": 0.9755067177616695,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_062.npz",
+      "events": 32985,
+      "positive_events": 1955,
+      "positive_polarity_fraction": 0.9744429286039109,
+      "maximum_polarity_fraction": 0.9744429286039109,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_063.npz",
+      "events": 32769,
+      "positive_events": 1392,
+      "positive_polarity_fraction": 0.9819341450761391,
+      "maximum_polarity_fraction": 0.9819341450761391,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_064.npz",
+      "events": 33361,
+      "positive_events": 2096,
+      "positive_polarity_fraction": 0.9723329636401786,
+      "maximum_polarity_fraction": 0.9723329636401786,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_065.npz",
+      "events": 33115,
+      "positive_events": 1555,
+      "positive_polarity_fraction": 0.9790427298807187,
+      "maximum_polarity_fraction": 0.9790427298807187,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_066.npz",
+      "events": 20297,
+      "positive_events": 1349,
+      "positive_polarity_fraction": 0.9717692269793565,
+      "maximum_polarity_fraction": 0.9717692269793565,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_067.npz",
+      "events": 32582,
+      "positive_events": 2404,
+      "positive_polarity_fraction": 0.96537965747959,
+      "maximum_polarity_fraction": 0.96537965747959,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_068.npz",
+      "events": 32205,
+      "positive_events": 2889,
+      "positive_polarity_fraction": 0.9607203850333799,
+      "maximum_polarity_fraction": 0.9607203850333799,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_069.npz",
+      "events": 31752,
+      "positive_events": 323,
+      "positive_polarity_fraction": 0.9907092466616276,
+      "maximum_polarity_fraction": 0.9907092466616276,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_070.npz",
+      "events": 31854,
+      "positive_events": 474,
+      "positive_polarity_fraction": 0.9909901425252715,
+      "maximum_polarity_fraction": 0.9909901425252715,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_071.npz",
+      "events": 32667,
+      "positive_events": 2027,
+      "positive_polarity_fraction": 0.9696329629289497,
+      "maximum_polarity_fraction": 0.9696329629289497,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_072.npz",
+      "events": 35190,
+      "positive_events": 4455,
+      "positive_polarity_fraction": 0.9385336743393009,
+      "maximum_polarity_fraction": 0.9385336743393009,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_073.npz",
+      "events": 37768,
+      "positive_events": 7460,
+      "positive_polarity_fraction": 0.9054225799618725,
+      "maximum_polarity_fraction": 0.9054225799618725,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_074.npz",
+      "events": 42210,
+      "positive_events": 15399,
+      "positive_polarity_fraction": 0.8268182895048567,
+      "maximum_polarity_fraction": 0.8268182895048567,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_075.npz",
+      "events": 7511,
+      "positive_events": 1402,
+      "positive_polarity_fraction": 0.9161230195712954,
+      "maximum_polarity_fraction": 0.9161230195712954,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_076.npz",
+      "events": 7537,
+      "positive_events": 1489,
+      "positive_polarity_fraction": 0.9052673477510946,
+      "maximum_polarity_fraction": 0.9052673477510946,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_077.npz",
+      "events": 7719,
+      "positive_events": 1477,
+      "positive_polarity_fraction": 0.9107397331260526,
+      "maximum_polarity_fraction": 0.9107397331260526,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_078.npz",
+      "events": 7814,
+      "positive_events": 1630,
+      "positive_polarity_fraction": 0.9019708216022524,
+      "maximum_polarity_fraction": 0.9019708216022524,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_079.npz",
+      "events": 7372,
+      "positive_events": 1270,
+      "positive_polarity_fraction": 0.9173901247965274,
+      "maximum_polarity_fraction": 0.9173901247965274,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_080.npz",
+      "events": 7230,
+      "positive_events": 1336,
+      "positive_polarity_fraction": 0.912448132780083,
+      "maximum_polarity_fraction": 0.912448132780083,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_081.npz",
+      "events": 8964,
+      "positive_events": 2778,
+      "positive_polarity_fraction": 0.8518518518518519,
+      "maximum_polarity_fraction": 0.8518518518518519,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_082.npz",
+      "events": 8452,
+      "positive_events": 2261,
+      "positive_polarity_fraction": 0.8628726928537624,
+      "maximum_polarity_fraction": 0.8628726928537624,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_083.npz",
+      "events": 8222,
+      "positive_events": 1890,
+      "positive_polarity_fraction": 0.8894429579177816,
+      "maximum_polarity_fraction": 0.8894429579177816,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_084.npz",
+      "events": 8417,
+      "positive_events": 2055,
+      "positive_polarity_fraction": 0.8815492455744327,
+      "maximum_polarity_fraction": 0.8815492455744327,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_085.npz",
+      "events": 7724,
+      "positive_events": 1847,
+      "positive_polarity_fraction": 0.8874935266701192,
+      "maximum_polarity_fraction": 0.8874935266701192,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_086.npz",
+      "events": 8547,
+      "positive_events": 2412,
+      "positive_polarity_fraction": 0.8643968643968644,
+      "maximum_polarity_fraction": 0.8643968643968644,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_087.npz",
+      "events": 8654,
+      "positive_events": 2812,
+      "positive_polarity_fraction": 0.8453894152992836,
+      "maximum_polarity_fraction": 0.8453894152992836,
+      "eligible": false,
+      "thresholds": {}
+    },
+    {
+      "file": "train_088.npz",
+      "events": 399750,
+      "positive_events": 5538,
+      "positive_polarity_fraction": 0.5383939962476548,
+      "maximum_polarity_fraction": 0.5383939962476548,
+      "eligible": true,
+      "thresholds": {
+        "1.5": {
+          "retained_events": 89700,
+          "event_retention": 0.22439024390243903,
+          "retained_positive_events": 1717,
+          "positive_event_retention": 0.3100397255326833,
+          "source_object_frames": 412,
+          "retained_object_frames": 348,
+          "object_frame_retention": 0.8446601941747572
+        },
+        "2": {
+          "retained_events": 69991,
+          "event_retention": 0.17508692933083178,
+          "retained_positive_events": 1315,
+          "positive_event_retention": 0.2374503430841459,
+          "source_object_frames": 412,
+          "retained_object_frames": 331,
+          "object_frame_retention": 0.8033980582524272
+        },
+        "3": {
+          "retained_events": 24661,
+          "event_retention": 0.06169105691056911,
+          "retained_positive_events": 555,
+          "positive_event_retention": 0.10021668472372698,
+          "source_object_frames": 412,
+          "retained_object_frames": 211,
+          "object_frame_retention": 0.5121359223300971
+        }
+      }
+    },
+    {
+      "file": "train_089.npz",
+      "events": 405722,
+      "positive_events": 2681,
+      "positive_polarity_fraction": 0.5378337876674176,
+      "maximum_polarity_fraction": 0.5378337876674176,
+      "eligible": true,
+      "thresholds": {
+        "1.5": {
+          "retained_events": 90876,
+          "event_retention": 0.2239858819585825,
+          "retained_positive_events": 665,
+          "positive_event_retention": 0.24804177545691905,
+          "source_object_frames": 295,
+          "retained_object_frames": 240,
+          "object_frame_retention": 0.8135593220338984
+        },
+        "2": {
+          "retained_events": 70965,
+          "event_retention": 0.1749104066331133,
+          "retained_positive_events": 508,
+          "positive_event_retention": 0.18948153674002238,
+          "source_object_frames": 295,
+          "retained_object_frames": 223,
+          "object_frame_retention": 0.7559322033898305
+        },
+        "3": {
+          "retained_events": 24876,
+          "event_retention": 0.06131291869802476,
+          "retained_positive_events": 176,
+          "positive_event_retention": 0.06564714658709436,
+          "source_object_frames": 295,
+          "retained_object_frames": 132,
+          "object_frame_retention": 0.44745762711864406
+        }
+      }
+    },
+    {
+      "file": "train_090.npz",
+      "events": 422448,
+      "positive_events": 2585,
+      "positive_polarity_fraction": 0.5370814869522402,
+      "maximum_polarity_fraction": 0.5370814869522402,
+      "eligible": true,
+      "thresholds": {
+        "1.5": {
+          "retained_events": 95516,
+          "event_retention": 0.22610120062114153,
+          "retained_positive_events": 573,
+          "positive_event_retention": 0.22166344294003867,
+          "source_object_frames": 272,
+          "retained_object_frames": 219,
+          "object_frame_retention": 0.8051470588235294
+        },
+        "2": {
+          "retained_events": 74495,
+          "event_retention": 0.17634123016323902,
+          "retained_positive_events": 466,
+          "positive_event_retention": 0.18027079303675048,
+          "source_object_frames": 272,
+          "retained_object_frames": 205,
+          "object_frame_retention": 0.7536764705882353
+        },
+        "3": {
+          "retained_events": 26175,
+          "event_retention": 0.061960288603567774,
+          "retained_positive_events": 149,
+          "positive_event_retention": 0.057640232108317216,
+          "source_object_frames": 272,
+          "retained_object_frames": 107,
+          "object_frame_retention": 0.39338235294117646
+        }
+      }
+    },
+    {
+      "file": "train_091.npz",
+      "events": 423790,
+      "positive_events": 3299,
+      "positive_polarity_fraction": 0.5374100379905141,
+      "maximum_polarity_fraction": 0.5374100379905141,
+      "eligible": true,
+      "thresholds": {
+        "1.5": {
+          "retained_events": 95036,
+          "event_retention": 0.22425257792774722,
+          "retained_positive_events": 777,
+          "positive_event_retention": 0.23552591694452865,
+          "source_object_frames": 304,
+          "retained_object_frames": 251,
+          "object_frame_retention": 0.8256578947368421
+        },
+        "2": {
+          "retained_events": 74207,
+          "event_retention": 0.17510323509285258,
+          "retained_positive_events": 630,
+          "positive_event_retention": 0.19096695968475297,
+          "source_object_frames": 304,
+          "retained_object_frames": 239,
+          "object_frame_retention": 0.7861842105263158
+        },
+        "3": {
+          "retained_events": 26146,
+          "event_retention": 0.061695651147974234,
+          "retained_positive_events": 209,
+          "positive_event_retention": 0.06335253107002121,
+          "source_object_frames": 304,
+          "retained_object_frames": 123,
+          "object_frame_retention": 0.40460526315789475
+        }
+      }
+    },
+    {
+      "file": "train_092.npz",
+      "events": 595519,
+      "positive_events": 7192,
+      "positive_polarity_fraction": 0.5362179880070997,
+      "maximum_polarity_fraction": 0.5362179880070997,
+      "eligible": true,
+      "thresholds": {
+        "1.5": {
+          "retained_events": 132684,
+          "event_retention": 0.2228039743484255,
+          "retained_positive_events": 2417,
+          "positive_event_retention": 0.3360678531701891,
+          "source_object_frames": 308,
+          "retained_object_frames": 290,
+          "object_frame_retention": 0.9415584415584416
+        },
+        "2": {
+          "retained_events": 102783,
+          "event_retention": 0.17259398944450136,
+          "retained_positive_events": 1814,
+          "positive_event_retention": 0.2522246941045606,
+          "source_object_frames": 308,
+          "retained_object_frames": 283,
+          "object_frame_retention": 0.9188311688311688
+        },
+        "3": {
+          "retained_events": 37111,
+          "event_retention": 0.06231707132769903,
+          "retained_positive_events": 795,
+          "positive_event_retention": 0.11053948832035596,
+          "source_object_frames": 308,
+          "retained_object_frames": 199,
+          "object_frame_retention": 0.6461038961038961
+        }
+      }
+    },
+    {
+      "file": "train_093.npz",
+      "events": 620778,
+      "positive_events": 6137,
+      "positive_polarity_fraction": 0.5338704013350989,
+      "maximum_polarity_fraction": 0.5338704013350989,
+      "eligible": true,
+      "thresholds": {
+        "1.5": {
+          "retained_events": 138817,
+          "event_retention": 0.22361778284668593,
+          "retained_positive_events": 2102,
+          "positive_event_retention": 0.34251262832002605,
+          "source_object_frames": 292,
+          "retained_object_frames": 265,
+          "object_frame_retention": 0.9075342465753424
+        },
+        "2": {
+          "retained_events": 107631,
+          "event_retention": 0.17338082212965022,
+          "retained_positive_events": 1610,
+          "positive_event_retention": 0.26234316441257943,
+          "source_object_frames": 292,
+          "retained_object_frames": 254,
+          "object_frame_retention": 0.8698630136986302
+        },
+        "3": {
+          "retained_events": 38789,
+          "event_retention": 0.06248449526239654,
+          "retained_positive_events": 698,
+          "positive_event_retention": 0.1137363532670686,
+          "source_object_frames": 292,
+          "retained_object_frames": 171,
+          "object_frame_retention": 0.5856164383561644
+        }
+      }
+    },
+    {
+      "file": "train_094.npz",
+      "events": 614725,
+      "positive_events": 6475,
+      "positive_polarity_fraction": 0.5354931066737159,
+      "maximum_polarity_fraction": 0.5354931066737159,
+      "eligible": true,
+      "thresholds": {
+        "1.5": {
+          "retained_events": 137411,
+          "event_retention": 0.22353247387042988,
+          "retained_positive_events": 2919,
+          "positive_event_retention": 0.4508108108108108,
+          "source_object_frames": 153,
+          "retained_object_frames": 137,
+          "object_frame_retention": 0.8954248366013072
+        },
+        "2": {
+          "retained_events": 106553,
+          "event_retention": 0.17333441782911058,
+          "retained_positive_events": 2172,
+          "positive_event_retention": 0.3354440154440154,
+          "source_object_frames": 153,
+          "retained_object_frames": 132,
+          "object_frame_retention": 0.8627450980392157
+        },
+        "3": {
+          "retained_events": 38352,
+          "event_retention": 0.06238887307332547,
+          "retained_positive_events": 1156,
+          "positive_event_retention": 0.17853281853281852,
+          "source_object_frames": 153,
+          "retained_object_frames": 112,
+          "object_frame_retention": 0.7320261437908496
+        }
+      }
+    },
+    {
+      "file": "train_095.npz",
+      "events": 365730,
+      "positive_events": 2387,
+      "positive_polarity_fraction": 0.535988297377847,
+      "maximum_polarity_fraction": 0.535988297377847,
+      "eligible": true,
+      "thresholds": {
+        "1.5": {
+          "retained_events": 81609,
+          "event_retention": 0.2231400213272086,
+          "retained_positive_events": 918,
+          "positive_event_retention": 0.3845831587767072,
+          "source_object_frames": 72,
+          "retained_object_frames": 63,
+          "object_frame_retention": 0.875
+        },
+        "2": {
+          "retained_events": 63949,
+          "event_retention": 0.17485303365870997,
+          "retained_positive_events": 667,
+          "positive_event_retention": 0.2794302471721827,
+          "source_object_frames": 72,
+          "retained_object_frames": 60,
+          "object_frame_retention": 0.8333333333333334
+        },
+        "3": {
+          "retained_events": 23172,
+          "event_retention": 0.06335821507669592,
+          "retained_positive_events": 350,
+          "positive_event_retention": 0.1466275659824047,
+          "source_object_frames": 72,
+          "retained_object_frames": 57,
+          "object_frame_retention": 0.7916666666666666
+        }
+      }
+    },
+    {
+      "file": "train_096.npz",
+      "events": 625178,
+      "positive_events": 7011,
+      "positive_polarity_fraction": 0.5361944918087329,
+      "maximum_polarity_fraction": 0.5361944918087329,
+      "eligible": true,
+      "thresholds": {
+        "1.5": {
+          "retained_events": 139126,
+          "event_retention": 0.22253822111462657,
+          "retained_positive_events": 2987,
+          "positive_event_retention": 0.4260447867636571,
+          "source_object_frames": 206,
+          "retained_object_frames": 199,
+          "object_frame_retention": 0.9660194174757282
+        },
+        "2": {
+          "retained_events": 108125,
+          "event_retention": 0.1729507436282147,
+          "retained_positive_events": 2237,
+          "positive_event_retention": 0.3190700328055912,
+          "source_object_frames": 206,
+          "retained_object_frames": 199,
+          "object_frame_retention": 0.9660194174757282
+        },
+        "3": {
+          "retained_events": 38876,
+          "event_retention": 0.06218389002811999,
+          "retained_positive_events": 1145,
+          "positive_event_retention": 0.16331479104264726,
+          "source_object_frames": 206,
+          "retained_object_frames": 187,
+          "object_frame_retention": 0.9077669902912622
+        }
+      }
+    },
+    {
+      "file": "train_097.npz",
+      "events": 619767,
+      "positive_events": 6330,
+      "positive_polarity_fraction": 0.5345395931051508,
+      "maximum_polarity_fraction": 0.5345395931051508,
+      "eligible": true,
+      "thresholds": {
+        "1.5": {
+          "retained_events": 138096,
+          "event_retention": 0.2228192207716771,
+          "retained_positive_events": 2564,
+          "positive_event_retention": 0.4050552922590837,
+          "source_object_frames": 182,
+          "retained_object_frames": 177,
+          "object_frame_retention": 0.9725274725274725
+        },
+        "2": {
+          "retained_events": 106905,
+          "event_retention": 0.17249224305263106,
+          "retained_positive_events": 1946,
+          "positive_event_retention": 0.3074249605055292,
+          "source_object_frames": 182,
+          "retained_object_frames": 176,
+          "object_frame_retention": 0.967032967032967
+        },
+        "3": {
+          "retained_events": 38616,
+          "event_retention": 0.06230728644797157,
+          "retained_positive_events": 961,
+          "positive_event_retention": 0.1518167456556082,
+          "source_object_frames": 182,
+          "retained_object_frames": 161,
+          "object_frame_retention": 0.8846153846153846
+        }
+      }
+    },
+    {
+      "file": "train_098.npz",
+      "events": 624246,
+      "positive_events": 4557,
+      "positive_polarity_fraction": 0.5349157223274158,
+      "maximum_polarity_fraction": 0.5349157223274158,
+      "eligible": true,
+      "thresholds": {
+        "1.5": {
+          "retained_events": 138949,
+          "event_retention": 0.22258692887098996,
+          "retained_positive_events": 1796,
+          "positive_event_retention": 0.3941189378977397,
+          "source_object_frames": 176,
+          "retained_object_frames": 161,
+          "object_frame_retention": 0.9147727272727273
+        },
+        "2": {
+          "retained_events": 108169,
+          "event_retention": 0.17327944432162962,
+          "retained_positive_events": 1364,
+          "positive_event_retention": 0.29931972789115646,
+          "source_object_frames": 176,
+          "retained_object_frames": 160,
+          "object_frame_retention": 0.9090909090909091
+        },
+        "3": {
+          "retained_events": 38560,
+          "event_retention": 0.06177051995527404,
+          "retained_positive_events": 655,
+          "positive_event_retention": 0.14373491332016677,
+          "source_object_frames": 176,
+          "retained_object_frames": 154,
+          "object_frame_retention": 0.875
+        }
+      }
+    }
+  ]
+}

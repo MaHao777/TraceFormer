@@ -221,6 +221,83 @@ def false_alarm_pixel_loss(
     return torch.stack(frame_losses).mean()
 
 
+def object_frame_threshold_consistency_loss(
+    sparse_logits: torch.Tensor,
+    full_logits: torch.Tensor,
+    source_indices: torch.Tensor,
+    targets: torch.Tensor,
+    object_ids: torch.Tensor,
+    timestamps_ms: torch.Tensor,
+    *,
+    frame_ms: float = 50.0,
+) -> torch.Tensor:
+    """Match target-frame confidence across full and high-threshold views."""
+
+    if sparse_logits.ndim != 1 or full_logits.ndim != 1:
+        raise ValueError("full and sparse logits must be one-dimensional")
+    if source_indices.ndim != 1 or source_indices.dtype != torch.long:
+        raise TypeError("source_indices must be a one-dimensional int64 tensor")
+    if len(sparse_logits) != len(source_indices):
+        raise ValueError("sparse logits must align with source_indices")
+    if not (
+        targets.ndim == object_ids.ndim == timestamps_ms.ndim == 1
+        and len(targets) == len(object_ids) == len(timestamps_ms) == len(full_logits)
+    ):
+        raise ValueError("full-view annotations must align with full logits")
+    if len(source_indices) and (
+        bool(torch.any(source_indices < 0))
+        or bool(torch.any(source_indices >= len(full_logits)))
+    ):
+        raise ValueError("source_indices are outside full logits")
+    if frame_ms <= 0 or not math.isfinite(frame_ms):
+        raise ValueError("frame_ms must be positive and finite")
+    if len(source_indices) == 0:
+        return sparse_logits.sum() * 0.0
+
+    selected_targets = targets[source_indices]
+    selected_objects = object_ids[source_indices]
+    selected_timestamps = timestamps_ms[source_indices]
+    integer_time = torch.floor(selected_timestamps.to(dtype=torch.float64))
+    within_frame = torch.remainder(integer_time, frame_ms)
+    positive = (
+        (selected_targets > 0.5)
+        & (selected_objects > 0)
+        & (within_frame > 0)
+    )
+    if not bool(positive.any()):
+        return sparse_logits.sum() * 0.0
+
+    frame_indices = torch.div(
+        integer_time[positive], frame_ms, rounding_mode="floor"
+    ).long()
+    groups = torch.stack((selected_objects[positive].long(), frame_indices), dim=1)
+    _, inverse = torch.unique(groups, dim=0, return_inverse=True)
+    group_count = int(inverse.max().item()) + 1
+
+    def group_maximum(values: torch.Tensor) -> torch.Tensor:
+        maximum = torch.full(
+            (group_count,),
+            -torch.inf,
+            dtype=values.dtype,
+            device=values.device,
+        )
+        maximum.scatter_reduce_(
+            0,
+            inverse,
+            values[positive],
+            reduce="amax",
+            include_self=True,
+        )
+        return maximum
+
+    sparse_maximum = group_maximum(sparse_logits)
+    full_maximum = group_maximum(full_logits[source_indices].detach())
+    return F.smooth_l1_loss(
+        torch.sigmoid(sparse_maximum),
+        torch.sigmoid(full_maximum),
+    )
+
+
 class EventFocalDiceLoss(nn.Module):
     def __init__(
         self,
@@ -347,5 +424,6 @@ __all__ = [
     "binary_dice_loss",
     "binary_focal_loss",
     "false_alarm_pixel_loss",
+    "object_frame_threshold_consistency_loss",
     "object_frame_recall_loss",
 ]

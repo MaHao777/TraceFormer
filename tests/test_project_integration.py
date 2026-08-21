@@ -65,7 +65,9 @@ def test_largest_sequence_check_runs_forward_loss_backward_and_reports_memory() 
     assert "object_ids=object_ids[query_indices]" in contents
     assert 'full_logits=output["event_logits"]' in contents
     assert "full_coordinates=events[:, :2]" in contents
-    assert 'losses["total"].backward()' in contents
+    assert "combined_total.backward()" in contents
+    assert "simulate_high_threshold_events" in contents
+    assert "object_frame_threshold_consistency_loss" in contents
     assert '"focal"' in contents
     assert '"object_frame"' in contents
     assert '"false_alarm"' in contents

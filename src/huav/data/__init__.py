@@ -12,6 +12,11 @@ import numpy as np
 import torch
 
 from .dataset import LoadedEventSequence, NPZEventDataset
+from .trigger_threshold import (
+    HighThresholdView,
+    is_dense_balanced_event_stream,
+    simulate_high_threshold_events,
+)
 
 
 def _array(value: np.ndarray | torch.Tensor, name: str) -> np.ndarray:
@@ -211,6 +216,9 @@ __all__ = [
     "EventBatch",
     "EventSequence",
     "EventWindow",
+    "HighThresholdView",
     "LoadedEventSequence",
     "NPZEventDataset",
+    "is_dense_balanced_event_stream",
+    "simulate_high_threshold_events",
 ]
