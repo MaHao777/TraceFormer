@@ -34,7 +34,7 @@ class ModelConfig:
     token_dim: int = 32
     event_embed_dim: int = 16
     num_pool_queries: int = 4
-    num_cone_blocks: int = 5
+    num_cone_blocks: int = 6
     num_heads: int = 4
     mlp_ratio: float = 2.0
     dropout: float = 0.1

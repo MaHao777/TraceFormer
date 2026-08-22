@@ -8,7 +8,7 @@ model:
   token_dim: 64
   event_embed_dim: 64
   num_pool_queries: 4
-  num_cone_blocks: 5
+  num_cone_blocks: 6
   num_heads: 4
   mlp_ratio: 2.0
   dropout: 0.1

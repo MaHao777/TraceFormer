@@ -8,7 +8,7 @@ model:
   token_dim: 64
   event_embed_dim: 64
   num_pool_queries: 4
-  num_cone_blocks: 5
+  num_cone_blocks: 6
   num_heads: 4
   mlp_ratio: 2.0
   dropout: 0.1
@@ -26,7 +26,7 @@ dataset:
   duration_ms: 8000
 training:
   device: cuda
-  epochs: 18
+  epochs: 24
   learning_rate: 0.0007
   weight_decay: 0.0002
   seed: 37

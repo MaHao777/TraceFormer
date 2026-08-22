@@ -1,4 +1,4 @@
-"""Pre-LN residual blocks for iterative fixed-local-cone propagation."""
+"""Pre-LN local-cone blocks with full attention residuals across depth."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from torch import nn
 
 from huav.config import LocalConeConfig
 
+from .attention_residual import FullAttentionResidual
 from .cone_attention import AttentionStats, LocalConeAttention
 
 
@@ -17,6 +18,14 @@ class LocalConeEncoderOutput:
     token_features: torch.Tensor
     past_attention_stats: list[AttentionStats] | None
     future_attention_stats: list[AttentionStats] | None
+
+
+@dataclass(frozen=True)
+class LocalConeAttentionBlockOutput:
+    attention_delta: torch.Tensor
+    ffn_delta: torch.Tensor
+    past_attention_stats: AttentionStats | None
+    future_attention_stats: AttentionStats | None
 
 
 class LocalConeAttentionBlock(nn.Module):
@@ -36,6 +45,7 @@ class LocalConeAttentionBlock(nn.Module):
     ) -> None:
         super().__init__()
         hidden_dim = max(1, int(round(token_dim * mlp_ratio)))
+        self.attention_residual = FullAttentionResidual(token_dim)
         self.attention_norm = nn.LayerNorm(token_dim)
         self.attention = LocalConeAttention(
             token_dim=token_dim,
@@ -47,6 +57,7 @@ class LocalConeAttentionBlock(nn.Module):
             debug_attention_stats=debug_attention_stats,
         )
         self.attn_scale = nn.Parameter(torch.ones(1))
+        self.ffn_residual = FullAttentionResidual(token_dim)
         self.ffn_norm = nn.LayerNorm(token_dim)
         self.ffn = nn.Sequential(
             nn.Linear(token_dim, hidden_dim),
@@ -58,25 +69,29 @@ class LocalConeAttentionBlock(nn.Module):
 
     def forward(
         self,
-        tokens: torch.Tensor,
+        sources: tuple[torch.Tensor, ...],
         token_coords: torch.Tensor,
         token_batch_indices: torch.Tensor,
-    ) -> tuple[torch.Tensor, AttentionStats | None, AttentionStats | None]:
+    ) -> LocalConeAttentionBlockOutput:
+        residual_dtype = sources[0].dtype
+        attention_input = self.attention_residual(sources)
         attention = self.attention(
-            self.attention_norm(tokens),
+            self.attention_norm(attention_input),
             token_coords,
             token_batch_indices,
         )
-        attended_tokens = tokens + self.attn_scale * self.residual_dropout(
+        attention_delta = self.attn_scale * self.residual_dropout(
             attention.features
         )
-        output_tokens = attended_tokens + self.residual_dropout(
-            self.ffn(self.ffn_norm(attended_tokens))
-        )
-        return (
-            output_tokens,
-            attention.past_attention_stats,
-            attention.future_attention_stats,
+        attention_delta = attention_delta.to(dtype=residual_dtype)
+        ffn_input = self.ffn_residual((*sources, attention_delta))
+        ffn_delta = self.residual_dropout(self.ffn(self.ffn_norm(ffn_input)))
+        ffn_delta = ffn_delta.to(dtype=residual_dtype)
+        return LocalConeAttentionBlockOutput(
+            attention_delta=attention_delta,
+            ffn_delta=ffn_delta,
+            past_attention_stats=attention.past_attention_stats,
+            future_attention_stats=attention.future_attention_stats,
         )
 
 
@@ -113,6 +128,7 @@ class LocalConeEncoder(nn.Module):
                 for _ in range(num_cone_blocks)
             ]
         )
+        self.output_residual = FullAttentionResidual(token_dim)
         self.final_norm = nn.LayerNorm(token_dim)
 
     def forward(
@@ -123,17 +139,25 @@ class LocalConeEncoder(nn.Module):
     ) -> LocalConeEncoderOutput:
         past_stats: list[AttentionStats] = []
         future_stats: list[AttentionStats] = []
+        sources = (tokens,)
         for block in self.blocks:
-            tokens, block_past, block_future = block(
-                tokens, token_coords, token_batch_indices
+            block_output = block(sources, token_coords, token_batch_indices)
+            sources = (
+                *sources,
+                block_output.attention_delta,
+                block_output.ffn_delta,
             )
             if self.debug_attention_stats:
-                if block_past is None or block_future is None:
+                if (
+                    block_output.past_attention_stats is None
+                    or block_output.future_attention_stats is None
+                ):
                     raise RuntimeError("debug attention statistics were not returned")
-                past_stats.append(block_past)
-                future_stats.append(block_future)
+                past_stats.append(block_output.past_attention_stats)
+                future_stats.append(block_output.future_attention_stats)
+        output_tokens = self.output_residual(sources)
         return LocalConeEncoderOutput(
-            token_features=self.final_norm(tokens),
+            token_features=self.final_norm(output_tokens),
             past_attention_stats=past_stats if self.debug_attention_stats else None,
             future_attention_stats=(
                 future_stats if self.debug_attention_stats else None
@@ -143,6 +167,7 @@ class LocalConeEncoder(nn.Module):
 
 __all__ = [
     "LocalConeAttentionBlock",
+    "LocalConeAttentionBlockOutput",
     "LocalConeEncoder",
     "LocalConeEncoderOutput",
 ]

@@ -51,7 +51,7 @@ python -m huav.cli.evaluate \
 bash scripts/autodl_train.sh full
 ```
 
-全量配置从头训练 18 epoch，使余弦学习率在完整训练区间内连续衰减；第 6 epoch 与后续 12 epoch 的结果都保存在同一个 `history.json` 中，最佳 checkpoint 按验证集官网总分选择。全量训练必须覆盖 99 个训练文件和 24 个验证文件。完成后使用该轮 `config.yaml` 与 `best.pt` 独立复评，并比较 SHA-256：
+全量配置从头训练 24 epoch，使新增 Full Attention Residuals 参数有完整的拟合窗口，并让余弦学习率在完整训练区间内连续衰减。全部 epoch 记录保存在同一个 `history.json` 中，最佳 checkpoint 按验证集官网总分选择。全量训练必须覆盖 99 个训练文件和 24 个验证文件。完成后使用该轮 `config.yaml` 与 `best.pt` 独立复评，并比较 SHA-256：
 
 ```bash
 RUN_DIR=outputs/<full-run>

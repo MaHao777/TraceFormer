@@ -77,7 +77,7 @@ def test_base_yaml_exposes_cone_training_and_loss_configuration() -> None:
     assert config.model.token_dim == 32
     assert config.model.event_embed_dim == 16
     assert config.model.num_pool_queries == 4
-    assert config.model.num_cone_blocks == 5
+    assert config.model.num_cone_blocks == 6
     assert config.model.num_heads == 4
     assert config.model.local_cone == LocalConeConfig(
         base_radius=1.0,
@@ -119,13 +119,13 @@ def test_score_optimized_yaml_exposes_dense_domain_training_configuration() -> N
     assert config.model.token_dim == 64
     assert config.model.event_embed_dim == 64
     assert config.model.num_pool_queries == 4
-    assert config.model.num_cone_blocks == 5
+    assert config.model.num_cone_blocks == 6
     assert config.model.local_cone == LocalConeConfig(
         base_radius=1.0,
         slope=1.0,
         max_neighbors_per_time_slice=8,
     )
-    assert config.training.epochs == 18
+    assert config.training.epochs == 24
     assert config.training.hard_negative_fraction == 0.5
     assert config.training.dense_sequence_event_threshold == 300000
     assert config.training.dense_sequence_background_polarity_max == 0.65
@@ -192,7 +192,7 @@ def test_autodl_configs_preserve_score_model_and_select_cuda_bfloat16() -> None:
         assert config.model.token_dim == 64
         assert config.model.event_embed_dim == 64
         assert config.model.num_pool_queries == 4
-        assert config.model.num_cone_blocks == 5
+        assert config.model.num_cone_blocks == 6
         assert config.model.local_cone == LocalConeConfig(
             base_radius=1.0,
             slope=1.0,
@@ -210,7 +210,7 @@ def test_autodl_configs_preserve_score_model_and_select_cuda_bfloat16() -> None:
         assert config.loss.false_alarm_topk_per_frame == 32
     assert smoke.training.max_train_files == 4
     assert smoke.training.max_val_files == 2
-    assert full.training.epochs == 18
+    assert full.training.epochs == 24
     assert full.training.max_train_files is None
     assert full.training.max_val_files is None
 
