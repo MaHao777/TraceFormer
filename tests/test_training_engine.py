@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -25,6 +26,7 @@ from huav.training.engine import (
     _autocast_dtype,
     _dense_sequence_loss_weight,
     _grad_scaler_is_enabled,
+    _restore_rng_state,
     _select_competition_threshold,
     _threshold_augmentation_weight,
     _threshold_ratio_for_epoch,
@@ -424,6 +426,95 @@ def test_resumed_training_records_validation_loss() -> None:
         assert (resumed_dir / "training_curves.png").read_bytes().startswith(
             b"\x89PNG\r\n\x1a\n"
         )
+
+
+def test_exact_training_state_branch_matches_uninterrupted_cpu_run() -> None:
+    with TemporaryDirectory(dir=Path.cwd()) as directory:
+        temporary_root = Path(directory)
+        data_root = temporary_root / "data"
+        (data_root / "train").mkdir(parents=True)
+        (data_root / "val").mkdir()
+        _write_sequence(data_root / "train" / "train_000.npz", 0)
+        _write_sequence(data_root / "val" / "val_000.npz", 1)
+        output_root = temporary_root / "outputs"
+        base = _config(data_root, output_root)
+        direct_config = replace(
+            base,
+            training=replace(
+                base.training,
+                epochs=2,
+                lr_schedule="constant",
+                save_training_state_interval=1,
+            ),
+        ).validate()
+        prefix_config = replace(
+            direct_config,
+            training=replace(direct_config.training, epochs=1),
+        ).validate()
+
+        direct = run_training(direct_config, output_dir=output_root / "direct")
+        prefix = run_training(prefix_config, output_dir=output_root / "prefix")
+        branched = run_training(
+            direct_config,
+            output_dir=output_root / "branched",
+            resume_state_path=Path(prefix["run_dir"]) / "training_state.pt",
+        )
+
+        direct_dir = Path(direct["run_dir"])
+        branched_dir = Path(branched["run_dir"])
+        direct_history = json.loads(
+            (direct_dir / "history.json").read_text(encoding="utf-8")
+        )
+        branched_history = json.loads(
+            (branched_dir / "history.json").read_text(encoding="utf-8")
+        )
+        for history in (direct_history, branched_history):
+            for record in history:
+                record["optimization"].pop("elapsed_seconds")
+        assert branched_history == direct_history
+        assert direct_history[0]["learning_rate_schedule"] == "constant"
+        assert direct_history[0]["learning_phase"] == "fast"
+        assert direct_history[0]["optimization"]["nonfinite_steps"] == 0
+        direct_checkpoint = torch.load(
+            direct_dir / "best.pt", map_location="cpu", weights_only=True
+        )
+        branched_checkpoint = torch.load(
+            branched_dir / "best.pt", map_location="cpu", weights_only=True
+        )
+        for name, tensor in direct_checkpoint["model_state"].items():
+            assert torch.equal(tensor, branched_checkpoint["model_state"][name])
+        assert (branched_dir / "training_states" / "epoch_002.pt").is_file()
+
+
+def test_restore_rng_state_keeps_serialized_generator_states_on_cpu(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cuda_states: list[torch.Tensor] = []
+    monkeypatch.setattr(
+        torch.cuda,
+        "set_rng_state_all",
+        lambda states: cuda_states.extend(states),
+    )
+    generator_state = torch.Generator().manual_seed(37).get_state()
+    state = {
+        "python_rng_state": random.getstate(),
+        "numpy_rng_state": np.random.get_state(),
+        "torch_rng_state": torch.get_rng_state(),
+        "cuda_rng_state": [generator_state.clone()],
+        "order_generator_state": generator_state.clone(),
+        "sampling_generator_state": generator_state.clone(),
+    }
+
+    _restore_rng_state(
+        state,
+        torch_device=torch.device("cuda"),
+        order_generator=torch.Generator(),
+        sampling_generator=torch.Generator(),
+    )
+
+    assert len(cuda_states) == 1
+    assert cuda_states[0].device.type == "cpu"
+    assert cuda_states[0].dtype == torch.uint8
 
 
 def test_failed_resume_keeps_readable_checkpoint_source_epoch(

@@ -38,6 +38,8 @@ def test_base_yaml_loads_with_phase_one_defaults() -> None:
 def test_score_config_enables_physical_threshold_augmentation() -> None:
     config = load_config(Path("configs/huav_score_optimized.yaml"))
 
+    assert config.training.lr_schedule == "legacy_cosine"
+    assert config.training.fast_learning_epochs == 0
     assert config.threshold_augmentation == ThresholdAugmentationConfig(
         enabled=True,
         min_events=300000,
@@ -49,6 +51,41 @@ def test_score_config_enables_physical_threshold_augmentation() -> None:
         consistency_loss_weight=0.1,
     )
 
+
+def test_learning_rate_strategy_validation() -> None:
+    base = HUAVConfig.default()
+    valid = replace(
+        base,
+        training=replace(
+            base.training,
+            epochs=24,
+            lr_schedule="constant_then_cosine",
+            fast_learning_epochs=6,
+            fixed_learning_rate_ratio=0.2,
+            plateau_factor=0.5,
+            plateau_patience=2,
+            plateau_min_delta=0.001,
+            save_training_state_interval=3,
+        ),
+    )
+    valid.validate()
+
+    for field, value in (
+        ("lr_schedule", "unknown"),
+        ("fast_learning_epochs", 24),
+        ("fixed_learning_rate_ratio", 0.0),
+        ("plateau_factor", 1.0),
+        ("plateau_patience", 0),
+        ("plateau_min_delta", -0.1),
+        ("save_training_state_interval", -1),
+    ):
+        raises(
+            ValueError,
+            lambda field=field, value=value: replace(
+                base,
+                training=replace(base.training, **{field: value}),
+            ).validate(),
+        )
 
 def test_threshold_augmentation_rejects_duplicate_or_nonphysical_ratios() -> None:
     base = HUAVConfig.default()

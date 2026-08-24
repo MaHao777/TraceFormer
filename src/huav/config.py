@@ -69,6 +69,13 @@ class TrainingConfig:
     dense_sequence_background_polarity_max: float = 0.65
     dense_sequence_weight: float = 1.0
     min_learning_rate_ratio: float = 1.0
+    lr_schedule: str = "legacy_cosine"
+    fast_learning_epochs: int = 0
+    fixed_learning_rate_ratio: float = 0.2
+    plateau_factor: float = 0.5
+    plateau_patience: int = 2
+    plateau_min_delta: float = 0.001
+    save_training_state_interval: int = 0
     num_threads: int = 14
     output_root: str | Path = "outputs"
     gradient_clip_norm: float = 1.0
@@ -240,6 +247,47 @@ class HUAVConfig:
         )
         if not 0 <= minimum_lr_ratio <= 1:
             raise ValueError("min_learning_rate_ratio must be in [0,1]")
+        schedules = {
+            "legacy_cosine",
+            "constant",
+            "constant_then_cosine",
+            "constant_then_exponential",
+            "constant_then_fixed",
+            "constant_then_plateau",
+        }
+        if self.training.lr_schedule not in schedules:
+            raise ValueError(
+                "lr_schedule must be one of " + ", ".join(sorted(schedules))
+            )
+        fast_epochs = self.training.fast_learning_epochs
+        if (
+            isinstance(fast_epochs, bool)
+            or not isinstance(fast_epochs, Integral)
+            or fast_epochs < 0
+            or fast_epochs >= self.training.epochs
+        ):
+            raise ValueError("fast_learning_epochs must be in [0, epochs)")
+        fixed_ratio = _finite_real(
+            self.training.fixed_learning_rate_ratio,
+            "fixed_learning_rate_ratio",
+        )
+        if not 0 < fixed_ratio <= 1:
+            raise ValueError("fixed_learning_rate_ratio must be in (0,1]")
+        plateau_factor = _finite_real(
+            self.training.plateau_factor, "plateau_factor"
+        )
+        if not 0 < plateau_factor < 1:
+            raise ValueError("plateau_factor must be in (0,1)")
+        _positive_integer(self.training.plateau_patience, "plateau_patience")
+        if _finite_real(self.training.plateau_min_delta, "plateau_min_delta") < 0:
+            raise ValueError("plateau_min_delta must be non-negative")
+        state_interval = self.training.save_training_state_interval
+        if (
+            isinstance(state_interval, bool)
+            or not isinstance(state_interval, Integral)
+            or state_interval < 0
+        ):
+            raise ValueError("save_training_state_interval must be non-negative")
         _positive_integer(self.training.num_threads, "num_threads")
         _path_value(self.training.output_root, "output_root")
         if _finite_real(self.training.gradient_clip_norm, "gradient_clip_norm") <= 0:

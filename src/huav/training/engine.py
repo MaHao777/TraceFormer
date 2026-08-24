@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import math
 import random
 import sys
+import time
 from dataclasses import asdict
 from hashlib import sha256
 from pathlib import Path
@@ -40,6 +42,7 @@ from huav.models import SpatioTemporalConeDetector
 from huav.visualization import render_training_curves
 
 from .losses import EventFocalDiceLoss, object_frame_threshold_consistency_loss
+from .lr_schedules import LearningRateController
 from .metrics import (
     EventMetricAccumulator,
     EVUAVMetricAccumulator,
@@ -49,6 +52,7 @@ from .runtime import prepare_device
 from .sampling import sample_event_indices
 
 CHECKPOINT_SCHEMA_VERSION = 7
+TRAINING_STATE_SCHEMA_VERSION = 1
 
 
 def _update_training_curves(
@@ -590,12 +594,119 @@ def _manifest_identity_digest(manifest: dict[str, Any]) -> str:
     return sha256(encoded).hexdigest()
 
 
+def _branch_contract(configuration: dict[str, Any]) -> dict[str, Any]:
+    """Return fields that must remain identical across an exact-state branch."""
+    contract = json.loads(json.dumps(configuration))
+    training = contract["training"]
+    for name in (
+        "device",
+        "epochs",
+        "output_root",
+        "lr_schedule",
+        "fast_learning_epochs",
+        "fixed_learning_rate_ratio",
+        "min_learning_rate_ratio",
+        "plateau_factor",
+        "plateau_patience",
+        "plateau_min_delta",
+        "save_training_state_interval",
+    ):
+        training.pop(name, None)
+    return contract
+
+
+def _restore_rng_state(
+    state: dict[str, Any],
+    *,
+    torch_device: torch.device,
+    order_generator: torch.Generator,
+    sampling_generator: torch.Generator,
+) -> None:
+    random.setstate(state["python_rng_state"])
+    np.random.set_state(state["numpy_rng_state"])
+    torch.set_rng_state(state["torch_rng_state"].to(device="cpu", dtype=torch.uint8))
+    if torch_device.type == "cuda" and state.get("cuda_rng_state") is not None:
+        torch.cuda.set_rng_state_all(
+            [
+                value.to(device="cpu", dtype=torch.uint8)
+                for value in state["cuda_rng_state"]
+            ]
+        )
+    order_generator.set_state(
+        state["order_generator_state"].to(device="cpu", dtype=torch.uint8)
+    )
+    sampling_generator.set_state(
+        state["sampling_generator_state"].to(device="cpu", dtype=torch.uint8)
+    )
+
+
+def _training_state_payload(
+    *,
+    config: dict[str, Any],
+    manifest_digest: str,
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    controller: LearningRateController,
+    epoch: int,
+    history: list[dict[str, Any]],
+    augmentation_history: list[dict[str, Any]],
+    best_score: float,
+    best_metrics: dict[str, Any],
+    best_checkpoint: dict[str, Any],
+    order_generator: torch.Generator,
+    sampling_generator: torch.Generator,
+    torch_device: torch.device,
+) -> dict[str, Any]:
+    return {
+        "training_state_schema_version": TRAINING_STATE_SCHEMA_VERSION,
+        "checkpoint_schema_version": CHECKPOINT_SCHEMA_VERSION,
+        "branch_contract": _branch_contract(config),
+        "dataset_manifest_sha256": manifest_digest,
+        "source_schedule": config["training"]["lr_schedule"],
+        "model_state": model.state_dict(),
+        "optimizer_state": optimizer.state_dict(),
+        "controller_state": controller.state_dict(),
+        "epoch": epoch,
+        "history": history,
+        "threshold_augmentation_history": augmentation_history,
+        "best_score": best_score,
+        "best_metrics": best_metrics,
+        "best_checkpoint": best_checkpoint,
+        "python_rng_state": random.getstate(),
+        "numpy_rng_state": np.random.get_state(),
+        "torch_rng_state": torch.get_rng_state(),
+        "cuda_rng_state": (
+            torch.cuda.get_rng_state_all() if torch_device.type == "cuda" else None
+        ),
+        "order_generator_state": order_generator.get_state(),
+        "sampling_generator_state": sampling_generator.get_state(),
+    }
+
+
+def _parameter_snapshot(model: torch.nn.Module) -> list[torch.Tensor]:
+    return [parameter.detach().clone() for parameter in model.parameters()]
+
+
+def _relative_parameter_displacement(
+    model: torch.nn.Module, before: list[torch.Tensor]
+) -> float:
+    difference = 0.0
+    baseline = 0.0
+    for parameter, original in zip(model.parameters(), before, strict=True):
+        current = parameter.detach().float()
+        original_float = original.float()
+        difference += float(torch.sum((current - original_float) ** 2).item())
+        baseline += float(torch.sum(original_float**2).item())
+    return math.sqrt(difference) / max(math.sqrt(baseline), 1e-12)
+
+
 def _run_training_impl(
     config: HUAVConfig,
     *,
     output_dir: str | Path,
     device: str | None = None,
     progress: bool = False,
+    resume_state_path: str | Path | None = None,
 ) -> dict[str, Any]:
     config.validate()
     device_name = device or config.training.device
@@ -614,6 +725,7 @@ def _run_training_impl(
     train_dataset = _dataset(config, "train")
     validation_dataset = _dataset(config, "val")
     manifest = _dataset_manifest(train_dataset, validation_dataset)
+    manifest_digest = _manifest_identity_digest(manifest)
     validation_manifest = {
         "schema": manifest["schema"],
         "files": [
@@ -640,14 +752,7 @@ def _run_training_impl(
         lr=config.training.learning_rate,
         weight_decay=config.training.weight_decay,
     )
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer,
-        T_max=max(1, config.training.epochs),
-        eta_min=(
-            config.training.learning_rate
-            * config.training.min_learning_rate_ratio
-        ),
-    )
+    controller = LearningRateController(config.training)
     order_generator = torch.Generator().manual_seed(config.training.seed)
     sampling_generator = torch.Generator(device=torch_device.type).manual_seed(
         config.training.seed
@@ -660,14 +765,52 @@ def _run_training_impl(
     threshold_augmentation_history: list[dict[str, Any]] = []
     best_score = -1.0
     best_metrics: dict[str, Any] | None = None
+    best_checkpoint: dict[str, Any] | None = None
+    start_epoch = 0
+    if resume_state_path is not None:
+        state = torch.load(
+            Path(resume_state_path), map_location=torch_device, weights_only=False
+        )
+        if state.get("training_state_schema_version") != TRAINING_STATE_SCHEMA_VERSION:
+            raise ValueError("unsupported training state schema version")
+        if state.get("branch_contract") != _branch_contract(configuration):
+            raise ValueError("training state branch contract does not match configuration")
+        if state.get("dataset_manifest_sha256") != manifest_digest:
+            raise ValueError("training state dataset manifest does not match current data")
+        model.load_state_dict(state["model_state"], strict=True)
+        optimizer.load_state_dict(state["optimizer_state"])
+        history = list(state["history"])
+        threshold_augmentation_history = list(
+            state["threshold_augmentation_history"]
+        )
+        best_score = float(state["best_score"])
+        best_metrics = dict(state["best_metrics"])
+        best_checkpoint = dict(state["best_checkpoint"])
+        start_epoch = int(state["epoch"])
+        if start_epoch >= config.training.epochs:
+            raise ValueError("training state epoch must be less than configured epochs")
+        if state.get("source_schedule") == config.training.lr_schedule:
+            controller.load_state_dict(state["controller_state"])
+        _restore_rng_state(
+            state,
+            torch_device=torch_device,
+            order_generator=order_generator,
+            sampling_generator=sampling_generator,
+        )
+        _atomic_torch_save(best_checkpoint, run_dir / "best.pt")
+        _write_json(run_dir / "metrics.json", best_metrics)
+        _atomic_write_text(run_dir / "metrics.md", _metrics_markdown(best_metrics))
 
     print(
         f"HUAV training on {torch_device.type}: {len(train_dataset)} train files, "
         f"{len(validation_dataset)} validation files, {config.training.epochs} epochs",
         flush=True,
     )
-    for epoch in range(config.training.epochs):
+    for epoch in range(start_epoch, config.training.epochs):
         epoch_number = epoch + 1
+        learning_rate = controller.rate_for_epoch(epoch_number)
+        for parameter_group in optimizer.param_groups:
+            parameter_group["lr"] = learning_rate
         augmentation_weight = _threshold_augmentation_weight(config, epoch_number)
         augmentation_report = _new_threshold_epoch_report(augmentation_weight)
         model.train()
@@ -681,7 +824,9 @@ def _run_training_impl(
             "threshold_consistency": 0.0,
             "augmentation_weight": 0.0,
         }
-        learning_rate = float(optimizer.param_groups[0]["lr"])
+        epoch_started = time.perf_counter()
+        epoch_parameters = _parameter_snapshot(model)
+        gradient_norms: list[float] = []
         order = torch.randperm(
             len(train_dataset), generator=order_generator
         ).tolist()
@@ -824,19 +969,33 @@ def _run_training_impl(
                 losses["augmentation_weight"] = combined_total.new_tensor(
                     augmentation_weight if threshold_view is not None else 0.0
                 )
+            if not torch.isfinite(losses["total"]):
+                raise RuntimeError(
+                    f"non-finite training loss at epoch {epoch_number}, step {step + 1}"
+                )
             if amp_enabled:
                 scaler.scale(losses["total"]).backward()
                 scaler.unscale_(optimizer)
-                clip_grad_norm_(
+                gradient_norm = clip_grad_norm_(
                     model.parameters(), config.training.gradient_clip_norm
                 )
+                if not torch.isfinite(gradient_norm):
+                    raise RuntimeError(
+                        f"non-finite gradient norm at epoch {epoch_number}, step {step + 1}"
+                    )
+                gradient_norms.append(float(gradient_norm.item()))
                 scaler.step(optimizer)
                 scaler.update()
             else:
                 losses["total"].backward()
-                clip_grad_norm_(
+                gradient_norm = clip_grad_norm_(
                     model.parameters(), config.training.gradient_clip_norm
                 )
+                if not torch.isfinite(gradient_norm):
+                    raise RuntimeError(
+                        f"non-finite gradient norm at epoch {epoch_number}, step {step + 1}"
+                    )
+                gradient_norms.append(float(gradient_norm.item()))
                 optimizer.step()
             for name in totals:
                 totals[name] += float(losses[name].detach().item())
@@ -866,9 +1025,32 @@ def _run_training_impl(
         )
         validation_loss = validation_result.pop("loss")
         metrics = validation_result
+        sorted_gradient_norms = sorted(gradient_norms)
+        p95_index = max(0, math.ceil(0.95 * len(sorted_gradient_norms)) - 1)
+        optimization = {
+            "gradient_norm_mean": float(sum(gradient_norms) / len(gradient_norms)),
+            "gradient_norm_p95": float(sorted_gradient_norms[p95_index]),
+            "gradient_norm_max": float(max(gradient_norms)),
+            "gradient_clipped_fraction": float(
+                sum(
+                    value > config.training.gradient_clip_norm
+                    for value in gradient_norms
+                )
+                / len(gradient_norms)
+            ),
+            "relative_parameter_displacement": _relative_parameter_displacement(
+                model, epoch_parameters
+            ),
+            "optimizer_steps": len(gradient_norms),
+            "nonfinite_steps": 0,
+            "elapsed_seconds": float(time.perf_counter() - epoch_started),
+        }
         epoch_record = {
             "epoch": epoch + 1,
             "learning_rate": learning_rate,
+            "learning_rate_schedule": config.training.lr_schedule,
+            "learning_phase": controller.phase(epoch_number),
+            "optimization": optimization,
             "train_loss": totals,
             "validation_loss": validation_loss,
             "validation": metrics,
@@ -895,23 +1077,51 @@ def _run_training_impl(
         if score > best_score:
             best_score = score
             best_metrics = metrics
-            _atomic_torch_save(
-                {
+            best_checkpoint = {
                     "schema_version": CHECKPOINT_SCHEMA_VERSION,
-                    "model_state": model.state_dict(),
+                    "model_state": {
+                        name: value.detach().clone()
+                        for name, value in model.state_dict().items()
+                    },
                     "epoch": epoch + 1,
                     "decision_threshold": float(metrics["threshold"]),
                     "model_config": configuration["model"],
                     "resolution": configuration["resolution"],
                     "validation_manifest_sha256": validation_manifest_digest,
-                },
-                run_dir / "best.pt",
-            )
+                }
+            _atomic_torch_save(best_checkpoint, run_dir / "best.pt")
             _write_json(run_dir / "metrics.json", best_metrics)
             _atomic_write_text(
                 run_dir / "metrics.md", _metrics_markdown(best_metrics)
             )
-        scheduler.step()
+        controller.update(score, epoch=epoch_number)
+        state_interval = config.training.save_training_state_interval
+        if state_interval:
+            assert best_metrics is not None
+            assert best_checkpoint is not None
+            training_state = _training_state_payload(
+                config=configuration,
+                manifest_digest=manifest_digest,
+                model=model,
+                optimizer=optimizer,
+                controller=controller,
+                epoch=epoch_number,
+                history=history,
+                augmentation_history=threshold_augmentation_history,
+                best_score=best_score,
+                best_metrics=best_metrics,
+                best_checkpoint=best_checkpoint,
+                order_generator=order_generator,
+                sampling_generator=sampling_generator,
+                torch_device=torch_device,
+            )
+            _atomic_torch_save(training_state, run_dir / "training_state.pt")
+            if epoch_number % state_interval == 0:
+                state_dir = run_dir / "training_states"
+                state_dir.mkdir(exist_ok=True)
+                _atomic_torch_save(
+                    training_state, state_dir / f"epoch_{epoch_number:03d}.pt"
+                )
 
     if best_metrics is None:
         raise RuntimeError("training completed without validation metrics")
@@ -930,6 +1140,11 @@ def _run_training_impl(
         "best_score": best_score,
         "best_iou": float(best_metrics["competition"]["iou"]),
         "metrics": best_metrics,
+        "resumed_from_training_state": (
+            str(Path(resume_state_path).resolve())
+            if resume_state_path is not None
+            else None
+        ),
     }
     _write_json(run_dir / "summary.json", summary)
     return summary
@@ -943,6 +1158,7 @@ def run_training(
     progress: bool = False,
     note: str | None = None,
     config_source: str | Path | None = None,
+    resume_state_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Train while maintaining the run experiment record and output index."""
     config.validate()
@@ -959,10 +1175,20 @@ def run_training(
     record_run_started(
         run_dir,
         device=device_name,
-        mode="fresh",
+        mode="resume" if resume_state_path is not None else "fresh",
         stage=stage,
         note=note,
         config_source=config_source,
+        resumed_from=resume_state_path,
+        source_epoch=(
+            int(
+                torch.load(
+                    Path(resume_state_path), map_location="cpu", weights_only=False
+                )["epoch"]
+            )
+            if resume_state_path is not None
+            else None
+        ),
     )
     try:
         summary = _run_training_impl(
@@ -970,6 +1196,7 @@ def run_training(
             output_dir=run_dir,
             device=device,
             progress=progress,
+            resume_state_path=resume_state_path,
         )
     except BaseException as error:
         try:

@@ -32,12 +32,20 @@ def main() -> None:
         "--note",
         help="short description of the main change in this experiment",
     )
-    parser.add_argument(
+    resume_group = parser.add_mutually_exclusive_group()
+    resume_group.add_argument(
         "--resume",
         type=str,
         default=None,
         metavar="BEST_PT",
         help="resume training from a best.pt checkpoint",
+    )
+    resume_group.add_argument(
+        "--resume-state",
+        type=str,
+        default=None,
+        metavar="TRAINING_STATE_PT",
+        help="branch from an exact optimizer/RNG training state",
     )
     parser.add_argument(
         "--additional-epochs",
@@ -73,6 +81,7 @@ def main() -> None:
                 progress=not arguments.quiet,
                 note=arguments.note,
                 config_source=arguments.config,
+                resume_state_path=arguments.resume_state,
             )
     except (OSError, RuntimeError, ValueError) as error:
         parser.error(str(error))
