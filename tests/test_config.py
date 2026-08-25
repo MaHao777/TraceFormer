@@ -114,6 +114,11 @@ def test_base_yaml_exposes_cone_training_and_loss_configuration() -> None:
     assert config.model.token_dim == 32
     assert config.model.event_embed_dim == 16
     assert config.model.num_pool_queries == 4
+    assert config.model.embedding_mode == "event_attention"
+    assert config.model.voxel_size_x == 2
+    assert config.model.voxel_size_y == 2
+    assert config.model.voxel_duration_ms == 25.0
+    assert config.model.use_block_statistics is True
     assert config.model.num_cone_blocks == 6
     assert config.model.num_heads == 4
     assert config.model.local_cone == LocalConeConfig(
@@ -186,6 +191,9 @@ def test_smoke_configs_use_a_separate_output_root() -> None:
         "configs/huav_cpu_smoke.yaml",
         "configs/huav_score_optimized_smoke.yaml",
         "configs/huav_score_optimized_autodl_smoke.yaml",
+        "configs/huav_embedding_a_autodl_smoke.yaml",
+        "configs/huav_embedding_b_autodl_smoke.yaml",
+        "configs/huav_embedding_c_autodl_smoke.yaml",
     ):
         assert Path(load_config(Path(path)).training.output_root) == expected_smoke_root
 
@@ -193,6 +201,9 @@ def test_smoke_configs_use_a_separate_output_root() -> None:
         "configs/huav_base.yaml",
         "configs/huav_score_optimized.yaml",
         "configs/huav_score_optimized_autodl.yaml",
+        "configs/huav_embedding_a_autodl.yaml",
+        "configs/huav_embedding_b_autodl.yaml",
+        "configs/huav_embedding_c_autodl.yaml",
     ):
         assert Path(load_config(Path(path)).training.output_root) == expected_full_root
 
@@ -207,6 +218,42 @@ def test_local_cone_depth_supports_requested_ablation_values() -> None:
         ).validate()
 
         assert configured.model.num_cone_blocks == depth
+
+
+def test_embedding_ablation_configs_only_change_the_planned_model_fields() -> None:
+    configs = {
+        arm: load_config(Path(f"configs/huav_embedding_{arm}_autodl.yaml"))
+        for arm in "abc"
+    }
+
+    assert configs["a"].model.embedding_mode == "event_attention"
+    assert configs["b"].model.embedding_mode == "voxel_attention"
+    assert configs["c"].model.embedding_mode == "voxel_attention"
+    assert configs["a"].model.use_block_statistics is True
+    assert configs["b"].model.use_block_statistics is True
+    assert configs["c"].model.use_block_statistics is False
+    for config in configs.values():
+        assert config.model.voxel_size_x == 2
+        assert config.model.voxel_size_y == 2
+        assert config.model.voxel_duration_ms == 25.0
+        assert config.training.seed == 37
+        assert config.training.epochs == 24
+        assert config.training.max_train_files is None
+        assert config.training.max_val_files is None
+
+    ignored = {"embedding_mode", "use_block_statistics"}
+    reference = {
+        name: value
+        for name, value in configs["a"].model.__dict__.items()
+        if name not in ignored
+    }
+    for arm in "bc":
+        comparison = {
+            name: value
+            for name, value in configs[arm].model.__dict__.items()
+            if name not in ignored
+        }
+        assert comparison == reference
 
 
 def test_model_config_no_longer_exposes_multi_cone_or_layer_scale_fields() -> None:
@@ -268,6 +315,35 @@ def test_cross_field_config_validation_rejects_inconsistent_values() -> None:
         lambda: replace(
             valid,
             model=replace(valid.model, num_pool_queries=0),
+        ).validate(),
+    )
+    raises(
+        ValueError,
+        lambda: replace(
+            valid,
+            model=replace(valid.model, embedding_mode="unknown"),
+        ).validate(),
+    )
+    raises(
+        ValueError,
+        lambda: replace(
+            valid,
+            model=replace(
+                valid.model,
+                embedding_mode="voxel_attention",
+                voxel_size_x=3,
+            ),
+        ).validate(),
+    )
+    raises(
+        ValueError,
+        lambda: replace(
+            valid,
+            model=replace(
+                valid.model,
+                embedding_mode="voxel_attention",
+                voxel_duration_ms=30.0,
+            ),
         ).validate(),
     )
     raises(

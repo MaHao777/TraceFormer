@@ -25,6 +25,7 @@ class EventTokenizer(nn.Module):
 
     event_feature_dim = 6
     statistic_dim = 7
+    voxel_descriptor_dim = 10
 
     def __init__(
         self,
@@ -37,6 +38,12 @@ class EventTokenizer(nn.Module):
         event_embed_dim: int,
         token_dim: int,
         num_pool_queries: int = 4,
+        duration_ms: float = 8000.0,
+        embedding_mode: str = "event_attention",
+        voxel_size_x: int = 2,
+        voxel_size_y: int = 2,
+        voxel_duration_ms: float = 25.0,
+        use_block_statistics: bool = True,
     ) -> None:
         super().__init__()
         values = (
@@ -48,6 +55,10 @@ class EventTokenizer(nn.Module):
             event_embed_dim,
             token_dim,
             num_pool_queries,
+            duration_ms,
+            voxel_size_x,
+            voxel_size_y,
+            voxel_duration_ms,
         )
         if any(value <= 0 for value in values):
             raise ValueError("tokenizer dimensions must be positive")
@@ -59,15 +70,69 @@ class EventTokenizer(nn.Module):
         self.event_embed_dim = int(event_embed_dim)
         self.token_dim = int(token_dim)
         self.num_pool_queries = int(num_pool_queries)
+        self.duration_ms = float(duration_ms)
+        self.embedding_mode = str(embedding_mode)
+        self.voxel_size_x = int(voxel_size_x)
+        self.voxel_size_y = int(voxel_size_y)
+        self.voxel_duration_ms = float(voxel_duration_ms)
+        self.use_block_statistics = bool(use_block_statistics)
         self.num_x_blocks = math.ceil(self.width / self.spatial_block_size_x)
         self.num_y_blocks = math.ceil(self.height / self.spatial_block_size_y)
-
-        self.event_encoder = nn.Sequential(
-            nn.Linear(self.event_feature_dim, self.event_embed_dim),
-            nn.LayerNorm(self.event_embed_dim),
-            nn.GELU(),
-            nn.Linear(self.event_embed_dim, self.event_embed_dim),
-        )
+        if self.embedding_mode not in {"event_attention", "voxel_attention"}:
+            raise ValueError(
+                "embedding_mode must be 'event_attention' or 'voxel_attention'"
+            )
+        if not isinstance(use_block_statistics, bool):
+            raise ValueError("use_block_statistics must be boolean")
+        self.voxels_per_block_x = 0
+        self.voxels_per_block_y = 0
+        self.voxels_per_block_t = 0
+        if self.embedding_mode == "voxel_attention":
+            if self.spatial_block_size_x % self.voxel_size_x:
+                raise ValueError(
+                    "spatial_block_size_x must be divisible by voxel_size_x"
+                )
+            if self.spatial_block_size_y % self.voxel_size_y:
+                raise ValueError(
+                    "spatial_block_size_y must be divisible by voxel_size_y"
+                )
+            time_ratio = (
+                self.duration_ms
+                / self.num_time_blocks
+                / self.voxel_duration_ms
+            )
+            if not math.isclose(
+                time_ratio,
+                round(time_ratio),
+                rel_tol=0.0,
+                abs_tol=1e-9,
+            ):
+                raise ValueError(
+                    "duration_ms / num_time_blocks must be divisible by "
+                    "voxel_duration_ms"
+                )
+            self.voxels_per_block_x = (
+                self.spatial_block_size_x // self.voxel_size_x
+            )
+            self.voxels_per_block_y = (
+                self.spatial_block_size_y // self.voxel_size_y
+            )
+            self.voxels_per_block_t = int(round(time_ratio))
+            self.event_encoder = None
+            self.voxel_encoder = nn.Sequential(
+                nn.Linear(self.voxel_descriptor_dim, self.event_embed_dim),
+                nn.LayerNorm(self.event_embed_dim),
+                nn.GELU(),
+                nn.Linear(self.event_embed_dim, self.event_embed_dim),
+            )
+        else:
+            self.event_encoder = nn.Sequential(
+                nn.Linear(self.event_feature_dim, self.event_embed_dim),
+                nn.LayerNorm(self.event_embed_dim),
+                nn.GELU(),
+                nn.Linear(self.event_embed_dim, self.event_embed_dim),
+            )
+            self.voxel_encoder = None
         self.pool_queries = nn.Parameter(
             torch.empty(self.num_pool_queries, self.event_embed_dim)
         )
@@ -99,7 +164,9 @@ class EventTokenizer(nn.Module):
             nn.Linear(3, self.event_embed_dim),
             nn.GELU(),
         )
-        projection_input = self.event_embed_dim * 2 + self.statistic_dim
+        projection_input = self.event_embed_dim * 2
+        if self.use_block_statistics:
+            projection_input += self.statistic_dim
         self.token_projection = nn.Sequential(
             nn.Linear(projection_input, self.token_dim),
             nn.LayerNorm(self.token_dim),
@@ -150,6 +217,85 @@ class EventTokenizer(nn.Module):
             pooled.scatter_add_(0, value_indices, weighted_values)
             pooled_queries.append(pooled)
         return torch.stack(pooled_queries, dim=1)
+
+    def _voxelize(
+        self,
+        *,
+        local_features: torch.Tensor,
+        parent_indices: torch.Tensor,
+        x: torch.Tensor,
+        y: torch.Tensor,
+        scaled_time: torch.Tensor,
+        time_index: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return descriptors, parent-token indices, and event counts per voxel."""
+        local_voxel_x = torch.div(
+            x.long().remainder(self.spatial_block_size_x),
+            self.voxel_size_x,
+            rounding_mode="floor",
+        )
+        local_voxel_y = torch.div(
+            y.long().remainder(self.spatial_block_size_y),
+            self.voxel_size_y,
+            rounding_mode="floor",
+        )
+        local_voxel_time = torch.clamp(
+            ((scaled_time - time_index) * self.voxels_per_block_t).long(),
+            min=0,
+            max=self.voxels_per_block_t - 1,
+        )
+        voxels_per_block = (
+            self.voxels_per_block_x
+            * self.voxels_per_block_y
+            * self.voxels_per_block_t
+        )
+        local_voxel_key = (
+            (
+                local_voxel_time * self.voxels_per_block_y
+                + local_voxel_y
+            )
+            * self.voxels_per_block_x
+            + local_voxel_x
+        )
+        composite_voxel_key = parent_indices * voxels_per_block + local_voxel_key
+        _, voxel_inverse, voxel_counts = torch.unique(
+            composite_voxel_key,
+            sorted=True,
+            return_inverse=True,
+            return_counts=True,
+        )
+        voxel_count = len(voxel_counts)
+        voxel_parents = parent_indices.new_empty(voxel_count)
+        voxel_parents.scatter_(0, voxel_inverse, parent_indices)
+        value_indices = voxel_inverse[:, None].expand(
+            -1,
+            self.event_feature_dim,
+        )
+        feature_sum = local_features.new_zeros(
+            (voxel_count, self.event_feature_dim)
+        )
+        feature_sum.scatter_add_(0, value_indices, local_features)
+        float_counts = voxel_counts.to(local_features.dtype)
+        feature_mean = feature_sum / float_counts[:, None]
+        coordinate_square_sum = local_features.new_zeros((voxel_count, 3))
+        coordinate_square_sum.scatter_add_(
+            0,
+            voxel_inverse[:, None].expand(-1, 3),
+            local_features[:, :3].square(),
+        )
+        coordinate_variance = (
+            coordinate_square_sum / float_counts[:, None]
+            - feature_mean[:, :3].square()
+        ).clamp_min(0)
+        descriptors = torch.cat(
+            (
+                feature_mean,
+                coordinate_variance,
+                torch.log1p(float_counts)[:, None],
+            ),
+            dim=1,
+        )
+        return descriptors, voxel_parents, voxel_counts
 
     def _split_input(
         self,
@@ -273,10 +419,26 @@ class EventTokenizer(nn.Module):
         token_batches = torch.div(
             unique_keys, cells_per_sample, rounding_mode="floor"
         )
-        encoded_events = self.event_encoder(local_features)
+        if self.embedding_mode == "voxel_attention":
+            descriptors, attention_inverse, _ = self._voxelize(
+                local_features=local_features,
+                parent_indices=inverse,
+                x=x,
+                y=y,
+                scaled_time=scaled_time,
+                time_index=time_index,
+            )
+            if self.voxel_encoder is None:
+                raise RuntimeError("voxel encoder is unavailable")
+            attention_values = self.voxel_encoder(descriptors)
+        else:
+            if self.event_encoder is None:
+                raise RuntimeError("event encoder is unavailable")
+            attention_values = self.event_encoder(local_features)
+            attention_inverse = inverse
         attention_output = self._attention_pool(
-            encoded_events,
-            inverse,
+            attention_values,
+            attention_inverse,
             token_count=token_count,
         )
         attention_feature = self.query_fusion(
@@ -337,12 +499,11 @@ class EventTokenizer(nn.Module):
             dim=1,
         )
         encoded_position = self.position_encoder(position)
-        tokens = self.token_projection(
-            torch.cat(
-                (attention_feature, statistics, encoded_position),
-                dim=1,
-            )
-        )
+        fusion_features = [attention_feature]
+        if self.use_block_statistics:
+            fusion_features.append(statistics)
+        fusion_features.append(encoded_position)
+        tokens = self.token_projection(torch.cat(fusion_features, dim=1))
         return TokenizedEvents(
             tokens=tokens,
             token_coords=token_coords,

@@ -46,6 +46,12 @@ class SpatioTemporalConeDetector(nn.Module):
         direction_dropout: float,
         debug_attention_stats: bool,
         num_pool_queries: int = 4,
+        duration_ms: float = 8000.0,
+        embedding_mode: str = "event_attention",
+        voxel_size_x: int = 2,
+        voxel_size_y: int = 2,
+        voxel_duration_ms: float = 25.0,
+        use_block_statistics: bool = True,
     ) -> None:
         super().__init__()
         self.token_dim = int(token_dim)
@@ -56,9 +62,15 @@ class SpatioTemporalConeDetector(nn.Module):
             spatial_block_size_x=spatial_block_size_x,
             spatial_block_size_y=spatial_block_size_y,
             num_time_blocks=num_time_blocks,
+            duration_ms=duration_ms,
             event_embed_dim=event_embed_dim,
             token_dim=token_dim,
             num_pool_queries=num_pool_queries,
+            embedding_mode=embedding_mode,
+            voxel_size_x=voxel_size_x,
+            voxel_size_y=voxel_size_y,
+            voxel_duration_ms=voxel_duration_ms,
+            use_block_statistics=use_block_statistics,
         )
         self.encoder = LocalConeEncoder(
             token_dim=token_dim,

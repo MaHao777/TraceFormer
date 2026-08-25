@@ -72,3 +72,4 @@ def test_largest_sequence_check_runs_forward_loss_backward_and_reports_memory() 
     assert '"object_frame"' in contents
     assert '"false_alarm"' in contents
     assert "max_memory_allocated" in contents
+    assert "pool_input_count" in contents

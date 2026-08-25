@@ -1,0 +1,54 @@
+resolution: {width: 346, height: 260}
+model:
+  spatial_block_size_x: 8
+  spatial_block_size_y: 8
+  num_time_blocks: 64
+  token_dim: 64
+  event_embed_dim: 64
+  num_pool_queries: 4
+  embedding_mode: event_attention
+  voxel_size_x: 2
+  voxel_size_y: 2
+  voxel_duration_ms: 25.0
+  use_block_statistics: true
+  num_cone_blocks: 6
+  num_heads: 4
+  mlp_ratio: 2.0
+  dropout: 0.1
+  local_cone: {base_radius: 1.0, slope: 1.0, max_neighbors_per_time_slice: 8}
+  causal_mode: false
+  direction_dropout: 0.1
+  debug_attention_stats: false
+inference: {sigmoid_threshold: 0.5}
+dataset: {root: ../data/ev-uav, duration_ms: 8000}
+training:
+  device: cuda
+  epochs: 1
+  learning_rate: 0.0007
+  weight_decay: 0.0002
+  seed: 37
+  background_ratio: 12
+  hard_negative_fraction: 0.5
+  max_background_without_positive: 4096
+  dense_sequence_event_threshold: 300000
+  dense_sequence_background_polarity_max: 0.65
+  dense_sequence_weight: 3.0
+  min_learning_rate_ratio: 0.1
+  num_threads: 8
+  output_root: ../smoke_outputs
+  gradient_clip_norm: 1.0
+  mixed_precision: true
+  mixed_precision_dtype: bfloat16
+  max_train_files: 4
+  max_val_files: 2
+loss: {focal_alpha: 0.75, focal_gamma: 2.0, lambda_dice: 0.75, lambda_object_frame: 0.25, object_frame_logit_margin: 2.0, lambda_false_alarm: 0.05, false_alarm_logit_margin: 0.0, false_alarm_topk_per_frame: 32}
+threshold_augmentation:
+  enabled: true
+  min_events: 300000
+  max_polarity_fraction: 0.65
+  threshold_ratios: [1.5, 2.0]
+  warmup_epochs: 0
+  ramp_epochs: 1
+  sparse_loss_weight: 0.5
+  consistency_loss_weight: 0.1
+evaluation: {optimize_threshold: true, threshold_steps: 19, frame_ms: 50, object_correct_fraction: 0.0001}

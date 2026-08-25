@@ -78,6 +78,10 @@ def main() -> None:
     if arguments.epoch <= 0:
         parser.error("--epoch must be positive")
     model = build_model(config).to(device).train()
+    pool_input_counts: list[int] = []
+    pool_hook = model.tokenizer.key_projection.register_forward_pre_hook(
+        lambda _module, inputs: pool_input_counts.append(len(inputs[0]))
+    )
     criterion = EventFocalDiceLoss(
         focal_alpha=config.loss.focal_alpha,
         focal_gamma=config.loss.focal_gamma,
@@ -203,6 +207,7 @@ def main() -> None:
             + config.threshold_augmentation.consistency_loss_weight * consistency
         )
     combined_total.backward()
+    pool_hook.remove()
     if device.type == "cuda":
         torch.cuda.synchronize(device)
         peak_memory = int(torch.cuda.max_memory_allocated(device))
@@ -212,6 +217,7 @@ def main() -> None:
         "sequence": str(sequence.source_path.resolve()),
         "event_count": sequence.length,
         "token_count": int(output["token_features"].shape[0]),
+        "pool_input_count": pool_input_counts[0],
         "loss_query_count": int(len(query_indices)),
         "loss": float(combined_total.detach().float().item()),
         "losses": {
@@ -235,6 +241,9 @@ def main() -> None:
                 int(sparse_output["token_features"].shape[0])
                 if sparse_output is not None
                 else 0
+            ),
+            "sparse_pool_input_count": (
+                pool_input_counts[1] if len(pool_input_counts) > 1 else 0
             ),
             "sparse_queries": int(len(sparse_query_indices)),
             "sparse_loss": float(sparse_total.detach().float().item()),

@@ -34,6 +34,11 @@ class ModelConfig:
     token_dim: int = 32
     event_embed_dim: int = 16
     num_pool_queries: int = 4
+    embedding_mode: str = "event_attention"
+    voxel_size_x: int = 2
+    voxel_size_y: int = 2
+    voxel_duration_ms: float = 25.0
+    use_block_statistics: bool = True
     num_cone_blocks: int = 6
     num_heads: int = 4
     mlp_ratio: float = 2.0
@@ -160,10 +165,24 @@ class HUAVConfig:
             "token_dim",
             "event_embed_dim",
             "num_pool_queries",
+            "voxel_size_x",
+            "voxel_size_y",
             "num_cone_blocks",
             "num_heads",
         ):
             _positive_integer(getattr(self.model, name), f"model {name}")
+        if self.model.embedding_mode not in {"event_attention", "voxel_attention"}:
+            raise ValueError(
+                "model embedding_mode must be 'event_attention' or 'voxel_attention'"
+            )
+        if not isinstance(self.model.use_block_statistics, bool):
+            raise ValueError("model use_block_statistics must be boolean")
+        voxel_duration_ms = _finite_real(
+            self.model.voxel_duration_ms,
+            "model voxel_duration_ms",
+        )
+        if voxel_duration_ms <= 0:
+            raise ValueError("model voxel_duration_ms must be positive")
         if self.model.token_dim % self.model.num_heads:
             raise ValueError("token_dim must be divisible by num_heads")
         if _finite_real(self.model.mlp_ratio, "mlp_ratio") <= 0:
@@ -196,6 +215,30 @@ class HUAVConfig:
         _path_value(self.dataset.root, "dataset root")
         if _finite_real(self.dataset.duration_ms, "duration_ms") <= 0:
             raise ValueError("duration_ms must be positive")
+        if self.model.embedding_mode == "voxel_attention":
+            if self.model.spatial_block_size_x % self.model.voxel_size_x:
+                raise ValueError(
+                    "spatial_block_size_x must be divisible by voxel_size_x"
+                )
+            if self.model.spatial_block_size_y % self.model.voxel_size_y:
+                raise ValueError(
+                    "spatial_block_size_y must be divisible by voxel_size_y"
+                )
+            time_voxels_per_block = (
+                float(self.dataset.duration_ms)
+                / self.model.num_time_blocks
+                / voxel_duration_ms
+            )
+            if not math.isclose(
+                time_voxels_per_block,
+                round(time_voxels_per_block),
+                rel_tol=0.0,
+                abs_tol=1e-9,
+            ):
+                raise ValueError(
+                    "duration_ms / num_time_blocks must be divisible by "
+                    "voxel_duration_ms"
+                )
         if self.training.device not in {"cpu", "cuda"}:
             raise ValueError("training device must be 'cpu' or 'cuda'")
         _positive_integer(self.training.epochs, "epochs")
