@@ -8,8 +8,8 @@ from tempfile import TemporaryDirectory
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from huav.config import (
+    ConeHeadConfig,
     HUAVConfig,
-    LocalConeConfig,
     ThresholdAugmentationConfig,
     load_config,
 )
@@ -106,7 +106,7 @@ def test_threshold_augmentation_rejects_duplicate_or_nonphysical_ratios() -> Non
     raises(ValueError, nonphysical.validate)
 
 
-def test_base_yaml_exposes_cone_training_and_loss_configuration() -> None:
+def test_base_yaml_exposes_historical_cone_training_and_loss_configuration() -> None:
     config = load_config(Path("configs/huav_base.yaml"))
     assert config.model.spatial_block_size_x == 8
     assert config.model.spatial_block_size_y == 8
@@ -114,24 +114,22 @@ def test_base_yaml_exposes_cone_training_and_loss_configuration() -> None:
     assert config.model.token_dim == 32
     assert config.model.event_embed_dim == 16
     assert config.model.num_pool_queries == 4
-    assert config.model.embedding_mode == "event_attention"
-    assert config.model.voxel_size_x == 2
-    assert config.model.voxel_size_y == 2
-    assert config.model.voxel_duration_ms == 25.0
-    assert config.model.use_block_statistics is True
-    assert config.model.num_cone_blocks == 6
+    assert config.model.num_layers == 3
     assert config.model.num_heads == 4
-    assert config.model.local_cone == LocalConeConfig(
-        base_radius=1.0,
-        slope=1.0,
-        max_neighbors_per_time_slice=8,
+    assert config.model.layer_time_scales == (0.5, 0.75, 1.0)
+    assert config.model.max_neighbors_per_cone == 8
+    assert config.model.causal_mode is False
+    assert config.model.direction_dropout == 0.0
+    assert config.model.cone_heads == (
+        ConeHeadConfig(1.0, 0.5, 4),
+        ConeHeadConfig(1.0, 1.0, 4),
+        ConeHeadConfig(2.0, 1.5, 6),
+        ConeHeadConfig(2.0, 2.0, 8),
     )
     assert not any(
         name.startswith("token_importance")
         for name in config.model.__dataclass_fields__
     )
-    assert config.model.causal_mode is False
-    assert config.model.direction_dropout == 0.0
     assert config.dataset.duration_ms == 8000
     assert config.training.device == "cpu"
     assert config.training.background_ratio == 10
@@ -161,12 +159,6 @@ def test_score_optimized_yaml_exposes_dense_domain_training_configuration() -> N
     assert config.model.token_dim == 64
     assert config.model.event_embed_dim == 64
     assert config.model.num_pool_queries == 4
-    assert config.model.num_cone_blocks == 6
-    assert config.model.local_cone == LocalConeConfig(
-        base_radius=1.0,
-        slope=1.0,
-        max_neighbors_per_time_slice=8,
-    )
     assert config.training.epochs == 24
     assert config.training.hard_negative_fraction == 0.5
     assert config.training.dense_sequence_event_threshold == 300000
@@ -208,61 +200,70 @@ def test_smoke_configs_use_a_separate_output_root() -> None:
         assert Path(load_config(Path(path)).training.output_root) == expected_full_root
 
 
-def test_local_cone_depth_supports_requested_ablation_values() -> None:
-    valid = HUAVConfig.default()
+def test_every_shipped_yaml_uses_the_historical_cone_contract() -> None:
+    paths = sorted((ROOT / "configs").glob("*.yaml"))
 
-    for depth in (1, 3, 5, 7):
-        configured = replace(
-            valid,
-            model=replace(valid.model, num_cone_blocks=depth),
-        ).validate()
+    assert paths
+    for path in paths:
+        config = load_config(path)
+        fields = config.model.__dataclass_fields__
+        assert "num_cone_blocks" not in fields
+        assert "local_cone" not in fields
+        assert config.model.num_layers == 3
+        assert len(config.model.cone_heads) == config.model.num_heads
+        assert config.model.layer_time_scales == (0.5, 0.75, 1.0)
+        assert config.model.max_neighbors_per_cone == 8
 
-        assert configured.model.num_cone_blocks == depth
+
+def test_yaml_loader_rejects_removed_local_cone_and_window_fields() -> None:
+    removed_fields = (
+        "num_cone_blocks: 8",
+        "local_cone: {}",
+        "window_size: 2",
+        "shift_schedule: []",
+    )
+    with TemporaryDirectory(dir=Path.cwd()) as directory:
+        for index, field in enumerate(removed_fields):
+            path = Path(directory) / f"removed-{index}.yaml"
+            path.write_text(f"model:\n  {field}\n", encoding="utf-8")
+            raises(ValueError, lambda path=path: load_config(path))
 
 
-def test_embedding_ablation_configs_only_change_the_planned_model_fields() -> None:
+def test_window_geometry_is_not_configurable() -> None:
+    fields = HUAVConfig.default().model.__dataclass_fields__
+
+    for name in (
+        "num_cone_blocks",
+        "local_cone",
+        "window_size",
+        "shift_schedule",
+    ):
+        assert name not in fields
+
+
+def test_retained_embedding_configs_now_use_the_same_historical_model() -> None:
     configs = {
         arm: load_config(Path(f"configs/huav_embedding_{arm}_autodl.yaml"))
         for arm in "abc"
     }
 
-    assert configs["a"].model.embedding_mode == "event_attention"
-    assert configs["b"].model.embedding_mode == "voxel_attention"
-    assert configs["c"].model.embedding_mode == "voxel_attention"
-    assert configs["a"].model.use_block_statistics is True
-    assert configs["b"].model.use_block_statistics is True
-    assert configs["c"].model.use_block_statistics is False
     for config in configs.values():
-        assert config.model.voxel_size_x == 2
-        assert config.model.voxel_size_y == 2
-        assert config.model.voxel_duration_ms == 25.0
+        assert config.model == configs["a"].model
         assert config.training.seed == 37
         assert config.training.epochs == 24
         assert config.training.max_train_files is None
         assert config.training.max_val_files is None
 
-    ignored = {"embedding_mode", "use_block_statistics"}
-    reference = {
-        name: value
-        for name, value in configs["a"].model.__dict__.items()
-        if name not in ignored
-    }
-    for arm in "bc":
-        comparison = {
-            name: value
-            for name, value in configs[arm].model.__dict__.items()
-            if name not in ignored
-        }
-        assert comparison == reference
 
-
-def test_model_config_no_longer_exposes_multi_cone_or_layer_scale_fields() -> None:
+def test_model_config_exposes_historical_multi_cone_and_layer_scale_fields() -> None:
     fields = HUAVConfig.default().model.__dataclass_fields__
 
-    assert "cone_heads" not in fields
-    assert "layer_time_scales" not in fields
-    assert "num_layers" not in fields
-    assert "max_neighbors_per_cone" not in fields
+    assert "cone_heads" in fields
+    assert "layer_time_scales" in fields
+    assert "num_layers" in fields
+    assert "max_neighbors_per_cone" in fields
+    assert "num_cone_blocks" not in fields
+    assert "local_cone" not in fields
 
 
 def test_autodl_configs_preserve_score_model_and_select_cuda_bfloat16() -> None:
@@ -276,12 +277,6 @@ def test_autodl_configs_preserve_score_model_and_select_cuda_bfloat16() -> None:
         assert config.model.token_dim == 64
         assert config.model.event_embed_dim == 64
         assert config.model.num_pool_queries == 4
-        assert config.model.num_cone_blocks == 6
-        assert config.model.local_cone == LocalConeConfig(
-            base_radius=1.0,
-            slope=1.0,
-            max_neighbors_per_time_slice=8,
-        )
         assert config.training.device == "cuda"
         assert config.training.mixed_precision is True
         assert config.training.mixed_precision_dtype == "bfloat16"
@@ -321,59 +316,14 @@ def test_cross_field_config_validation_rejects_inconsistent_values() -> None:
         ValueError,
         lambda: replace(
             valid,
-            model=replace(valid.model, embedding_mode="unknown"),
+            model=replace(valid.model, cone_heads=valid.model.cone_heads[:2]),
         ).validate(),
     )
     raises(
         ValueError,
         lambda: replace(
             valid,
-            model=replace(
-                valid.model,
-                embedding_mode="voxel_attention",
-                voxel_size_x=3,
-            ),
-        ).validate(),
-    )
-    raises(
-        ValueError,
-        lambda: replace(
-            valid,
-            model=replace(
-                valid.model,
-                embedding_mode="voxel_attention",
-                voxel_duration_ms=30.0,
-            ),
-        ).validate(),
-    )
-    raises(
-        ValueError,
-        lambda: replace(
-            valid,
-            model=replace(
-                valid.model,
-                local_cone=replace(valid.model.local_cone, slope=-0.1),
-            ),
-        ).validate(),
-    )
-    raises(
-        ValueError,
-        lambda: replace(
-            valid,
-            model=replace(
-                valid.model,
-                local_cone=replace(
-                    valid.model.local_cone,
-                    max_neighbors_per_time_slice=0,
-                ),
-            ),
-        ).validate(),
-    )
-    raises(
-        ValueError,
-        lambda: replace(
-            valid,
-            model=replace(valid.model, direction_dropout=1.1),
+            model=replace(valid.model, layer_time_scales=(1.0, 0.5, 1.0)),
         ).validate(),
     )
     raises(

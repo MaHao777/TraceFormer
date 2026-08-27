@@ -1,4 +1,4 @@
-"""Public model contracts and the dual-view event classifier."""
+"""Public model contracts and the spatiotemporal-cone event detector."""
 
 from __future__ import annotations
 

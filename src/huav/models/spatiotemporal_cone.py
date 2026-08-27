@@ -7,9 +7,9 @@ from typing import Any
 import torch
 from torch import nn
 
-from huav.config import LocalConeConfig
+from huav.config import ConeHeadConfig
 
-from .cone_transformer import LocalConeEncoder
+from .cone_transformer import ConeTransformerEncoder
 from .event_decoder import EventDecoder
 from .event_tokenizer import EventTokenizer
 
@@ -37,46 +37,39 @@ class SpatioTemporalConeDetector(nn.Module):
         num_time_blocks: int,
         token_dim: int,
         event_embed_dim: int,
-        num_cone_blocks: int,
+        num_layers: int,
         num_heads: int,
         mlp_ratio: float,
         dropout: float,
-        local_cone: LocalConeConfig,
+        cone_heads: tuple[ConeHeadConfig, ...],
+        layer_time_scales: tuple[float, ...],
+        max_neighbors_per_cone: int,
         causal_mode: bool,
         direction_dropout: float,
         debug_attention_stats: bool,
         num_pool_queries: int = 4,
-        duration_ms: float = 8000.0,
-        embedding_mode: str = "event_attention",
-        voxel_size_x: int = 2,
-        voxel_size_y: int = 2,
-        voxel_duration_ms: float = 25.0,
-        use_block_statistics: bool = True,
     ) -> None:
         super().__init__()
+        if num_layers != len(layer_time_scales):
+            raise ValueError("num_layers must equal len(layer_time_scales)")
         self.token_dim = int(token_dim)
-        self.num_cone_blocks = int(num_cone_blocks)
+        self.num_layers = int(num_layers)
         self.tokenizer = EventTokenizer(
             width=width,
             height=height,
             spatial_block_size_x=spatial_block_size_x,
             spatial_block_size_y=spatial_block_size_y,
             num_time_blocks=num_time_blocks,
-            duration_ms=duration_ms,
             event_embed_dim=event_embed_dim,
             token_dim=token_dim,
             num_pool_queries=num_pool_queries,
-            embedding_mode=embedding_mode,
-            voxel_size_x=voxel_size_x,
-            voxel_size_y=voxel_size_y,
-            voxel_duration_ms=voxel_duration_ms,
-            use_block_statistics=use_block_statistics,
         )
-        self.encoder = LocalConeEncoder(
+        self.encoder = ConeTransformerEncoder(
             token_dim=token_dim,
             num_heads=num_heads,
-            num_cone_blocks=num_cone_blocks,
-            local_cone=local_cone,
+            cone_heads=cone_heads,
+            layer_time_scales=layer_time_scales,
+            max_neighbors_per_cone=max_neighbors_per_cone,
             mlp_ratio=mlp_ratio,
             dropout=dropout,
             causal_mode=causal_mode,

@@ -1,76 +1,127 @@
-"""Fixed local, batch-isolated spatiotemporal cone neighborhoods."""
+"""Sparse, batch-isolated spatiotemporal cone neighborhood construction."""
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import numpy as np
 import torch
 from scipy.spatial import cKDTree  # type: ignore[import]
 
+from huav.config import ConeHeadConfig
+
 
 @dataclass(frozen=True)
 class ConeNeighborhoods:
-    """Padded neighbors ordered by the ``t-1``, ``t``, ``t+1`` slices."""
-
-    indices: torch.Tensor
+    past_indices: torch.Tensor
+    future_indices: torch.Tensor
 
 
 class ConeNeighborBuilder:
-    """Build one fixed local quadrangular-pyramid neighborhood per token."""
-
-    time_offsets = (-1, 0, 1)
+    """Build capped per-head neighborhoods without an all-pairs distance matrix."""
 
     def __init__(
         self,
         *,
-        base_radius: float,
-        slope: float,
-        max_neighbors_per_time_slice: int,
+        cone_heads: tuple[ConeHeadConfig, ...],
+        max_neighbors_per_cone: int,
+        layer_time_scale: float = 1.0,
         causal_mode: bool = False,
     ) -> None:
-        if base_radius < 0 or slope < 0:
-            raise ValueError("local cone radii must be non-negative")
-        if max_neighbors_per_time_slice <= 0:
-            raise ValueError("max_neighbors_per_time_slice must be positive")
-        self.base_radius = float(base_radius)
-        self.slope = float(slope)
-        self.max_neighbors_per_time_slice = int(max_neighbors_per_time_slice)
+        if not cone_heads:
+            raise ValueError("cone_heads must not be empty")
+        if max_neighbors_per_cone <= 0:
+            raise ValueError("max_neighbors_per_cone must be positive")
+        if not 0 < layer_time_scale <= 1:
+            raise ValueError("layer_time_scale must be in (0,1]")
+        self.cone_heads = tuple(cone_heads)
+        self.max_neighbors_per_cone = int(max_neighbors_per_cone)
+        self.layer_time_scale = float(layer_time_scale)
         self.causal_mode = bool(causal_mode)
 
-    def _query_time_slice(
+    def _query_direction(
         self,
         *,
         coordinates: np.ndarray,
-        source_indices: np.ndarray,
-        target_indices: np.ndarray,
-        time_offset: int,
+        batch_indices: np.ndarray,
+        head: ConeHeadConfig,
+        direction: int,
         output: np.ndarray,
+        head_index: int,
     ) -> None:
-        source_xy = coordinates[source_indices, :2].astype(np.float64, copy=False)
-        target_xy = coordinates[target_indices, :2].astype(np.float64, copy=False)
-        tree = cKDTree(target_xy)
-        query_count = min(self.max_neighbors_per_time_slice, len(target_indices))
-        ranks = np.arange(1, query_count + 1)
-        radius = self.base_radius + self.slope * abs(time_offset)
-        distances, local_indices = tree.query(
-            source_xy,
-            k=ranks,
-            p=np.inf,
-            distance_upper_bound=radius + 1e-9,
-            workers=1,
+        horizon = max(
+            1,
+            int(math.ceil(head.max_time_distance * self.layer_time_scale)),
         )
-        distances = np.asarray(distances)
-        local_indices = np.asarray(local_indices)
-        if distances.ndim == 1:
-            distances = distances[:, None]
-            local_indices = local_indices[:, None]
-        valid = np.isfinite(distances) & (local_indices < len(target_indices))
-        global_indices = np.full(local_indices.shape, -1, dtype=np.int64)
-        global_indices[valid] = target_indices[local_indices[valid]]
-        slice_index = self.time_offsets.index(time_offset)
-        start = slice_index * self.max_neighbors_per_time_slice
-        output[source_indices, start : start + query_count] = global_indices
+        for batch_index in np.unique(batch_indices):
+            sample_indices = np.flatnonzero(batch_indices == batch_index)
+            sample_times = coordinates[sample_indices, 2]
+            by_time = {
+                int(time): sample_indices[sample_times == time]
+                for time in np.unique(sample_times)
+            }
+            trees = {
+                time: cKDTree(coordinates[indices, :2].astype(np.float64, copy=False))
+                for time, indices in by_time.items()
+            }
+            for source_time, source_indices in by_time.items():
+                candidate_indices: list[np.ndarray] = []
+                candidate_scores: list[np.ndarray] = []
+                source_xy = coordinates[source_indices, :2].astype(
+                    np.float64, copy=False
+                )
+                for time_distance in range(1, horizon + 1):
+                    target_time = source_time + direction * time_distance
+                    target_indices = by_time.get(target_time)
+                    if target_indices is None:
+                        continue
+                    radius = head.base_radius + head.slope * time_distance
+                    query_count = min(
+                        self.max_neighbors_per_cone, len(target_indices)
+                    )
+                    ranks = np.arange(1, query_count + 1)
+                    distances, local_indices = trees[target_time].query(
+                        source_xy,
+                        k=ranks,
+                        p=np.inf,
+                        distance_upper_bound=radius + 1e-9,
+                        workers=1,
+                    )
+                    distances = np.asarray(distances)
+                    local_indices = np.asarray(local_indices)
+                    if distances.ndim == 1:
+                        distances = distances[:, None]
+                        local_indices = local_indices[:, None]
+                    valid = np.isfinite(distances) & (
+                        local_indices < len(target_indices)
+                    )
+                    global_indices = np.full(local_indices.shape, -1, dtype=np.int64)
+                    global_indices[valid] = target_indices[local_indices[valid]]
+                    scores = np.full(distances.shape, np.inf, dtype=np.float64)
+                    rank_priority = np.broadcast_to(
+                        ranks[None, :], distances.shape
+                    )
+                    scores[valid] = (
+                        rank_priority[valid] * 1_000_000.0
+                        + time_distance * 1_000.0
+                        + distances[valid]
+                    )
+                    candidate_indices.append(global_indices)
+                    candidate_scores.append(scores)
+
+                if not candidate_indices:
+                    continue
+                joined_indices = np.concatenate(candidate_indices, axis=1)
+                joined_scores = np.concatenate(candidate_scores, axis=1)
+                order = np.argsort(joined_scores, axis=1, kind="stable")
+                keep = order[:, : self.max_neighbors_per_cone]
+                selected = np.take_along_axis(joined_indices, keep, axis=1)
+                output[
+                    source_indices,
+                    head_index,
+                    : selected.shape[1],
+                ] = selected
 
     def __call__(
         self,
@@ -85,11 +136,13 @@ class ConeNeighborBuilder:
         ):
             raise ValueError("token_batch_indices must have shape [M]")
         token_count = len(token_coords)
-        output = np.full(
-            (token_count, len(self.time_offsets) * self.max_neighbors_per_time_slice),
-            -1,
-            dtype=np.int64,
+        shape = (
+            token_count,
+            len(self.cone_heads),
+            self.max_neighbors_per_cone,
         )
+        past = np.full(shape, -1, dtype=np.int64)
+        future = np.full(shape, -1, dtype=np.int64)
         if token_count:
             coordinates = token_coords.detach().cpu().numpy().astype(
                 np.int64, copy=False
@@ -97,29 +150,28 @@ class ConeNeighborBuilder:
             batch_indices = token_batch_indices.detach().cpu().numpy().astype(
                 np.int64, copy=False
             )
-            for batch_index in np.unique(batch_indices):
-                sample_indices = np.flatnonzero(batch_indices == batch_index)
-                sample_times = coordinates[sample_indices, 2]
-                by_time = {
-                    int(time): sample_indices[sample_times == time]
-                    for time in np.unique(sample_times)
-                }
-                for source_time, source_indices in by_time.items():
-                    for time_offset in self.time_offsets:
-                        if self.causal_mode and time_offset > 0:
-                            continue
-                        target_indices = by_time.get(source_time + time_offset)
-                        if target_indices is None:
-                            continue
-                        self._query_time_slice(
-                            coordinates=coordinates,
-                            source_indices=source_indices,
-                            target_indices=target_indices,
-                            time_offset=time_offset,
-                            output=output,
-                        )
+            for head_index, head in enumerate(self.cone_heads):
+                self._query_direction(
+                    coordinates=coordinates,
+                    batch_indices=batch_indices,
+                    head=head,
+                    direction=-1,
+                    output=past,
+                    head_index=head_index,
+                )
+                if not self.causal_mode:
+                    self._query_direction(
+                        coordinates=coordinates,
+                        batch_indices=batch_indices,
+                        head=head,
+                        direction=1,
+                        output=future,
+                        head_index=head_index,
+                    )
+        device = token_coords.device
         return ConeNeighborhoods(
-            indices=torch.from_numpy(output).to(device=token_coords.device)
+            past_indices=torch.from_numpy(past).to(device=device),
+            future_indices=torch.from_numpy(future).to(device=device),
         )
 
 

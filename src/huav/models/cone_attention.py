@@ -1,4 +1,4 @@
-"""Multi-head center attention over one fixed local spatiotemporal cone."""
+"""Bidirectional multi-head center attention over fixed sparse cones."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from dataclasses import dataclass
 import torch
 from torch import nn
 
-from huav.config import LocalConeConfig
+from huav.config import ConeHeadConfig
 
 from .cone_neighbor_builder import ConeNeighborBuilder
 from .relative_position import RelativePositionEncoder
@@ -17,21 +17,23 @@ AttentionStats = dict[str, torch.Tensor]
 
 
 @dataclass(frozen=True)
-class LocalConeAttentionOutput:
+class ConeAttentionOutput:
     features: torch.Tensor
     past_attention_stats: AttentionStats | None
     future_attention_stats: AttentionStats | None
 
 
-class LocalConeAttention(nn.Module):
-    """Update every center token from the same fixed ``t-1/t/t+1`` geometry."""
+class BidirectionalConeAttention(nn.Module):
+    """Use center queries and separate past/future neighbor softmax operations."""
 
     def __init__(
         self,
         *,
         token_dim: int,
         num_heads: int,
-        local_cone: LocalConeConfig,
+        cone_heads: tuple[ConeHeadConfig, ...],
+        max_neighbors_per_cone: int,
+        layer_time_scale: float = 1.0,
         dropout: float = 0.1,
         causal_mode: bool = False,
         direction_dropout: float = 0.0,
@@ -40,6 +42,8 @@ class LocalConeAttention(nn.Module):
         super().__init__()
         if token_dim <= 0 or num_heads <= 0 or token_dim % num_heads:
             raise ValueError("token_dim must be positive and divisible by num_heads")
+        if len(cone_heads) != num_heads:
+            raise ValueError("cone_heads must contain one configuration per head")
         if not 0 <= dropout < 1 or not 0 <= direction_dropout <= 1:
             raise ValueError("dropout values are outside their valid ranges")
         self.token_dim = int(token_dim)
@@ -49,44 +53,89 @@ class LocalConeAttention(nn.Module):
         self.direction_dropout = float(direction_dropout)
         self.debug_attention_stats = bool(debug_attention_stats)
         self.neighbor_builder = ConeNeighborBuilder(
-            base_radius=local_cone.base_radius,
-            slope=local_cone.slope,
-            max_neighbors_per_time_slice=(
-                local_cone.max_neighbors_per_time_slice
-            ),
+            cone_heads=cone_heads,
+            max_neighbors_per_cone=max_neighbors_per_cone,
+            layer_time_scale=layer_time_scale,
             causal_mode=causal_mode,
         )
 
-        self.q_proj = nn.Linear(self.token_dim, self.token_dim)
-        self.k_proj = nn.Linear(self.token_dim, self.token_dim)
-        self.v_proj = nn.Linear(self.token_dim, self.token_dim)
+        self.query_projection = nn.Linear(self.token_dim, self.token_dim)
+        self.key_projection = nn.Linear(self.token_dim, self.token_dim)
+        self.value_projection = nn.Linear(self.token_dim, self.token_dim)
         self.relative_position = RelativePositionEncoder(
             hidden_dim=max(8, self.head_dim * 2)
         )
-        self.out_proj = nn.Linear(self.token_dim, self.token_dim)
+        self.direction_embeddings = nn.Parameter(
+            torch.empty(2, self.num_heads, self.head_dim)
+        )
+        nn.init.normal_(self.direction_embeddings, std=0.02)
+        self.direction_gate = nn.Linear(self.token_dim, 2)
+        self.output_projection = nn.Linear(self.token_dim, self.token_dim)
         self.attention_dropout = nn.Dropout(dropout)
 
     def _reshape_heads(self, features: torch.Tensor) -> torch.Tensor:
         return features.reshape(len(features), self.num_heads, self.head_dim)
 
+    def _attend_direction(
+        self,
+        *,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        token_coords: torch.Tensor,
+        neighbor_indices: torch.Tensor,
+        direction_index: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        mask = neighbor_indices >= 0
+        safe_indices = neighbor_indices.clamp_min(0)
+        head_indices = torch.arange(
+            self.num_heads, device=query.device
+        ).view(1, self.num_heads, 1)
+        neighbor_keys = key[safe_indices, head_indices]
+        neighbor_values = value[safe_indices, head_indices]
+        neighbor_keys = neighbor_keys + self.direction_embeddings[
+            direction_index
+        ].view(1, self.num_heads, 1, self.head_dim)
+
+        neighbor_coords = token_coords[safe_indices].to(dtype=query.dtype)
+        center_coords = token_coords.to(dtype=query.dtype)[:, None, None, :]
+        relative_features = RelativePositionEncoder.build_features(
+            center_coords, neighbor_coords
+        )
+        relative_bias = self.relative_position(relative_features)
+        scores = (
+            (query[:, :, None, :] * neighbor_keys).sum(dim=-1)
+            / math.sqrt(self.head_dim)
+            + relative_bias
+        )
+        scores = scores.masked_fill(~mask, -torch.inf)
+        has_neighbors = mask.any(dim=-1, keepdim=True)
+        scores = torch.where(has_neighbors, scores, torch.zeros_like(scores))
+        weights = torch.softmax(scores, dim=-1)
+        weights = torch.where(mask, weights, torch.zeros_like(weights))
+        weights = self.attention_dropout(weights)
+        aggregate = (weights[..., None] * neighbor_values).sum(dim=-2)
+        return aggregate, mask.sum(dim=-1)
+
     def _apply_direction_dropout(
         self,
-        mask: torch.Tensor,
-        time_offsets: torch.Tensor,
+        availability: torch.Tensor,
     ) -> torch.Tensor:
         if not self.training or self.direction_dropout <= 0 or self.causal_mode:
-            return mask
-        draw = float(torch.rand((), device=mask.device).item())
+            return availability
+        draw = float(torch.rand((), device=availability.device).item())
         if draw < self.direction_dropout * 0.5:
-            return mask & (time_offsets <= 0)
-        if draw < self.direction_dropout:
-            return mask & (time_offsets >= 0)
-        return mask
+            availability = availability.clone()
+            availability[:, 1] = False
+        elif draw < self.direction_dropout:
+            availability = availability.clone()
+            availability[:, 0] = False
+        return availability
 
     def _stats(
         self,
         counts: torch.Tensor,
-        attention_mass: torch.Tensor,
+        gate_weights: torch.Tensor,
     ) -> AttentionStats:
         return {
             "neighbor_counts": counts.detach(),
@@ -99,7 +148,7 @@ class LocalConeAttention(nn.Module):
             "max_neighbors": (
                 counts.max().detach() if counts.numel() else counts.new_zeros(())
             ),
-            "gate_weights": attention_mass.detach(),
+            "gate_weights": gate_weights.detach(),
         }
 
     def forward(
@@ -107,7 +156,7 @@ class LocalConeAttention(nn.Module):
         tokens: torch.Tensor,
         token_coords: torch.Tensor,
         token_batch_indices: torch.Tensor,
-    ) -> LocalConeAttentionOutput:
+    ) -> ConeAttentionOutput:
         if tokens.ndim != 2 or tokens.shape[1] != self.token_dim:
             raise ValueError(f"tokens must have shape [M,{self.token_dim}]")
         if len(tokens) != len(token_coords):
@@ -116,77 +165,71 @@ class LocalConeAttention(nn.Module):
             empty_counts = torch.empty(
                 (0, self.num_heads), dtype=torch.long, device=tokens.device
             )
-            empty_mass = torch.empty((0,), dtype=tokens.dtype, device=tokens.device)
+            empty_gates = torch.empty((0,), dtype=tokens.dtype, device=tokens.device)
             stats = (
-                self._stats(empty_counts, empty_mass)
+                self._stats(empty_counts, empty_gates)
                 if self.debug_attention_stats
                 else None
             )
-            return LocalConeAttentionOutput(tokens, stats, stats)
+            return ConeAttentionOutput(tokens, stats, stats)
 
-        neighbor_indices = self.neighbor_builder(
-            token_coords, token_batch_indices
-        ).indices
-        valid_mask = neighbor_indices >= 0
-        safe_indices = neighbor_indices.clamp_min(0)
-        neighbor_coords = token_coords[safe_indices].to(dtype=tokens.dtype)
-        center_coords = token_coords.to(dtype=tokens.dtype)[:, None, :]
-        time_offsets = neighbor_coords[..., 2] - center_coords[..., 2]
-        valid_mask = self._apply_direction_dropout(valid_mask, time_offsets)
-
-        query = self._reshape_heads(self.q_proj(tokens))
-        key = self._reshape_heads(self.k_proj(tokens))
-        value = self._reshape_heads(self.v_proj(tokens))
-        neighbor_keys = key[safe_indices]
-        neighbor_values = value[safe_indices]
-        relative_features = RelativePositionEncoder.build_features(
-            center_coords, neighbor_coords
+        neighborhoods = self.neighbor_builder(token_coords, token_batch_indices)
+        query = self._reshape_heads(self.query_projection(tokens))
+        key = self._reshape_heads(self.key_projection(tokens))
+        value = self._reshape_heads(self.value_projection(tokens))
+        past, past_counts = self._attend_direction(
+            query=query,
+            key=key,
+            value=value,
+            token_coords=token_coords,
+            neighbor_indices=neighborhoods.past_indices,
+            direction_index=0,
         )
-        relative_bias = self.relative_position(relative_features)
-        scores = (
-            torch.einsum("mhd,mshd->mhs", query, neighbor_keys)
-            / math.sqrt(self.head_dim)
-            + relative_bias[:, None, :]
+        future, future_counts = self._attend_direction(
+            query=query,
+            key=key,
+            value=value,
+            token_coords=token_coords,
+            neighbor_indices=neighborhoods.future_indices,
+            direction_index=1,
         )
-        head_mask = valid_mask[:, None, :]
-        scores = scores.masked_fill(~head_mask, -torch.inf)
-        has_neighbors = head_mask.any(dim=-1, keepdim=True)
-        scores = torch.where(has_neighbors, scores, torch.zeros_like(scores))
-        weights = torch.softmax(scores, dim=-1)
-        weights = torch.where(head_mask, weights, torch.zeros_like(weights))
-        weights = self.attention_dropout(weights)
-        attended = torch.einsum("mhs,mshd->mhd", weights, neighbor_values)
-        features = self.out_proj(attended.reshape(len(tokens), self.token_dim))
-
-        past_mask = valid_mask & (time_offsets < 0)
-        future_mask = valid_mask & (time_offsets > 0)
-        past_counts = past_mask.sum(dim=-1, keepdim=True).expand(
-            -1, self.num_heads
+        past_flat = past.reshape(len(tokens), self.token_dim)
+        future_flat = future.reshape(len(tokens), self.token_dim)
+        availability = torch.stack(
+            (
+                past_counts.sum(dim=1) > 0,
+                future_counts.sum(dim=1) > 0,
+            ),
+            dim=1,
         )
-        future_counts = future_mask.sum(dim=-1, keepdim=True).expand(
-            -1, self.num_heads
+        if self.causal_mode:
+            availability[:, 1] = False
+        availability = self._apply_direction_dropout(availability)
+        raw_gates = torch.softmax(self.direction_gate(tokens), dim=-1)
+        gates = raw_gates * availability.to(raw_gates.dtype)
+        gate_total = gates.sum(dim=-1, keepdim=True)
+        gates = torch.where(
+            gate_total > 0,
+            gates / gate_total.clamp_min(torch.finfo(gates.dtype).eps),
+            torch.zeros_like(gates),
         )
-        past_mass = (
-            weights * past_mask[:, None, :].to(dtype=weights.dtype)
-        ).sum(dim=-1).mean(dim=1)
-        future_mass = (
-            weights * future_mask[:, None, :].to(dtype=weights.dtype)
-        ).sum(dim=-1).mean(dim=1)
+        fused = gates[:, :1] * past_flat + gates[:, 1:] * future_flat
+        features = self.output_projection(fused)
         past_stats = (
-            self._stats(past_counts, past_mass)
+            self._stats(past_counts, gates[:, 0])
             if self.debug_attention_stats
             else None
         )
         future_stats = (
-            self._stats(future_counts, future_mass)
+            self._stats(future_counts, gates[:, 1])
             if self.debug_attention_stats
             else None
         )
-        return LocalConeAttentionOutput(features, past_stats, future_stats)
+        return ConeAttentionOutput(features, past_stats, future_stats)
 
 
 __all__ = [
     "AttentionStats",
-    "LocalConeAttention",
-    "LocalConeAttentionOutput",
+    "BidirectionalConeAttention",
+    "ConeAttentionOutput",
 ]

@@ -41,3 +41,4 @@ def test_public_contracts_are_importable() -> None:
         )
     )
     assert not hasattr(huav, "DualViewEventClassifier")
+    assert not hasattr(huav, "SpatioTemporalWindowDetector")

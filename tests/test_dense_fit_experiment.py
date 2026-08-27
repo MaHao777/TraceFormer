@@ -26,7 +26,7 @@ def test_capacity_config_preserves_geometry_and_removes_regularization() -> None
     base = HUAVConfig.default()
     base = replace(
         base,
-        model=replace(base.model, dropout=0.2, direction_dropout=0.3),
+        model=replace(base.model, dropout=0.2),
         training=replace(
             base.training,
             weight_decay=0.1,
@@ -37,11 +37,9 @@ def test_capacity_config_preserves_geometry_and_removes_regularization() -> None
 
     configured = capacity_config(base, seed=73)
 
-    assert configured.model.num_cone_blocks == base.model.num_cone_blocks
     assert configured.model.spatial_block_size_x == base.model.spatial_block_size_x
     assert configured.model.num_time_blocks == base.model.num_time_blocks
     assert configured.model.dropout == 0.0
-    assert configured.model.direction_dropout == 0.0
     assert configured.training.weight_decay == 0.0
     assert configured.training.background_ratio == 200
     assert configured.training.hard_negative_fraction == 0.0
