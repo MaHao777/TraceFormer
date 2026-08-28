@@ -15,9 +15,14 @@ from huav.data import (
     simulate_high_threshold_events,
 )
 from huav.training.engine import (
+    _add_sparse_mixture_losses,
     _amp_is_enabled,
     _autocast_dtype,
     _dense_sequence_loss_weight,
+    _forward_with_sparse_mixture,
+    _initialize_full_path,
+    _sparse_mixture_auxiliary_losses,
+    _sparse_mixture_weight,
     _threshold_augmentation_weight,
     _threshold_ratio_for_epoch,
     build_model,
@@ -51,6 +56,10 @@ def main() -> None:
         help="one-based epoch used for threshold augmentation scheduling",
     )
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cuda")
+    parser.add_argument(
+        "--initialize-full",
+        help="历史最佳 best.pt；冻结 Full 配置必须提供",
+    )
     arguments = parser.parse_args()
 
     config = load_config(arguments.config)
@@ -77,7 +86,17 @@ def main() -> None:
     sequence = dataset[matching[0]]
     if arguments.epoch <= 0:
         parser.error("--epoch must be positive")
-    model = build_model(config).to(device).train()
+    model = build_model(config).to(device)
+    if config.sparse_mixture.freeze_full_model:
+        if arguments.initialize_full is None:
+            parser.error("frozen Full resource check requires --initialize-full")
+        _initialize_full_path(
+            model,
+            config,
+            arguments.initialize_full,
+            device=device,
+        )
+    model.train()
     pool_input_counts: list[int] = []
     pool_hook = model.tokenizer.key_projection.register_forward_pre_hook(
         lambda _module, inputs: pool_input_counts.append(len(inputs[0]))
@@ -128,7 +147,15 @@ def main() -> None:
         dtype=amp_dtype,
         enabled=amp_enabled,
     ):
-        output = model(events, batch_indices)
+        mixture_weight = _sparse_mixture_weight(config, arguments.epoch)
+        output, mixture_view = _forward_with_sparse_mixture(
+            model,
+            sequence,
+            events,
+            batch_indices,
+            config,
+            mixture_weight=mixture_weight,
+        )
         query_indices = sample_event_indices(
             labels,
             logits=output["event_logits"],
@@ -206,6 +233,24 @@ def main() -> None:
             config.threshold_augmentation.sparse_loss_weight * sparse_total
             + config.threshold_augmentation.consistency_loss_weight * consistency
         )
+        mixture_losses = _sparse_mixture_auxiliary_losses(
+            output,
+            labels,
+            object_ids,
+            timestamps_ms,
+            events,
+            batch_indices,
+            query_indices,
+            criterion,
+            config,
+            sampling_generator=sampling_generator,
+        )
+        if mixture_view is not None:
+            combined_total = _add_sparse_mixture_losses(
+                combined_total,
+                mixture_losses,
+                config,
+            )
     combined_total.backward()
     pool_hook.remove()
     if device.type == "cuda":
@@ -249,8 +294,37 @@ def main() -> None:
             "sparse_loss": float(sparse_total.detach().float().item()),
             "consistency_loss": float(consistency.detach().float().item()),
         },
+        "sparse_mixture": {
+            "weight": mixture_weight,
+            "ratio": (
+                mixture_view.threshold_ratio if mixture_view is not None else None
+            ),
+            "retained_events": (
+                int(len(mixture_view.events)) if mixture_view is not None else 0
+            ),
+            "sparse_tokens": int(output["sparse_token_present"].sum().item()),
+            "gate_mean": (
+                float(output["mixture_gate"].mean().detach().float().item())
+                if len(output["mixture_gate"])
+                else 0.0
+            ),
+            "losses": {
+                name: float(value.detach().float().item())
+                for name, value in mixture_losses.items()
+            },
+        },
         "max_memory_allocated_bytes": peak_memory,
         "runtime": runtime.metadata,
+        "trainable_parameter_count": sum(
+            parameter.numel()
+            for parameter in model.parameters()
+            if parameter.requires_grad
+        ),
+        "frozen_full_has_gradient": any(
+            parameter.grad is not None
+            for module in (model.tokenizer, model.encoder, model.decoder)
+            for parameter in module.parameters()
+        ),
     }
     print(json.dumps(result, ensure_ascii=False, indent=2))
 

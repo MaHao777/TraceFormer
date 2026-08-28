@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from huav.config import (
     ConeHeadConfig,
     HUAVConfig,
+    SparseMixtureConfig,
     ThresholdAugmentationConfig,
     load_config,
 )
@@ -35,21 +36,55 @@ def test_base_yaml_loads_with_phase_one_defaults() -> None:
     assert not config.threshold_augmentation.enabled
 
 
-def test_score_config_enables_physical_threshold_augmentation() -> None:
+def test_score_config_enables_sparse_mixture_and_disables_legacy_augmentation() -> None:
     config = load_config(Path("configs/huav_score_optimized.yaml"))
 
     assert config.training.lr_schedule == "legacy_cosine"
     assert config.training.fast_learning_epochs == 0
-    assert config.threshold_augmentation == ThresholdAugmentationConfig(
+    assert config.threshold_augmentation == ThresholdAugmentationConfig()
+    assert config.sparse_mixture == SparseMixtureConfig(
         enabled=True,
         min_events=300000,
         max_polarity_fraction=0.65,
-        threshold_ratios=(1.5, 2.0),
+        threshold_ratio=1.5,
         warmup_epochs=3,
         ramp_epochs=3,
-        sparse_loss_weight=0.5,
-        consistency_loss_weight=0.1,
+        initial_router_bias=-2.0,
+        initial_residual_scale=0.01,
+        freeze_full_model=True,
+        full_aux_loss_weight=0.0,
+        sparse_loss_weight=0.05,
+        object_frame_consistency_weight=0.0,
+        positive_preservation_weight=0.2,
+        positive_preservation_margin=0.0,
+        background_consistency_weight=0.01,
+        background_consistency_margin=0.0,
+        sparse_false_peak_weight=0.01,
+        sparse_false_peak_logit_margin=0.0,
+        sparse_false_peak_topk_per_frame=8,
+        sparse_false_peak_block_size_x=8,
+        sparse_false_peak_block_size_y=8,
+        gate_regularization_weight=0.001,
     )
+
+
+def test_sparse_mixture_freeze_and_preservation_validation() -> None:
+    base = HUAVConfig.default()
+    for field, value in (
+        ("freeze_full_model", 1),
+        ("positive_preservation_weight", -0.1),
+        ("positive_preservation_margin", float("nan")),
+    ):
+        raises(
+            ValueError,
+            lambda field=field, value=value: replace(
+                base,
+                sparse_mixture=replace(
+                    base.sparse_mixture,
+                    **{field: value},
+                ),
+            ).validate(),
+        )
 
 
 def test_learning_rate_strategy_validation() -> None:
@@ -104,6 +139,41 @@ def test_threshold_augmentation_rejects_duplicate_or_nonphysical_ratios() -> Non
 
     raises(ValueError, duplicate.validate)
     raises(ValueError, nonphysical.validate)
+
+
+def test_sparse_mixture_validation_rejects_conflicts_and_invalid_values() -> None:
+    base = HUAVConfig.default()
+    enabled = replace(
+        base,
+        sparse_mixture=replace(base.sparse_mixture, enabled=True),
+    )
+    enabled.validate()
+
+    raises(
+        ValueError,
+        lambda: replace(
+            enabled,
+            threshold_augmentation=replace(
+                enabled.threshold_augmentation, enabled=True
+            ),
+        ).validate(),
+    )
+    for field, value in (
+        ("threshold_ratio", 1.0),
+        ("initial_residual_scale", -0.01),
+        ("sparse_loss_weight", -0.1),
+        ("sparse_false_peak_topk_per_frame", 0),
+        ("sparse_false_peak_block_size_x", 0),
+    ):
+        raises(
+            ValueError,
+            lambda field=field, value=value: replace(
+                base,
+                sparse_mixture=replace(
+                    base.sparse_mixture, **{field: value}
+                ),
+            ).validate(),
+        )
 
 
 def test_base_yaml_exposes_historical_cone_training_and_loss_configuration() -> None:

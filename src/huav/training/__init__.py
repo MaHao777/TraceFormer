@@ -7,11 +7,14 @@ from typing import Protocol
 
 from .losses import (
     EventFocalDiceLoss,
+    background_threshold_consistency_loss,
     binary_dice_loss,
     binary_focal_loss,
     false_alarm_pixel_loss,
     object_frame_recall_loss,
     object_frame_threshold_consistency_loss,
+    positive_logit_preservation_loss,
+    sparse_block_false_peak_loss,
 )
 from .metrics import EventMetricAccumulator, EVUAVMetricAccumulator, competition_metrics
 from .sampling import sample_event_indices
@@ -46,11 +49,14 @@ __all__ = [
     "EVUAVMetricAccumulator",
     "EventMetricAccumulator",
     "Trainer",
+    "background_threshold_consistency_loss",
     "binary_dice_loss",
     "binary_focal_loss",
     "competition_metrics",
     "false_alarm_pixel_loss",
     "object_frame_threshold_consistency_loss",
     "object_frame_recall_loss",
+    "positive_logit_preservation_loss",
     "sample_event_indices",
+    "sparse_block_false_peak_loss",
 ]

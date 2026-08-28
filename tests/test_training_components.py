@@ -5,10 +5,13 @@ import torch
 
 from huav.training.losses import (
     EventFocalDiceLoss,
+    background_threshold_consistency_loss,
     binary_dice_loss,
     binary_focal_loss,
     false_alarm_pixel_loss,
     object_frame_recall_loss,
+    positive_logit_preservation_loss,
+    sparse_block_false_peak_loss,
 )
 from huav.training.metrics import (
     EventMetricAccumulator,
@@ -16,6 +19,89 @@ from huav.training.metrics import (
     competition_metrics,
 )
 from huav.training.sampling import sample_event_indices
+
+
+def test_positive_preservation_uses_all_positive_events_and_detaches_teacher() -> None:
+    fused = torch.tensor([-2.0, 1.0, -3.0, 4.0], requires_grad=True)
+    full = torch.tensor([0.0, -4.0, -1.0, 2.0], requires_grad=True)
+    labels = torch.tensor([1.0, 0.0, 1.0, 1.0])
+
+    loss = positive_logit_preservation_loss(
+        fused,
+        full,
+        labels,
+        logit_margin=0.5,
+    )
+    loss.backward()
+
+    assert loss.item() > 0.0
+    assert fused.grad is not None
+    assert fused.grad[0] < 0 and fused.grad[2] < 0
+    assert fused.grad[1] == 0 and fused.grad[3] == 0
+    assert full.grad is None
+
+
+def test_background_threshold_consistency_is_asymmetric_and_detaches_full() -> None:
+    sparse = torch.tensor([-2.0, 2.0, 0.0], requires_grad=True)
+    full = torch.tensor([-2.0, -2.0, 3.0], requires_grad=True)
+    source_indices = torch.tensor([0, 1, 2])
+    targets = torch.tensor([0.0, 0.0, 1.0])
+
+    loss = background_threshold_consistency_loss(
+        sparse,
+        full,
+        source_indices,
+        targets,
+        logit_margin=0.0,
+    )
+    loss.backward()
+
+    assert loss.item() > 1.0
+    assert sparse.grad is not None and torch.isfinite(sparse.grad).all()
+    assert full.grad is None
+
+
+def test_sparse_block_false_peak_penalizes_highest_background_block() -> None:
+    common = {
+        "targets": torch.zeros(4),
+        "batch_indices": torch.zeros(4, dtype=torch.long),
+        "timestamps_ms": torch.tensor([10.0, 20.0, 10.0, 20.0]),
+        "coordinates": torch.tensor(
+            [[0.0, 0.0], [1.0, 1.0], [9.0, 0.0], [10.0, 1.0]]
+        ),
+        "frame_ms": 50.0,
+        "block_size_x": 8,
+        "block_size_y": 8,
+        "logit_margin": 0.0,
+        "topk_per_frame": 1,
+    }
+
+    low = sparse_block_false_peak_loss(torch.full((4,), -3.0), **common)
+    high = sparse_block_false_peak_loss(
+        torch.tensor([-3.0, -3.0, 3.0, -3.0]), **common
+    )
+
+    assert high > low
+
+
+def test_sparse_block_false_peak_empty_background_is_backward_safe() -> None:
+    logits = torch.tensor([1.0, 2.0], requires_grad=True)
+    loss = sparse_block_false_peak_loss(
+        logits,
+        torch.ones(2),
+        torch.zeros(2, dtype=torch.long),
+        torch.tensor([10.0, 20.0]),
+        torch.tensor([[0.0, 0.0], [1.0, 1.0]]),
+        frame_ms=50.0,
+        block_size_x=8,
+        block_size_y=8,
+        logit_margin=0.0,
+        topk_per_frame=1,
+    )
+    loss.backward()
+
+    assert loss.item() == 0.0
+    assert logits.grad is not None
 
 
 def test_sampler_keeps_all_positives_and_caps_background() -> None:

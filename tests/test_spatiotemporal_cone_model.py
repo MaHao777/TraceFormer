@@ -6,7 +6,12 @@ from huav.config import ConeHeadConfig
 from huav.models import SpatioTemporalConeDetector
 
 
-def _model(*, causal_mode: bool = False, debug: bool = True) -> SpatioTemporalConeDetector:
+def _model(
+    *,
+    causal_mode: bool = False,
+    debug: bool = True,
+    sparse_mixture: bool = False,
+) -> SpatioTemporalConeDetector:
     return SpatioTemporalConeDetector(
         width=16,
         height=12,
@@ -30,6 +35,9 @@ def _model(*, causal_mode: bool = False, debug: bool = True) -> SpatioTemporalCo
         causal_mode=causal_mode,
         direction_dropout=0.0,
         debug_attention_stats=debug,
+        sparse_mixture_enabled=sparse_mixture,
+        sparse_mixture_router_bias=-2.0,
+        sparse_mixture_residual_scale=0.01,
     )
 
 
@@ -45,11 +53,31 @@ def _events() -> torch.Tensor:
     )
 
 
+def test_freeze_full_path_keeps_only_sparse_mixture_trainable_and_full_eval() -> None:
+    model = _model(sparse_mixture=True)
+    model.freeze_full_path()
+    model.train()
+
+    for module in (model.tokenizer, model.encoder, model.decoder):
+        assert not module.training
+        assert not any(parameter.requires_grad for parameter in module.parameters())
+    assert model.sparse_mixture is not None
+    assert model.sparse_mixture.training
+    assert all(
+        parameter.requires_grad for parameter in model.sparse_mixture.parameters()
+    )
+
+
 def test_forward_returns_required_event_token_and_attention_outputs() -> None:
     output = _model()(_events())
 
     assert {
         "event_logits",
+        "full_event_logits",
+        "sparse_event_logits",
+        "sparse_source_indices",
+        "mixture_gate",
+        "sparse_token_present",
         "token_features",
         "token_coords",
         "token_batch_indices",
@@ -58,6 +86,8 @@ def test_forward_returns_required_event_token_and_attention_outputs() -> None:
         "future_attention_stats",
     } == set(output)
     assert output["event_logits"].shape == (5,)
+    assert torch.equal(output["event_logits"], output["full_event_logits"])
+    assert output["sparse_event_logits"].shape == (0,)
     assert output["event_token_indices"].shape == (5,)
     assert output["token_features"].shape[1] == 16
     assert len(output["past_attention_stats"]) == 3
@@ -111,4 +141,32 @@ def test_end_to_end_event_logits_backpropagate_through_the_detector() -> None:
     assert all(
         parameter.grad is not None and torch.isfinite(parameter.grad).all()
         for parameter in parameters_with_grad
+    )
+
+
+def test_paired_sparse_view_preserves_full_event_order_and_trains_router() -> None:
+    model = _model(sparse_mixture=True)
+    events = _events()
+    source_indices = torch.tensor([0, 1, 3, 4])
+    sparse_events = events[source_indices]
+
+    output = model(
+        events,
+        sparse_events=sparse_events,
+        sparse_source_indices=source_indices,
+        mixture_weight=1.0,
+    )
+
+    assert output["event_logits"].shape == (len(events),)
+    assert output["full_event_logits"].shape == (len(events),)
+    assert output["sparse_event_logits"].shape == (len(source_indices),)
+    assert torch.equal(output["sparse_source_indices"], source_indices)
+    assert output["mixture_gate"].ndim == 1
+    assert bool(output["sparse_token_present"].any())
+    output["event_logits"].square().mean().backward()
+    mixture_parameters = list(model.sparse_mixture.parameters())
+    assert mixture_parameters
+    assert all(
+        parameter.grad is not None and torch.isfinite(parameter.grad).all()
+        for parameter in mixture_parameters
     )

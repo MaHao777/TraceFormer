@@ -118,6 +118,32 @@ class ThresholdAugmentationConfig:
 
 
 @dataclass(frozen=True)
+class SparseMixtureConfig:
+    enabled: bool = False
+    min_events: int = 300000
+    max_polarity_fraction: float = 0.65
+    threshold_ratio: float = 1.5
+    warmup_epochs: int = 3
+    ramp_epochs: int = 3
+    initial_router_bias: float = -2.0
+    initial_residual_scale: float = 0.01
+    freeze_full_model: bool = False
+    full_aux_loss_weight: float = 0.25
+    sparse_loss_weight: float = 0.15
+    object_frame_consistency_weight: float = 0.1
+    positive_preservation_weight: float = 0.0
+    positive_preservation_margin: float = 0.0
+    background_consistency_weight: float = 0.05
+    background_consistency_margin: float = 0.0
+    sparse_false_peak_weight: float = 0.05
+    sparse_false_peak_logit_margin: float = 0.0
+    sparse_false_peak_topk_per_frame: int = 8
+    sparse_false_peak_block_size_x: int = 8
+    sparse_false_peak_block_size_y: int = 8
+    gate_regularization_weight: float = 0.001
+
+
+@dataclass(frozen=True)
 class EvaluationConfig:
     optimize_threshold: bool = True
     threshold_steps: int = 19
@@ -152,6 +178,7 @@ class HUAVConfig:
     training: TrainingConfig = TrainingConfig()
     loss: LossConfig = LossConfig()
     threshold_augmentation: ThresholdAugmentationConfig = ThresholdAugmentationConfig()
+    sparse_mixture: SparseMixtureConfig = SparseMixtureConfig()
     evaluation: EvaluationConfig = EvaluationConfig()
 
     @classmethod
@@ -391,6 +418,74 @@ class HUAVConfig:
                 getattr(augmentation, name), f"threshold augmentation {name}"
             ) < 0:
                 raise ValueError(f"threshold augmentation {name} must be non-negative")
+        mixture = self.sparse_mixture
+        if not isinstance(mixture.enabled, bool):
+            raise ValueError("sparse mixture enabled must be boolean")
+        if not isinstance(mixture.freeze_full_model, bool):
+            raise ValueError("sparse mixture freeze_full_model must be boolean")
+        if mixture.freeze_full_model and not mixture.enabled:
+            raise ValueError("freezing the full model requires sparse mixture")
+        if mixture.enabled and augmentation.enabled:
+            raise ValueError(
+                "sparse mixture and threshold augmentation cannot both be enabled"
+            )
+        _positive_integer(mixture.min_events, "sparse mixture min_events")
+        mixture_polarity = _finite_real(
+            mixture.max_polarity_fraction,
+            "sparse mixture max_polarity_fraction",
+        )
+        if not 0.5 <= mixture_polarity <= 1.0:
+            raise ValueError(
+                "sparse mixture max_polarity_fraction must be in [0.5,1]"
+            )
+        if _finite_real(mixture.threshold_ratio, "sparse mixture threshold_ratio") <= 1:
+            raise ValueError("sparse mixture threshold_ratio must be greater than 1")
+        if (
+            isinstance(mixture.warmup_epochs, bool)
+            or not isinstance(mixture.warmup_epochs, Integral)
+            or mixture.warmup_epochs < 0
+        ):
+            raise ValueError(
+                "sparse mixture warmup_epochs must be a non-negative integer"
+            )
+        _positive_integer(mixture.ramp_epochs, "sparse mixture ramp_epochs")
+        _positive_integer(
+            mixture.sparse_false_peak_topk_per_frame,
+            "sparse mixture sparse_false_peak_topk_per_frame",
+        )
+        _positive_integer(
+            mixture.sparse_false_peak_block_size_x,
+            "sparse mixture sparse_false_peak_block_size_x",
+        )
+        _positive_integer(
+            mixture.sparse_false_peak_block_size_y,
+            "sparse mixture sparse_false_peak_block_size_y",
+        )
+        _finite_real(mixture.initial_router_bias, "sparse mixture initial_router_bias")
+        _finite_real(
+            mixture.background_consistency_margin,
+            "sparse mixture background_consistency_margin",
+        )
+        _finite_real(
+            mixture.sparse_false_peak_logit_margin,
+            "sparse mixture sparse_false_peak_logit_margin",
+        )
+        _finite_real(
+            mixture.positive_preservation_margin,
+            "sparse mixture positive_preservation_margin",
+        )
+        for name in (
+            "initial_residual_scale",
+            "full_aux_loss_weight",
+            "sparse_loss_weight",
+            "object_frame_consistency_weight",
+            "positive_preservation_weight",
+            "background_consistency_weight",
+            "sparse_false_peak_weight",
+            "gate_regularization_weight",
+        ):
+            if _finite_real(getattr(mixture, name), f"sparse mixture {name}") < 0:
+                raise ValueError(f"sparse mixture {name} must be non-negative")
         if not isinstance(self.evaluation.optimize_threshold, bool):
             raise ValueError("optimize_threshold must be boolean")
         _positive_integer(self.evaluation.threshold_steps, "threshold_steps")
@@ -434,6 +529,7 @@ def load_config(path: Path | str) -> HUAVConfig:
         "training",
         "loss",
         "threshold_augmentation",
+        "sparse_mixture",
         "evaluation",
     }
     unknown_sections = set(raw) - allowed_sections
@@ -470,6 +566,7 @@ def load_config(path: Path | str) -> HUAVConfig:
             training=TrainingConfig(**raw.get("training", {})),
             loss=LossConfig(**raw.get("loss", {})),
             threshold_augmentation=ThresholdAugmentationConfig(**raw_augmentation),
+            sparse_mixture=SparseMixtureConfig(**raw.get("sparse_mixture", {})),
             evaluation=EvaluationConfig(**raw.get("evaluation", {})),
         )
     except TypeError as error:

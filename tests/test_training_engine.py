@@ -28,6 +28,7 @@ from huav.training.engine import (
     _grad_scaler_is_enabled,
     _restore_rng_state,
     _select_competition_threshold,
+    _sparse_mixture_weight,
     _threshold_augmentation_weight,
     _threshold_ratio_for_epoch,
     evaluate_checkpoint,
@@ -80,6 +81,24 @@ def _write_imbalanced_sequence(path: Path) -> None:
                 int(is_target),
             )
         )
+    np.savez(path, ev=np.array(rows, dtype=dtype))
+
+
+def _write_sparse_mixture_sequence(path: Path) -> None:
+    dtype = [
+        ("x", "<i2"),
+        ("y", "<i2"),
+        ("t", "<f8"),
+        ("p", "i1"),
+        ("label", "i1"),
+        ("name", "i1"),
+    ]
+    rows = [
+        (1, 1, 100.0, 1, 1, 1),
+        (1, 1, 200.0, 1, 1, 1),
+        (1, 1, 300.0, 0, 0, 0),
+        (1, 1, 400.0, 0, 0, 0),
+    ]
     np.savez(path, ev=np.array(rows, dtype=dtype))
 
 
@@ -188,7 +207,8 @@ def test_cpu_training_writes_reproducible_metrics_and_checkpoint() -> None:
         checkpoint = __import__("torch").load(
             run_dir / "best.pt", map_location="cpu", weights_only=True
         )
-        assert checkpoint["schema_version"] == 4
+        assert checkpoint["schema_version"] == 5
+        assert checkpoint["sparse_mixture_config"]["enabled"] is False
         assert checkpoint["decision_threshold"] == metrics["threshold"]
         changed_config = replace(
             _config(data_root, output_root),
@@ -647,6 +667,70 @@ def test_threshold_schedule_warms_then_alternates_deterministically() -> None:
     assert _threshold_ratio_for_epoch(config, epoch=4, dataset_index=1) == 1.5
     assert _threshold_ratio_for_epoch(config, epoch=7, dataset_index=0) == 2.0
     assert _threshold_ratio_for_epoch(config, epoch=7, dataset_index=1) == 1.5
+
+
+def test_sparse_mixture_schedule_holds_router_then_ramps() -> None:
+    base = HUAVConfig.default()
+    config = replace(
+        base,
+        sparse_mixture=replace(
+            base.sparse_mixture,
+            enabled=True,
+            warmup_epochs=2,
+            ramp_epochs=2,
+        ),
+    ).validate()
+
+    assert [_sparse_mixture_weight(config, epoch) for epoch in range(1, 6)] == [
+        0.0,
+        0.0,
+        pytest.approx(0.5),
+        1.0,
+        1.0,
+    ]
+
+
+def test_training_records_sparse_mixture_losses_and_paired_inference() -> None:
+    with TemporaryDirectory(dir=Path.cwd()) as directory:
+        temporary_root = Path(directory)
+        data_root = temporary_root / "data"
+        train_root = data_root / "train"
+        val_root = data_root / "val"
+        train_root.mkdir(parents=True)
+        val_root.mkdir(parents=True)
+        _write_sparse_mixture_sequence(train_root / "train_000.npz")
+        _write_sparse_mixture_sequence(val_root / "val_000.npz")
+        output_root = temporary_root / "outputs"
+        config = _config(data_root, output_root)
+        config = replace(
+            config,
+            sparse_mixture=replace(
+                config.sparse_mixture,
+                enabled=True,
+                min_events=1,
+                max_polarity_fraction=1.0,
+                warmup_epochs=0,
+                ramp_epochs=1,
+            ),
+        ).validate()
+
+        summary = run_training(config, output_dir=output_root / "run")
+        run_dir = Path(summary["run_dir"])
+        history = json.loads((run_dir / "history.json").read_text(encoding="utf-8"))
+        mixture = json.loads(
+            (run_dir / "sparse_mixture.json").read_text(encoding="utf-8")
+        )
+        reproduced = evaluate_checkpoint(config, run_dir / "best.pt")
+
+    train_loss = history[0]["train_loss"]
+    assert train_loss["full_aux_total"] > 0.0
+    assert train_loss["sparse_total"] > 0.0
+    assert train_loss["background_consistency"] > 0.0
+    assert train_loss["sparse_false_peak"] > 0.0
+    assert train_loss["gate_regularization"] > 0.0
+    assert history[0]["sparse_mixture"]["augmented_files"] == 1
+    assert mixture[0]["ratio_usage"] == {"1.5": 1}
+    assert reproduced["event"]["event_count"] == 4
 
 
 def test_training_adds_sparse_branch_only_for_enabled_eligible_stream() -> None:

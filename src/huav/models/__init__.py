@@ -9,6 +9,7 @@ import torch
 
 from huav.data import EventBatch
 
+from .sparse_mixture import SparseMixtureOutput, SparseTokenMixture
 from .spatiotemporal_cone import SpatioTemporalConeDetector
 
 
@@ -41,4 +42,6 @@ __all__ = [
     "EventSegmenter",
     "ModelOutput",
     "SpatioTemporalConeDetector",
+    "SparseMixtureOutput",
+    "SparseTokenMixture",
 ]

@@ -41,7 +41,13 @@ from huav.inference import (
 from huav.models import SpatioTemporalConeDetector
 from huav.visualization import render_training_curves
 
-from .losses import EventFocalDiceLoss, object_frame_threshold_consistency_loss
+from .losses import (
+    EventFocalDiceLoss,
+    background_threshold_consistency_loss,
+    object_frame_threshold_consistency_loss,
+    positive_logit_preservation_loss,
+    sparse_block_false_peak_loss,
+)
 from .lr_schedules import LearningRateController
 from .metrics import (
     EventMetricAccumulator,
@@ -51,8 +57,8 @@ from .metrics import (
 from .runtime import prepare_device
 from .sampling import sample_event_indices
 
-CHECKPOINT_SCHEMA_VERSION = 4
-TRAINING_STATE_SCHEMA_VERSION = 1
+CHECKPOINT_SCHEMA_VERSION = 5
+TRAINING_STATE_SCHEMA_VERSION = 2
 
 
 def _update_training_curves(
@@ -92,7 +98,78 @@ def build_model(config: HUAVConfig) -> SpatioTemporalConeDetector:
         causal_mode=config.model.causal_mode,
         direction_dropout=config.model.direction_dropout,
         debug_attention_stats=config.model.debug_attention_stats,
+        sparse_mixture_enabled=config.sparse_mixture.enabled,
+        sparse_mixture_router_bias=config.sparse_mixture.initial_router_bias,
+        sparse_mixture_residual_scale=(
+            config.sparse_mixture.initial_residual_scale
+        ),
     )
+
+
+def _file_sha256(path: Path) -> str:
+    """分块计算检查点哈希，避免一次性读入大文件。"""
+
+    digest = sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _initialize_full_path(
+    model: SpatioTemporalConeDetector,
+    config: HUAVConfig,
+    checkpoint_path: str | Path,
+    *,
+    device: torch.device,
+) -> dict[str, Any]:
+    """从历史检查点严格加载 Full 主干并冻结。"""
+
+    path = Path(checkpoint_path).resolve()
+    checkpoint = torch.load(path, map_location=device, weights_only=True)
+    if checkpoint.get("model_config") != _serializable(asdict(config.model)):
+        raise ValueError("initial Full checkpoint model configuration does not match")
+    if checkpoint.get("resolution") != _serializable(asdict(config.resolution)):
+        raise ValueError("initial Full checkpoint resolution does not match")
+    source_state = checkpoint.get("model_state")
+    if not isinstance(source_state, dict):
+        raise ValueError("initial Full checkpoint has no model state")
+    expected_full = {
+        name for name in model.state_dict() if not name.startswith("sparse_mixture.")
+    }
+    source_full = {
+        name: value
+        for name, value in source_state.items()
+        if not name.startswith("sparse_mixture.")
+    }
+    if set(source_full) != expected_full:
+        missing = sorted(expected_full - set(source_full))
+        extra = sorted(set(source_full) - expected_full)
+        raise ValueError(
+            f"initial Full checkpoint state mismatch: missing={missing}, extra={extra}"
+        )
+    incompatible = model.load_state_dict(source_full, strict=False)
+    expected_missing = {
+        name for name in model.state_dict() if name.startswith("sparse_mixture.")
+    }
+    if set(incompatible.missing_keys) != expected_missing or incompatible.unexpected_keys:
+        raise ValueError("initial Full checkpoint could not be loaded strictly")
+    model.freeze_full_path()
+    return {
+        "path": str(path),
+        "sha256": _file_sha256(path),
+        "schema_version": checkpoint.get("schema_version"),
+        "epoch": checkpoint.get("epoch"),
+    }
+
+
+def _trainable_parameters(model: torch.nn.Module) -> list[torch.nn.Parameter]:
+    """优化器只接收真正允许更新的参数。"""
+
+    parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
+    if not parameters:
+        raise ValueError("model has no trainable parameters")
+    return parameters
 
 
 def _dataset(config: HUAVConfig, split: str) -> NPZEventDataset:
@@ -274,6 +351,196 @@ def _threshold_augmentation_weight(config: HUAVConfig, epoch: int) -> float:
     return float(min(1.0, ramp_position / augmentation.ramp_epochs))
 
 
+def _sparse_mixture_weight(config: HUAVConfig, epoch: int) -> float:
+    """Return the residual-gate ramp while auxiliary experts train from epoch one."""
+
+    mixture = config.sparse_mixture
+    if not mixture.enabled or epoch <= mixture.warmup_epochs:
+        return 0.0
+    ramp_position = epoch - mixture.warmup_epochs
+    return float(min(1.0, ramp_position / mixture.ramp_epochs))
+
+
+def _forward_with_sparse_mixture(
+    model: SpatioTemporalConeDetector,
+    sequence: LoadedEventSequence,
+    events: torch.Tensor,
+    batch_indices: torch.Tensor,
+    config: HUAVConfig,
+    *,
+    mixture_weight: float,
+) -> tuple[dict[str, Any], HighThresholdView | None]:
+    """Create the deterministic paired view and preserve full-event decoding."""
+
+    mixture = config.sparse_mixture
+    if not mixture.enabled or not is_dense_balanced_event_stream(
+        sequence.events,
+        min_events=mixture.min_events,
+        max_polarity_fraction=mixture.max_polarity_fraction,
+    ):
+        return model(events, batch_indices), None
+    view = simulate_high_threshold_events(
+        sequence.events,
+        width=config.resolution.width,
+        height=config.resolution.height,
+        threshold_ratio=mixture.threshold_ratio,
+    )
+    sparse_events = view.events.to(events.device)
+    sparse_source_indices = view.source_indices.to(events.device)
+    sparse_batch_indices = torch.zeros(
+        len(sparse_events), dtype=torch.long, device=events.device
+    )
+    output = model(
+        events,
+        batch_indices,
+        sparse_events=sparse_events,
+        sparse_batch_indices=sparse_batch_indices,
+        sparse_source_indices=sparse_source_indices,
+        mixture_weight=mixture_weight,
+    )
+    return output, view
+
+
+def _sparse_mixture_auxiliary_losses(
+    output: dict[str, Any],
+    labels: torch.Tensor,
+    object_ids: torch.Tensor,
+    timestamps_ms: torch.Tensor,
+    events: torch.Tensor,
+    batch_indices: torch.Tensor,
+    query_indices: torch.Tensor,
+    criterion: EventFocalDiceLoss,
+    config: HUAVConfig,
+    *,
+    sampling_generator: torch.Generator,
+) -> dict[str, torch.Tensor]:
+    """Compute conservative expert losses without changing the main event universe."""
+
+    zero = output["event_logits"].sum() * 0.0
+    result = {
+        "full_aux_total": zero,
+        "sparse_total": zero,
+        "object_frame_consistency": zero,
+        "positive_preservation": zero,
+        "background_consistency": zero,
+        "sparse_false_peak": zero,
+        "gate_regularization": zero,
+    }
+    source_indices = output["sparse_source_indices"]
+    if len(source_indices) == 0:
+        return result
+
+    mixture = config.sparse_mixture
+    if mixture.full_aux_loss_weight:
+        full_aux = criterion(
+            output["full_event_logits"][query_indices],
+            labels[query_indices],
+            batch_indices[query_indices],
+            object_ids=object_ids[query_indices],
+            timestamps_ms=timestamps_ms[query_indices],
+            frame_ms=config.evaluation.frame_ms,
+            full_logits=output["full_event_logits"],
+            full_targets=labels,
+            full_batch_indices=batch_indices,
+            full_timestamps_ms=timestamps_ms,
+            full_coordinates=events[:, :2],
+        )
+        result["full_aux_total"] = full_aux["total"]
+    fused_logits = output["event_logits"]
+    sparse_logits = fused_logits[source_indices]
+    sparse_labels = labels[source_indices]
+    sparse_object_ids = object_ids[source_indices]
+    sparse_timestamps_ms = timestamps_ms[source_indices]
+    sparse_events = events[source_indices]
+    sparse_batch_indices = batch_indices[source_indices]
+    sparse_query_indices = sample_event_indices(
+        sparse_labels,
+        logits=sparse_logits,
+        background_ratio=config.training.background_ratio,
+        hard_negative_fraction=config.training.hard_negative_fraction,
+        generator=sampling_generator,
+        max_background_without_positive=(
+            config.training.max_background_without_positive
+        ),
+    )
+    sparse_aux = criterion(
+        sparse_logits[sparse_query_indices],
+        sparse_labels[sparse_query_indices],
+        sparse_batch_indices[sparse_query_indices],
+        object_ids=sparse_object_ids[sparse_query_indices],
+        timestamps_ms=sparse_timestamps_ms[sparse_query_indices],
+        frame_ms=config.evaluation.frame_ms,
+        full_logits=sparse_logits,
+        full_targets=sparse_labels,
+        full_batch_indices=sparse_batch_indices,
+        full_timestamps_ms=sparse_timestamps_ms,
+        full_coordinates=sparse_events[:, :2],
+    )
+    result["sparse_total"] = sparse_aux["total"]
+    if mixture.object_frame_consistency_weight:
+        result["object_frame_consistency"] = object_frame_threshold_consistency_loss(
+            fused_logits[source_indices],
+            output["full_event_logits"],
+            source_indices,
+            labels,
+            object_ids,
+            timestamps_ms,
+            frame_ms=config.evaluation.frame_ms,
+        )
+    all_indices = torch.arange(len(labels), dtype=torch.long, device=labels.device)
+    result["background_consistency"] = background_threshold_consistency_loss(
+        fused_logits,
+        output["full_event_logits"],
+        all_indices,
+        labels,
+        logit_margin=mixture.background_consistency_margin,
+    )
+    result["sparse_false_peak"] = sparse_block_false_peak_loss(
+        fused_logits,
+        labels,
+        batch_indices,
+        timestamps_ms,
+        events[:, :2],
+        frame_ms=config.evaluation.frame_ms,
+        block_size_x=mixture.sparse_false_peak_block_size_x,
+        block_size_y=mixture.sparse_false_peak_block_size_y,
+        logit_margin=mixture.sparse_false_peak_logit_margin,
+        topk_per_frame=mixture.sparse_false_peak_topk_per_frame,
+    )
+    result["positive_preservation"] = positive_logit_preservation_loss(
+        fused_logits,
+        output["full_event_logits"],
+        labels,
+        logit_margin=mixture.positive_preservation_margin,
+    )
+    gate = output["mixture_gate"]
+    result["gate_regularization"] = gate.mean() if len(gate) else zero
+    return result
+
+
+def _add_sparse_mixture_losses(
+    main_total: torch.Tensor,
+    auxiliary: dict[str, torch.Tensor],
+    config: HUAVConfig,
+) -> torch.Tensor:
+    mixture = config.sparse_mixture
+    return (
+        main_total
+        + mixture.full_aux_loss_weight * auxiliary["full_aux_total"]
+        + mixture.sparse_loss_weight * auxiliary["sparse_total"]
+        + mixture.object_frame_consistency_weight
+        * auxiliary["object_frame_consistency"]
+        + mixture.positive_preservation_weight
+        * auxiliary["positive_preservation"]
+        + mixture.background_consistency_weight
+        * auxiliary["background_consistency"]
+        + mixture.sparse_false_peak_weight
+        * auxiliary["sparse_false_peak"]
+        + mixture.gate_regularization_weight
+        * auxiliary["gate_regularization"]
+    )
+
+
 def _threshold_ratio_for_epoch(
     config: HUAVConfig,
     *,
@@ -425,7 +692,14 @@ def evaluate_model(
         batch_indices = torch.zeros(
             len(events), dtype=torch.long, device=device
         )
-        output = model(events, batch_indices)
+        output, _ = _forward_with_sparse_mixture(
+            model,
+            sequence,
+            events,
+            batch_indices,
+            config,
+            mixture_weight=1.0,
+        )
         if criterion is not None and loss_totals is not None:
             query_indices = sample_event_indices(
                 labels,
@@ -652,6 +926,7 @@ def _training_state_payload(
     epoch: int,
     history: list[dict[str, Any]],
     augmentation_history: list[dict[str, Any]],
+    sparse_mixture_history: list[dict[str, Any]],
     best_score: float,
     best_metrics: dict[str, Any],
     best_checkpoint: dict[str, Any],
@@ -671,6 +946,7 @@ def _training_state_payload(
         "epoch": epoch,
         "history": history,
         "threshold_augmentation_history": augmentation_history,
+        "sparse_mixture_history": sparse_mixture_history,
         "best_score": best_score,
         "best_metrics": best_metrics,
         "best_checkpoint": best_checkpoint,
@@ -709,6 +985,7 @@ def _run_training_impl(
     device: str | None = None,
     progress: bool = False,
     resume_state_path: str | Path | None = None,
+    initial_full_checkpoint_path: str | Path | None = None,
 ) -> dict[str, Any]:
     config.validate()
     device_name = device or config.training.device
@@ -739,6 +1016,23 @@ def _run_training_impl(
     validation_manifest_digest = _manifest_identity_digest(validation_manifest)
     _write_json(run_dir / "dataset_manifest.json", manifest)
     model = build_model(config).to(torch_device)
+    initialization: dict[str, Any] | None = None
+    if resume_state_path is not None and initial_full_checkpoint_path is not None:
+        raise ValueError("initial Full checkpoint and resume state are mutually exclusive")
+    if config.sparse_mixture.freeze_full_model:
+        if resume_state_path is not None:
+            model.freeze_full_path()
+        elif initial_full_checkpoint_path is None:
+            raise ValueError("frozen Full training requires --initialize-full")
+        else:
+            initialization = _initialize_full_path(
+                model,
+                config,
+                initial_full_checkpoint_path,
+                device=torch_device,
+            )
+    elif initial_full_checkpoint_path is not None:
+        raise ValueError("--initialize-full requires sparse_mixture.freeze_full_model")
     criterion = EventFocalDiceLoss(
         focal_alpha=config.loss.focal_alpha,
         focal_gamma=config.loss.focal_gamma,
@@ -750,7 +1044,7 @@ def _run_training_impl(
         false_alarm_topk_per_frame=config.loss.false_alarm_topk_per_frame,
     )
     optimizer = torch.optim.AdamW(
-        model.parameters(),
+        _trainable_parameters(model),
         lr=config.training.learning_rate,
         weight_decay=config.training.weight_decay,
     )
@@ -765,6 +1059,7 @@ def _run_training_impl(
     scaler = torch.amp.GradScaler("cuda", enabled=scaler_enabled)
     history: list[dict[str, Any]] = []
     threshold_augmentation_history: list[dict[str, Any]] = []
+    sparse_mixture_history: list[dict[str, Any]] = []
     best_score = -1.0
     best_metrics: dict[str, Any] | None = None
     best_checkpoint: dict[str, Any] | None = None
@@ -785,6 +1080,7 @@ def _run_training_impl(
         threshold_augmentation_history = list(
             state["threshold_augmentation_history"]
         )
+        sparse_mixture_history = list(state["sparse_mixture_history"])
         best_score = float(state["best_score"])
         best_metrics = dict(state["best_metrics"])
         best_checkpoint = dict(state["best_checkpoint"])
@@ -815,6 +1111,8 @@ def _run_training_impl(
             parameter_group["lr"] = learning_rate
         augmentation_weight = _threshold_augmentation_weight(config, epoch_number)
         augmentation_report = _new_threshold_epoch_report(augmentation_weight)
+        mixture_weight = _sparse_mixture_weight(config, epoch_number)
+        mixture_report = _new_threshold_epoch_report(mixture_weight)
         model.train()
         totals = {
             "total": 0.0,
@@ -825,6 +1123,13 @@ def _run_training_impl(
             "sparse_total": 0.0,
             "threshold_consistency": 0.0,
             "augmentation_weight": 0.0,
+            "full_aux_total": 0.0,
+            "object_frame_consistency": 0.0,
+            "background_consistency": 0.0,
+            "positive_preservation": 0.0,
+            "sparse_false_peak": 0.0,
+            "gate_regularization": 0.0,
+            "mixture_weight": 0.0,
         }
         epoch_started = time.perf_counter()
         epoch_parameters = _parameter_snapshot(model)
@@ -865,6 +1170,15 @@ def _run_training_impl(
                         frame_ms=config.evaluation.frame_ms,
                     ),
                 )
+            mixture_eligible = is_dense_balanced_event_stream(
+                sequence.events,
+                min_events=config.sparse_mixture.min_events,
+                max_polarity_fraction=(
+                    config.sparse_mixture.max_polarity_fraction
+                ),
+            )
+            if config.sparse_mixture.enabled and mixture_eligible:
+                mixture_report["eligible_files"] += 1
             events = sequence.events.to(torch_device)
             labels = sequence.labels.to(torch_device)
             object_ids = sequence.object_ids.to(torch_device)
@@ -878,7 +1192,24 @@ def _run_training_impl(
                 dtype=amp_dtype,
                 enabled=amp_enabled,
             ):
-                output = model(events, batch_indices)
+                output, mixture_view = _forward_with_sparse_mixture(
+                    model,
+                    sequence,
+                    events,
+                    batch_indices,
+                    config,
+                    mixture_weight=mixture_weight,
+                )
+                if mixture_view is not None:
+                    _record_threshold_view(
+                        mixture_report,
+                        mixture_view,
+                        _threshold_view_statistics(
+                            sequence,
+                            mixture_view,
+                            frame_ms=config.evaluation.frame_ms,
+                        ),
+                    )
                 query_indices = sample_event_indices(
                     labels,
                     logits=output["event_logits"],
@@ -964,18 +1295,46 @@ def _run_training_impl(
                     + config.threshold_augmentation.consistency_loss_weight
                     * threshold_consistency
                 )
+                auxiliary = _sparse_mixture_auxiliary_losses(
+                    output,
+                    labels,
+                    object_ids,
+                    timestamps_ms,
+                    events,
+                    batch_indices,
+                    query_indices,
+                    criterion,
+                    config,
+                    sampling_generator=sampling_generator,
+                )
+                if mixture_view is not None:
+                    combined_total = _add_sparse_mixture_losses(
+                        combined_total,
+                        auxiliary,
+                        config,
+                    )
                 losses = dict(full_losses)
                 losses["total"] = combined_total
-                losses["sparse_total"] = sparse_total
+                losses["sparse_total"] = (
+                    sparse_total + auxiliary["sparse_total"]
+                )
                 losses["threshold_consistency"] = threshold_consistency
                 losses["augmentation_weight"] = combined_total.new_tensor(
                     augmentation_weight if threshold_view is not None else 0.0
+                )
+                for name, value in auxiliary.items():
+                    if name != "sparse_total":
+                        losses[name] = value
+                losses["mixture_weight"] = combined_total.new_tensor(
+                    mixture_weight if mixture_view is not None else 0.0
                 )
             if not torch.isfinite(losses["total"]):
                 raise RuntimeError(
                     f"non-finite training loss at epoch {epoch_number}, step {step + 1}"
                 )
-            if amp_enabled:
+            # 非稠密样本不会经过专家；Full 冻结时只记录 loss，不执行空反向。
+            has_trainable_path = losses["total"].requires_grad
+            if amp_enabled and has_trainable_path:
                 scaler.scale(losses["total"]).backward()
                 scaler.unscale_(optimizer)
                 gradient_norm = clip_grad_norm_(
@@ -988,7 +1347,7 @@ def _run_training_impl(
                 gradient_norms.append(float(gradient_norm.item()))
                 scaler.step(optimizer)
                 scaler.update()
-            else:
+            elif has_trainable_path:
                 losses["total"].backward()
                 gradient_norm = clip_grad_norm_(
                     model.parameters(), config.training.gradient_clip_norm
@@ -1017,6 +1376,10 @@ def _run_training_impl(
             augmentation_report
         )
         threshold_augmentation_history.append(finalized_augmentation_report)
+        finalized_mixture_report = _finalize_threshold_epoch_report(
+            mixture_report
+        )
+        sparse_mixture_history.append(finalized_mixture_report)
         validation_result = evaluate_model(
             model,
             validation_dataset,
@@ -1027,6 +1390,8 @@ def _run_training_impl(
         )
         validation_loss = validation_result.pop("loss")
         metrics = validation_result
+        if not gradient_norms:
+            raise RuntimeError("epoch has no sample connected to trainable parameters")
         sorted_gradient_norms = sorted(gradient_norms)
         p95_index = max(0, math.ceil(0.95 * len(sorted_gradient_norms)) - 1)
         optimization = {
@@ -1057,6 +1422,7 @@ def _run_training_impl(
             "validation_loss": validation_loss,
             "validation": metrics,
             "threshold_augmentation": finalized_augmentation_report,
+            "sparse_mixture": finalized_mixture_report,
         }
         history.append(epoch_record)
         _write_json(run_dir / "history.json", history)
@@ -1064,6 +1430,7 @@ def _run_training_impl(
             run_dir / "threshold_augmentation.json",
             threshold_augmentation_history,
         )
+        _write_json(run_dir / "sparse_mixture.json", sparse_mixture_history)
         _update_training_curves(run_dir, history)
         competition = metrics["competition"]
         score = float(competition["score"])
@@ -1080,17 +1447,19 @@ def _run_training_impl(
             best_score = score
             best_metrics = metrics
             best_checkpoint = {
-                    "schema_version": CHECKPOINT_SCHEMA_VERSION,
-                    "model_state": {
-                        name: value.detach().clone()
-                        for name, value in model.state_dict().items()
-                    },
-                    "epoch": epoch + 1,
-                    "decision_threshold": float(metrics["threshold"]),
-                    "model_config": configuration["model"],
-                    "resolution": configuration["resolution"],
-                    "validation_manifest_sha256": validation_manifest_digest,
-                }
+                "schema_version": CHECKPOINT_SCHEMA_VERSION,
+                "model_state": {
+                    name: value.detach().clone()
+                    for name, value in model.state_dict().items()
+                },
+                "epoch": epoch + 1,
+                "decision_threshold": float(metrics["threshold"]),
+                "model_config": configuration["model"],
+                "sparse_mixture_config": configuration["sparse_mixture"],
+                "resolution": configuration["resolution"],
+                "validation_manifest_sha256": validation_manifest_digest,
+                "full_initialization": initialization,
+            }
             _atomic_torch_save(best_checkpoint, run_dir / "best.pt")
             _write_json(run_dir / "metrics.json", best_metrics)
             _atomic_write_text(
@@ -1110,6 +1479,7 @@ def _run_training_impl(
                 epoch=epoch_number,
                 history=history,
                 augmentation_history=threshold_augmentation_history,
+                sparse_mixture_history=sparse_mixture_history,
                 best_score=best_score,
                 best_metrics=best_metrics,
                 best_checkpoint=best_checkpoint,
@@ -1138,7 +1508,12 @@ def _run_training_impl(
         "gradient_scaling": scaler_enabled,
         "runtime": runtime.metadata,
         "parameter_count": sum(parameter.numel() for parameter in model.parameters()),
+        "trainable_parameter_count": sum(
+            parameter.numel() for parameter in model.parameters() if parameter.requires_grad
+        ),
+        "full_initialization": initialization,
         "threshold_augmentation": threshold_augmentation_history,
+        "sparse_mixture": sparse_mixture_history,
         "best_score": best_score,
         "best_iou": float(best_metrics["competition"]["iou"]),
         "metrics": best_metrics,
@@ -1161,6 +1536,7 @@ def run_training(
     note: str | None = None,
     config_source: str | Path | None = None,
     resume_state_path: str | Path | None = None,
+    initial_full_checkpoint_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Train while maintaining the run experiment record and output index."""
     config.validate()
@@ -1174,6 +1550,8 @@ def run_training(
         else "full"
     )
     run_dir = _run_directory(config, output_dir, device_name=device_name)
+    if resume_state_path is not None and initial_full_checkpoint_path is not None:
+        raise ValueError("initial Full checkpoint and resume state are mutually exclusive")
     record_run_started(
         run_dir,
         device=device_name,
@@ -1199,6 +1577,7 @@ def run_training(
             device=device,
             progress=progress,
             resume_state_path=resume_state_path,
+            initial_full_checkpoint_path=initial_full_checkpoint_path,
         )
     except BaseException as error:
         try:
@@ -1266,10 +1645,15 @@ def _resume_training_impl(
     if checkpoint.get("schema_version") != CHECKPOINT_SCHEMA_VERSION:
         raise ValueError("unsupported checkpoint schema version")
     expected_model = _serializable(asdict(config.model))
+    expected_sparse_mixture = _serializable(asdict(config.sparse_mixture))
     expected_resolution = _serializable(asdict(config.resolution))
     if checkpoint.get("model_config") != expected_model:
         raise ValueError(
             "checkpoint model configuration does not match the supplied config"
+        )
+    if checkpoint.get("sparse_mixture_config") != expected_sparse_mixture:
+        raise ValueError(
+            "checkpoint sparse mixture configuration does not match the supplied config"
         )
     if checkpoint.get("resolution") != expected_resolution:
         raise ValueError(
@@ -1301,6 +1685,8 @@ def _resume_training_impl(
     # ── Build model & load weights ──────────────────────────────────────
     model = build_model(config).to(torch_device)
     model.load_state_dict(checkpoint["model_state"])
+    if config.sparse_mixture.freeze_full_model:
+        model.freeze_full_path()
 
     # ── Loss, optimiser, scheduler ──────────────────────────────────────
     criterion = EventFocalDiceLoss(
@@ -1314,7 +1700,7 @@ def _resume_training_impl(
         false_alarm_topk_per_frame=config.loss.false_alarm_topk_per_frame,
     )
     optimizer = torch.optim.AdamW(
-        model.parameters(),
+        _trainable_parameters(model),
         lr=config.training.learning_rate,
         weight_decay=config.training.weight_decay,
     )
@@ -1336,6 +1722,7 @@ def _resume_training_impl(
     scaler = torch.amp.GradScaler("cuda", enabled=scaler_enabled)
     history: list[dict[str, Any]] = []
     threshold_augmentation_history: list[dict[str, Any]] = []
+    sparse_mixture_history: list[dict[str, Any]] = []
     best_score = -1.0
     best_metrics: dict[str, Any] | None = None
 
@@ -1355,6 +1742,8 @@ def _resume_training_impl(
         epoch_number = source_epoch + epoch + 1
         augmentation_weight = _threshold_augmentation_weight(config, epoch_number)
         augmentation_report = _new_threshold_epoch_report(augmentation_weight)
+        mixture_weight = _sparse_mixture_weight(config, epoch_number)
+        mixture_report = _new_threshold_epoch_report(mixture_weight)
         model.train()
         totals = {
             "total": 0.0,
@@ -1365,6 +1754,13 @@ def _resume_training_impl(
             "sparse_total": 0.0,
             "threshold_consistency": 0.0,
             "augmentation_weight": 0.0,
+            "full_aux_total": 0.0,
+            "object_frame_consistency": 0.0,
+            "background_consistency": 0.0,
+            "positive_preservation": 0.0,
+            "sparse_false_peak": 0.0,
+            "gate_regularization": 0.0,
+            "mixture_weight": 0.0,
         }
         learning_rate = float(optimizer.param_groups[0]["lr"])
         order = torch.randperm(
@@ -1403,6 +1799,15 @@ def _resume_training_impl(
                         frame_ms=config.evaluation.frame_ms,
                     ),
                 )
+            mixture_eligible = is_dense_balanced_event_stream(
+                sequence.events,
+                min_events=config.sparse_mixture.min_events,
+                max_polarity_fraction=(
+                    config.sparse_mixture.max_polarity_fraction
+                ),
+            )
+            if config.sparse_mixture.enabled and mixture_eligible:
+                mixture_report["eligible_files"] += 1
             events = sequence.events.to(torch_device)
             labels = sequence.labels.to(torch_device)
             object_ids = sequence.object_ids.to(torch_device)
@@ -1416,7 +1821,24 @@ def _resume_training_impl(
                 dtype=amp_dtype,
                 enabled=amp_enabled,
             ):
-                output = model(events, batch_indices)
+                output, mixture_view = _forward_with_sparse_mixture(
+                    model,
+                    sequence,
+                    events,
+                    batch_indices,
+                    config,
+                    mixture_weight=mixture_weight,
+                )
+                if mixture_view is not None:
+                    _record_threshold_view(
+                        mixture_report,
+                        mixture_view,
+                        _threshold_view_statistics(
+                            sequence,
+                            mixture_view,
+                            frame_ms=config.evaluation.frame_ms,
+                        ),
+                    )
                 query_indices = sample_event_indices(
                     labels,
                     logits=output["event_logits"],
@@ -1502,14 +1924,42 @@ def _resume_training_impl(
                     + config.threshold_augmentation.consistency_loss_weight
                     * threshold_consistency
                 )
+                auxiliary = _sparse_mixture_auxiliary_losses(
+                    output,
+                    labels,
+                    object_ids,
+                    timestamps_ms,
+                    events,
+                    batch_indices,
+                    query_indices,
+                    criterion,
+                    config,
+                    sampling_generator=sampling_generator,
+                )
+                if mixture_view is not None:
+                    combined_total = _add_sparse_mixture_losses(
+                        combined_total,
+                        auxiliary,
+                        config,
+                    )
                 losses = dict(full_losses)
                 losses["total"] = combined_total
-                losses["sparse_total"] = sparse_total
+                losses["sparse_total"] = (
+                    sparse_total + auxiliary["sparse_total"]
+                )
                 losses["threshold_consistency"] = threshold_consistency
                 losses["augmentation_weight"] = combined_total.new_tensor(
                     augmentation_weight if threshold_view is not None else 0.0
                 )
-            if amp_enabled:
+                for name, value in auxiliary.items():
+                    if name != "sparse_total":
+                        losses[name] = value
+                losses["mixture_weight"] = combined_total.new_tensor(
+                    mixture_weight if mixture_view is not None else 0.0
+                )
+            # 恢复训练也跳过没有专家梯度的非稠密样本。
+            has_trainable_path = losses["total"].requires_grad
+            if amp_enabled and has_trainable_path:
                 scaler.scale(losses["total"]).backward()
                 scaler.unscale_(optimizer)
                 clip_grad_norm_(
@@ -1517,7 +1967,7 @@ def _resume_training_impl(
                 )
                 scaler.step(optimizer)
                 scaler.update()
-            else:
+            elif has_trainable_path:
                 losses["total"].backward()
                 clip_grad_norm_(
                     model.parameters(), config.training.gradient_clip_norm
@@ -1542,6 +1992,10 @@ def _resume_training_impl(
             augmentation_report
         )
         threshold_augmentation_history.append(finalized_augmentation_report)
+        finalized_mixture_report = _finalize_threshold_epoch_report(
+            mixture_report
+        )
+        sparse_mixture_history.append(finalized_mixture_report)
         validation_result = evaluate_model(
             model,
             validation_dataset,
@@ -1560,6 +2014,7 @@ def _resume_training_impl(
             "validation_loss": validation_loss,
             "validation": metrics,
             "threshold_augmentation": finalized_augmentation_report,
+            "sparse_mixture": finalized_mixture_report,
         }
         history.append(epoch_record)
         _write_json(run_dir / "history.json", history)
@@ -1567,6 +2022,7 @@ def _resume_training_impl(
             run_dir / "threshold_augmentation.json",
             threshold_augmentation_history,
         )
+        _write_json(run_dir / "sparse_mixture.json", sparse_mixture_history)
         _update_training_curves(run_dir, history)
         competition = metrics["competition"]
         score = float(competition["score"])
@@ -1590,6 +2046,7 @@ def _resume_training_impl(
                     "epoch": source_epoch + epoch + 1,
                     "decision_threshold": float(metrics["threshold"]),
                     "model_config": configuration["model"],
+                    "sparse_mixture_config": configuration["sparse_mixture"],
                     "resolution": configuration["resolution"],
                     "validation_manifest_sha256": validation_manifest_digest,
                 },
@@ -1621,6 +2078,7 @@ def _resume_training_impl(
             parameter.numel() for parameter in model.parameters()
         ),
         "threshold_augmentation": threshold_augmentation_history,
+        "sparse_mixture": sparse_mixture_history,
         "best_score": best_score,
         "best_iou": float(best_metrics["competition"]["iou"]),
         "metrics": best_metrics,
@@ -1710,9 +2168,14 @@ def evaluate_checkpoint(
     if checkpoint.get("schema_version") != CHECKPOINT_SCHEMA_VERSION:
         raise ValueError("unsupported checkpoint schema version")
     expected_model = _serializable(asdict(config.model))
+    expected_sparse_mixture = _serializable(asdict(config.sparse_mixture))
     expected_resolution = _serializable(asdict(config.resolution))
     if checkpoint.get("model_config") != expected_model:
         raise ValueError("checkpoint model configuration does not match the supplied config")
+    if checkpoint.get("sparse_mixture_config") != expected_sparse_mixture:
+        raise ValueError(
+            "checkpoint sparse mixture configuration does not match the supplied config"
+        )
     if checkpoint.get("resolution") != expected_resolution:
         raise ValueError("checkpoint resolution does not match the supplied config")
     validation_dataset = _dataset(config, "val")
@@ -1779,9 +2242,14 @@ def generate_submission_package(
     if checkpoint.get("schema_version") != CHECKPOINT_SCHEMA_VERSION:
         raise ValueError("unsupported checkpoint schema version")
     expected_model = _serializable(asdict(config.model))
+    expected_sparse_mixture = _serializable(asdict(config.sparse_mixture))
     expected_resolution = _serializable(asdict(config.resolution))
     if checkpoint.get("model_config") != expected_model:
         raise ValueError("checkpoint model configuration does not match the supplied config")
+    if checkpoint.get("sparse_mixture_config") != expected_sparse_mixture:
+        raise ValueError(
+            "checkpoint sparse mixture configuration does not match the supplied config"
+        )
     if checkpoint.get("resolution") != expected_resolution:
         raise ValueError("checkpoint resolution does not match the supplied config")
     validation_dataset = _dataset(config, "val")
@@ -1802,7 +2270,17 @@ def generate_submission_package(
         sequence = validation_dataset[index]
         events = sequence.events.to(torch_device)
         with torch.no_grad():
-            output = model(events)
+            batch_indices = torch.zeros(
+                len(events), dtype=torch.long, device=torch_device
+            )
+            output, _ = _forward_with_sparse_mixture(
+                model,
+                sequence,
+                events,
+                batch_indices,
+                config,
+                mixture_weight=1.0,
+            )
         logits = output["event_logits"].detach().cpu()
         event_sequence = _loaded_to_event_sequence(sequence, config)
         rows = generate_submission_rows(event_sequence, logits, threshold)

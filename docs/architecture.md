@@ -106,6 +106,19 @@ LayerNorm → MLP → residual
 
 块统计量已经参与初始 Token 构造，不在解码器中重复拼接。轻量 MLP 输出 `event_logits[N]`；同一块内事件仍能根据各自的局部坐标、时间和极性得到不同结果。
 
+### 5.1 稀疏混合专家
+
+分数优化配置为满足事件数和极性平衡门槛的序列生成一个确定性的 `1.5×` 高触发阈值子流。Full 与 sparse 视图共享 `EventTokenizer`、锥编码器和事件解码器；稀疏 Token 通过 `(batch,t_block,y_block,x_block)` 精确对齐到 Full Token，稀疏视图没有占据的 Full Token 不接受专家修正。
+
+稀疏专家读取 Full/Sparse 表示、两者差值、事件数和保留率，由 Token 级 Router 输出门控：
+
+```text
+gate = sparse_present * sigmoid(router(features))
+mixed_token = full_token + residual_scale * gate * sparse_adapter(features)
+```
+
+Router 初始 bias 为 `-2`，残差 LayerScale 初始为 `0.01`。训练前几个 epoch 将 gate 权重固定为零，随后逐步升到一；因此新分支开始训练时模型行为接近原 Full 模型。普通序列直接跳过 Sparse forward。最终仍使用 Full 视图的 `event_token_indices` 解码全部原始事件，输出数量和顺序不受稀疏化影响。
+
 ## 6. 训练
 
 模型始终对完整序列前向。背景下采样只生成损失索引：
@@ -123,8 +136,22 @@ total = focal
       + lambda_false_alarm * false_alarm
 ```
 
+启用稀疏混合专家时，融合输出仍承担上述完整主损失，并增加：
+
+```text
+total_moe = full_event_main
+          + 0.25  * full_branch_aux
+          + 0.15  * sparse_branch_aux
+          + 0.10  * positive_object_frame_consistency
+          + 0.05  * background_upper_bound_consistency
+          + 0.05  * sparse_block_false_peak
+          + 0.001 * mean_gate
+```
+
+正目标帧一致性保护稀疏分支的召回；背景一致性只在 Sparse 背景 logit 高于 detached Full logit 时施加惩罚。块级假警项按 `50 ms × 8×8` 聚合背景最大 logit，再选每帧最高的 8 个空间块，专门抑制稀疏视图造成的局部背景峰。Full 分支辅助损失保证即使关闭稀疏专家，主干仍保持独立判别能力。
+
 优化器为 AdamW，支持梯度裁剪。`mixed_precision=true` 且设备为 CUDA 时启用 autocast 和 GradScaler；CPU 自动保持 FP32。
 
 ## 7. 评估与可复现性
 
-验证对全部事件预测，输出事件级 Pd/Fa/IoU/Acc 和单独命名的 EV-UAV-compatible 指标。每次训练内验证还使用独立固定种子的采样器，按与训练一致的正样本保留、hard-negative 背景采样、密集序列权重和完整事件 Fa 上下文计算 loss；五个分量写入 `history.json[*].validation_loss`，不会混入 `metrics.json`。训练时选出的事件 IoU 阈值随最佳 checkpoint 保存，复评不会再次使用标签调阈值。checkpoint 同时保存模型配置和验证集 manifest 摘要，配置或数据不匹配时拒绝复评。
+验证对全部事件预测；满足门槛的序列使用与训练相同的确定性 Sparse 视图和完整门控权重。输出事件级 Pd/Fa/IoU/Acc 和单独命名的 EV-UAV-compatible 指标。每次训练内验证还使用独立固定种子的采样器，按与训练一致的正样本保留、hard-negative 背景采样、密集序列权重和完整事件 Fa 上下文计算 loss；五个主损失分量写入 `history.json[*].validation_loss`，不会混入 `metrics.json`。训练时选出的事件 IoU 阈值随最佳 checkpoint 保存，复评不会再次使用标签调阈值。schema-5 checkpoint 同时保存模型、稀疏混合专家配置和验证集 manifest 摘要，配置或数据不匹配时拒绝复评。

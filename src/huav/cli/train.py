@@ -47,6 +47,13 @@ def main() -> None:
         metavar="TRAINING_STATE_PT",
         help="branch from an exact optimizer/RNG training state",
     )
+    resume_group.add_argument(
+        "--initialize-full",
+        type=str,
+        default=None,
+        metavar="BEST_PT",
+        help="initialize and freeze the Full path from a historical best.pt",
+    )
     parser.add_argument(
         "--additional-epochs",
         type=int,
@@ -82,6 +89,7 @@ def main() -> None:
                 note=arguments.note,
                 config_source=arguments.config,
                 resume_state_path=arguments.resume_state,
+                initial_full_checkpoint_path=arguments.initialize_full,
             )
     except (OSError, RuntimeError, ValueError) as error:
         parser.error(str(error))

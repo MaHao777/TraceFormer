@@ -12,6 +12,7 @@ from huav.config import ConeHeadConfig
 from .cone_transformer import ConeTransformerEncoder
 from .event_decoder import EventDecoder
 from .event_tokenizer import EventTokenizer
+from .sparse_mixture import SparseTokenMixture
 
 
 class SpatioTemporalConeDetector(nn.Module):
@@ -19,6 +20,11 @@ class SpatioTemporalConeDetector(nn.Module):
 
     output_names = (
         "event_logits",
+        "full_event_logits",
+        "sparse_event_logits",
+        "sparse_source_indices",
+        "mixture_gate",
+        "sparse_token_present",
         "token_features",
         "token_coords",
         "token_batch_indices",
@@ -48,6 +54,9 @@ class SpatioTemporalConeDetector(nn.Module):
         direction_dropout: float,
         debug_attention_stats: bool,
         num_pool_queries: int = 4,
+        sparse_mixture_enabled: bool = False,
+        sparse_mixture_router_bias: float = -2.0,
+        sparse_mixture_residual_scale: float = 0.01,
     ) -> None:
         super().__init__()
         if num_layers != len(layer_time_scales):
@@ -77,11 +86,48 @@ class SpatioTemporalConeDetector(nn.Module):
             debug_attention_stats=debug_attention_stats,
         )
         self.decoder = EventDecoder(token_dim=token_dim, dropout=dropout)
+        self.sparse_mixture = (
+            SparseTokenMixture(
+                token_dim=token_dim,
+                num_x_blocks=self.tokenizer.num_x_blocks,
+                num_y_blocks=self.tokenizer.num_y_blocks,
+                num_time_blocks=num_time_blocks,
+                initial_router_bias=sparse_mixture_router_bias,
+                initial_residual_scale=sparse_mixture_residual_scale,
+            )
+            if sparse_mixture_enabled
+            else None
+        )
+        self._full_path_frozen = False
+
+    def freeze_full_path(self) -> None:
+        """冻结历史 Full 主干，只让稀疏混合模块学习修正。"""
+
+        if self.sparse_mixture is None:
+            raise ValueError("freezing the full path requires sparse mixture")
+        for module in (self.tokenizer, self.encoder, self.decoder):
+            module.requires_grad_(False)
+            module.eval()
+        self._full_path_frozen = True
+
+    def train(self, mode: bool = True) -> SpatioTemporalConeDetector:
+        """训练时保持冻结主干为评估态，关闭其中的 dropout。"""
+
+        super().train(mode)
+        if self._full_path_frozen:
+            for module in (self.tokenizer, self.encoder, self.decoder):
+                module.eval()
+        return self
 
     def forward(
         self,
         events: torch.Tensor,
         batch_indices: torch.Tensor | None = None,
+        *,
+        sparse_events: torch.Tensor | None = None,
+        sparse_batch_indices: torch.Tensor | None = None,
+        sparse_source_indices: torch.Tensor | None = None,
+        mixture_weight: float = 1.0,
     ) -> dict[str, Any]:
         tokenized = self.tokenizer(events, batch_indices)
         encoded = self.encoder(
@@ -89,14 +135,86 @@ class SpatioTemporalConeDetector(nn.Module):
             tokenized.token_coords,
             tokenized.token_batch_indices,
         )
-        event_logits = self.decoder(
+        full_event_logits = self.decoder(
             encoded.token_features,
             tokenized.event_token_indices,
             tokenized.event_local_features,
         )
+        event_logits = full_event_logits
+        token_features = encoded.token_features
+        sparse_event_logits = full_event_logits.new_empty((0,))
+        returned_source_indices = torch.empty(
+            0, dtype=torch.long, device=events.device
+        )
+        mixture_gate = full_event_logits.new_zeros(len(encoded.token_features))
+        sparse_token_present = torch.zeros(
+            len(encoded.token_features), dtype=torch.bool, device=events.device
+        )
+        paired_arguments = (
+            sparse_events is not None,
+            sparse_source_indices is not None,
+        )
+        if any(paired_arguments) and not all(paired_arguments):
+            raise ValueError(
+                "sparse_events and sparse_source_indices must be provided together"
+            )
+        if sparse_events is not None and sparse_source_indices is not None:
+            if self.sparse_mixture is None:
+                raise ValueError("sparse mixture inputs require an enabled mixture module")
+            if (
+                sparse_source_indices.ndim != 1
+                or sparse_source_indices.dtype != torch.long
+                or len(sparse_source_indices) != len(sparse_events)
+            ):
+                raise ValueError(
+                    "sparse_source_indices must be int64 and align with sparse_events"
+                )
+            if len(sparse_source_indices) and (
+                bool(torch.any(sparse_source_indices < 0))
+                or bool(torch.any(sparse_source_indices >= len(events)))
+            ):
+                raise ValueError("sparse_source_indices are outside the full event view")
+            sparse_tokenized = self.tokenizer(
+                sparse_events, sparse_batch_indices
+            )
+            sparse_encoded = self.encoder(
+                sparse_tokenized.tokens,
+                sparse_tokenized.token_coords,
+                sparse_tokenized.token_batch_indices,
+            )
+            mixed = self.sparse_mixture(
+                encoded.token_features,
+                tokenized.token_coords,
+                tokenized.token_batch_indices,
+                tokenized.token_statistics,
+                sparse_encoded.token_features,
+                sparse_tokenized.token_coords,
+                sparse_tokenized.token_batch_indices,
+                sparse_tokenized.token_statistics,
+                mixture_weight=mixture_weight,
+            )
+            token_features = mixed.token_features
+            mixture_gate = mixed.gate
+            sparse_token_present = mixed.sparse_present
+            event_logits = self.decoder(
+                token_features,
+                tokenized.event_token_indices,
+                tokenized.event_local_features,
+            )
+            sparse_event_logits = self.decoder(
+                sparse_encoded.token_features,
+                sparse_tokenized.event_token_indices,
+                sparse_tokenized.event_local_features,
+            )
+            returned_source_indices = sparse_source_indices
         return {
             "event_logits": event_logits,
-            "token_features": encoded.token_features,
+            "full_event_logits": full_event_logits,
+            "sparse_event_logits": sparse_event_logits,
+            "sparse_source_indices": returned_source_indices,
+            "mixture_gate": mixture_gate,
+            "sparse_token_present": sparse_token_present,
+            "token_features": token_features,
             "token_coords": tokenized.token_coords,
             "token_batch_indices": tokenized.token_batch_indices,
             "event_token_indices": tokenized.event_token_indices,

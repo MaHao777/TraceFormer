@@ -298,6 +298,161 @@ def object_frame_threshold_consistency_loss(
     )
 
 
+def background_threshold_consistency_loss(
+    sparse_logits: torch.Tensor,
+    full_logits: torch.Tensor,
+    source_indices: torch.Tensor,
+    targets: torch.Tensor,
+    *,
+    logit_margin: float = 0.0,
+) -> torch.Tensor:
+    """Prevent the sparse expert from raising aligned background logits."""
+
+    if sparse_logits.ndim != 1 or full_logits.ndim != 1 or targets.ndim != 1:
+        raise ValueError(
+            "sparse logits, full logits and targets must be one-dimensional"
+        )
+    if source_indices.ndim != 1 or source_indices.dtype != torch.long:
+        raise TypeError("source_indices must be a one-dimensional int64 tensor")
+    if len(sparse_logits) != len(source_indices) or len(full_logits) != len(targets):
+        raise ValueError(
+            "sparse/full tensors must align with source indices and targets"
+        )
+    if not math.isfinite(logit_margin):
+        raise ValueError("logit_margin must be finite")
+    if len(source_indices) and (
+        bool(torch.any(source_indices < 0))
+        or bool(torch.any(source_indices >= len(full_logits)))
+    ):
+        raise ValueError("source_indices are outside full logits")
+    if len(source_indices) == 0:
+        return sparse_logits.sum() * 0.0
+    background = targets[source_indices] <= 0.5
+    if not bool(background.any()):
+        return sparse_logits.sum() * 0.0
+    aligned_full = full_logits[source_indices].detach()
+    return F.softplus(
+        sparse_logits[background]
+        - aligned_full[background]
+        - float(logit_margin)
+    ).mean()
+
+
+def positive_logit_preservation_loss(
+    fused_logits: torch.Tensor,
+    full_logits: torch.Tensor,
+    targets: torch.Tensor,
+    *,
+    logit_margin: float = 0.0,
+) -> torch.Tensor:
+    """保护所有正事件，避免融合分支低于冻结的 Full 教师。"""
+
+    if fused_logits.ndim != 1 or full_logits.ndim != 1 or targets.ndim != 1:
+        raise ValueError("fused logits, full logits and targets must be one-dimensional")
+    if not (len(fused_logits) == len(full_logits) == len(targets)):
+        raise ValueError("fused logits, full logits and targets must align")
+    if not math.isfinite(logit_margin):
+        raise ValueError("logit_margin must be finite")
+    positive = targets > 0.5
+    if not bool(positive.any()):
+        return fused_logits.sum() * 0.0
+    teacher = full_logits.detach()
+    return F.relu(
+        teacher[positive] + float(logit_margin) - fused_logits[positive]
+    ).mean()
+
+
+def sparse_block_false_peak_loss(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    batch_indices: torch.Tensor,
+    timestamps_ms: torch.Tensor,
+    coordinates: torch.Tensor,
+    *,
+    frame_ms: float,
+    block_size_x: int,
+    block_size_y: int,
+    logit_margin: float,
+    topk_per_frame: int,
+) -> torch.Tensor:
+    """Penalize the strongest background peak in each sparse spacetime block."""
+
+    one_dimensional = (logits, targets, batch_indices, timestamps_ms)
+    if any(value.ndim != 1 for value in one_dimensional):
+        raise ValueError(
+            "logits, targets, batches and timestamps must be one-dimensional"
+        )
+    if not all(len(value) == len(logits) for value in one_dimensional[1:]):
+        raise ValueError("sparse block loss inputs must have equal length")
+    if coordinates.ndim != 2 or coordinates.shape != (len(logits), 2):
+        raise ValueError("coordinates must have shape [N,2]")
+    if frame_ms <= 0 or not math.isfinite(frame_ms):
+        raise ValueError("frame_ms must be positive and finite")
+    for value, name in (
+        (block_size_x, "block_size_x"),
+        (block_size_y, "block_size_y"),
+        (topk_per_frame, "topk_per_frame"),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"{name} must be a positive integer")
+    if not math.isfinite(logit_margin):
+        raise ValueError("logit_margin must be finite")
+    background = targets <= 0.5
+    if not bool(background.any()):
+        return logits.sum() * 0.0
+
+    background_logits = logits[background]
+    frame_indices = torch.div(
+        torch.floor(timestamps_ms[background].to(torch.float64)),
+        frame_ms,
+        rounding_mode="floor",
+    ).long()
+    block_x = torch.div(
+        coordinates[background, 0].long(),
+        block_size_x,
+        rounding_mode="floor",
+    )
+    block_y = torch.div(
+        coordinates[background, 1].long(),
+        block_size_y,
+        rounding_mode="floor",
+    )
+    groups = torch.stack(
+        (batch_indices[background].long(), frame_indices, block_y, block_x),
+        dim=1,
+    )
+    unique_groups, inverse = torch.unique(groups, dim=0, return_inverse=True)
+    block_peaks = torch.full(
+        (len(unique_groups),),
+        -torch.inf,
+        dtype=logits.dtype,
+        device=logits.device,
+    )
+    block_peaks.scatter_reduce_(
+        0,
+        inverse,
+        background_logits,
+        reduce="amax",
+        include_self=True,
+    )
+    frame_groups, frame_inverse = torch.unique(
+        unique_groups[:, :2], dim=0, return_inverse=True
+    )
+    frame_losses = []
+    for frame_index in range(len(frame_groups)):
+        frame_peaks = block_peaks[frame_inverse == frame_index]
+        hard_peaks = torch.topk(
+            frame_peaks,
+            k=min(topk_per_frame, len(frame_peaks)),
+            largest=True,
+            sorted=False,
+        ).values
+        frame_losses.append(
+            F.softplus(hard_peaks - float(logit_margin)).mean()
+        )
+    return torch.stack(frame_losses).mean()
+
+
 class EventFocalDiceLoss(nn.Module):
     def __init__(
         self,
@@ -421,9 +576,12 @@ class EventFocalDiceLoss(nn.Module):
 
 __all__ = [
     "EventFocalDiceLoss",
+    "background_threshold_consistency_loss",
     "binary_dice_loss",
     "binary_focal_loss",
     "false_alarm_pixel_loss",
     "object_frame_threshold_consistency_loss",
     "object_frame_recall_loss",
+    "positive_logit_preservation_loss",
+    "sparse_block_false_peak_loss",
 ]
