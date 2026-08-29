@@ -12,6 +12,7 @@ dependencies = ["torch", "numpy", "scipy", "PyYAML", "matplotlib>=3.8"]
 
 [project.optional-dependencies]
 dev = ["pytest", "ruff"]
+postprocess = ["lightgbm>=4.6,<5"]
 
 [project.scripts]
 huav-inspect = "huav.cli.inspect:main"
@@ -22,6 +23,7 @@ huav-package = "huav.cli.package:main"
 huav-check-gpu = "huav.cli.check_gpu:main"
 huav-index-outputs = "huav.cli.index_outputs:main"
 huav-visualize = "huav.cli.visualize:main"
+huav-postprocess = "huav.cli.postprocess:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

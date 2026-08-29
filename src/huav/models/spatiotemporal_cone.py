@@ -12,6 +12,7 @@ from huav.config import ConeHeadConfig
 from .cone_transformer import ConeTransformerEncoder
 from .event_decoder import EventDecoder
 from .event_tokenizer import EventTokenizer
+from .frame_objectness import FrameCellObjectnessHead
 from .sparse_mixture import SparseTokenMixture
 
 
@@ -20,6 +21,10 @@ class SpatioTemporalConeDetector(nn.Module):
 
     output_names = (
         "event_logits",
+        "base_event_logits",
+        "frame_objectness_cell_logits",
+        "frame_objectness_event_cell_indices",
+        "frame_objectness_event_logits",
         "full_event_logits",
         "sparse_event_logits",
         "sparse_source_indices",
@@ -57,6 +62,11 @@ class SpatioTemporalConeDetector(nn.Module):
         sparse_mixture_enabled: bool = False,
         sparse_mixture_router_bias: float = -2.0,
         sparse_mixture_residual_scale: float = 0.01,
+        frame_objectness_enabled: bool = False,
+        frame_objectness_frame_ms: float = 50.0,
+        duration_ms: float = 8000.0,
+        frame_objectness_block_size_x: int = 8,
+        frame_objectness_block_size_y: int = 8,
     ) -> None:
         super().__init__()
         if num_layers != len(layer_time_scales):
@@ -98,7 +108,23 @@ class SpatioTemporalConeDetector(nn.Module):
             if sparse_mixture_enabled
             else None
         )
+        self.frame_objectness_head = (
+            FrameCellObjectnessHead(
+                token_dim=token_dim,
+                event_feature_dim=6,
+                width=width,
+                height=height,
+                spatial_block_size_x=frame_objectness_block_size_x,
+                spatial_block_size_y=frame_objectness_block_size_y,
+                duration_ms=duration_ms,
+                frame_ms=frame_objectness_frame_ms,
+                dropout=dropout,
+            )
+            if frame_objectness_enabled
+            else None
+        )
         self._full_path_frozen = False
+        self._base_for_objectness_frozen = False
 
     def freeze_full_path(self) -> None:
         """冻结历史 Full 主干，只让稀疏混合模块学习修正。"""
@@ -117,7 +143,33 @@ class SpatioTemporalConeDetector(nn.Module):
         if self._full_path_frozen:
             for module in (self.tokenizer, self.encoder, self.decoder):
                 module.eval()
+        if self._base_for_objectness_frozen:
+            for module in (
+                self.tokenizer,
+                self.encoder,
+                self.decoder,
+                self.sparse_mixture,
+            ):
+                if module is not None:
+                    module.eval()
         return self
+
+    def freeze_base_for_objectness(self) -> None:
+        """冻结现有检测器，只训练帧单元对象头。"""
+
+        if self.frame_objectness_head is None:
+            raise ValueError("freezing the base requires frame objectness")
+        for module in (
+            self.tokenizer,
+            self.encoder,
+            self.decoder,
+            self.sparse_mixture,
+        ):
+            if module is not None:
+                module.requires_grad_(False)
+                module.eval()
+        self.frame_objectness_head.requires_grad_(True)
+        self._base_for_objectness_frozen = True
 
     def forward(
         self,
@@ -207,8 +259,34 @@ class SpatioTemporalConeDetector(nn.Module):
                 sparse_tokenized.event_local_features,
             )
             returned_source_indices = sparse_source_indices
+        base_event_logits = event_logits
+        if self.frame_objectness_head is not None:
+            objectness = self.frame_objectness_head(
+                token_features,
+                tokenized.event_token_indices,
+                tokenized.event_local_features,
+                tokenized.event_xy,
+                tokenized.normalized_time,
+                tokenized.event_batch_indices,
+            )
+            objectness_cell_logits = objectness.cell_logits
+            objectness_event_cell_indices = objectness.event_cell_indices
+            objectness_event_logits = objectness.event_logits
+            event_logits = base_event_logits + objectness_event_logits
+        else:
+            objectness_cell_logits = base_event_logits.new_empty((0,))
+            objectness_event_cell_indices = torch.empty(
+                0, dtype=torch.long, device=events.device
+            )
+            objectness_event_logits = base_event_logits.new_zeros(
+                len(base_event_logits)
+            )
         return {
             "event_logits": event_logits,
+            "base_event_logits": base_event_logits,
+            "frame_objectness_cell_logits": objectness_cell_logits,
+            "frame_objectness_event_cell_indices": objectness_event_cell_indices,
+            "frame_objectness_event_logits": objectness_event_logits,
             "full_event_logits": full_event_logits,
             "sparse_event_logits": sparse_event_logits,
             "sparse_source_indices": returned_source_indices,

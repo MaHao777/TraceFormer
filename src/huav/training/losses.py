@@ -70,6 +70,52 @@ def binary_dice_loss(
     return torch.stack(sample_losses).mean()
 
 
+def frame_cell_objectness_loss(
+    cell_logits: torch.Tensor,
+    event_cell_indices: torch.Tensor,
+    event_targets: torch.Tensor,
+    *,
+    alpha: float = 0.75,
+    gamma: float = 2.0,
+) -> torch.Tensor:
+    """按单元内事件标签最大值监督对象置信度。"""
+
+    if cell_logits.ndim != 1:
+        raise ValueError("cell_logits must have shape [C]")
+    if (
+        event_cell_indices.ndim != 1
+        or event_targets.ndim != 1
+        or len(event_cell_indices) != len(event_targets)
+    ):
+        raise ValueError("event cell indices and targets must align")
+    if event_cell_indices.dtype != torch.long:
+        raise TypeError("event_cell_indices must be int64")
+    if len(event_targets) == 0:
+        if len(cell_logits):
+            raise ValueError("empty events require empty cell logits")
+        return cell_logits.sum() * 0.0
+    if len(cell_logits) == 0:
+        raise ValueError("non-empty events require cell logits")
+    if bool(torch.any(event_cell_indices < 0)) or bool(
+        torch.any(event_cell_indices >= len(cell_logits))
+    ):
+        raise ValueError("event cell indices are outside cell logits")
+    cell_targets = cell_logits.new_zeros(len(cell_logits))
+    cell_targets.scatter_reduce_(
+        0,
+        event_cell_indices,
+        event_targets.to(dtype=cell_logits.dtype),
+        reduce="amax",
+        include_self=True,
+    )
+    return binary_focal_loss(
+        cell_logits,
+        cell_targets,
+        alpha=alpha,
+        gamma=gamma,
+    )
+
+
 def object_frame_recall_loss(
     logits: torch.Tensor,
     targets: torch.Tensor,
@@ -580,6 +626,7 @@ __all__ = [
     "binary_dice_loss",
     "binary_focal_loss",
     "false_alarm_pixel_loss",
+    "frame_cell_objectness_loss",
     "object_frame_threshold_consistency_loss",
     "object_frame_recall_loss",
     "positive_logit_preservation_loss",

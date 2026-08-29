@@ -144,6 +144,18 @@ class SparseMixtureConfig:
 
 
 @dataclass(frozen=True)
+class FrameObjectnessConfig:
+    """50 ms 时空单元对象置信度头配置。"""
+
+    enabled: bool = False
+    frame_ms: float = 50.0
+    spatial_block_size_x: int = 8
+    spatial_block_size_y: int = 8
+    loss_weight: float = 0.2
+    freeze_base_model: bool = False
+
+
+@dataclass(frozen=True)
 class EvaluationConfig:
     optimize_threshold: bool = True
     threshold_steps: int = 19
@@ -179,6 +191,7 @@ class HUAVConfig:
     loss: LossConfig = LossConfig()
     threshold_augmentation: ThresholdAugmentationConfig = ThresholdAugmentationConfig()
     sparse_mixture: SparseMixtureConfig = SparseMixtureConfig()
+    frame_objectness: FrameObjectnessConfig = FrameObjectnessConfig()
     evaluation: EvaluationConfig = EvaluationConfig()
 
     @classmethod
@@ -418,6 +431,25 @@ class HUAVConfig:
                 getattr(augmentation, name), f"threshold augmentation {name}"
             ) < 0:
                 raise ValueError(f"threshold augmentation {name} must be non-negative")
+        objectness = self.frame_objectness
+        if not isinstance(objectness.enabled, bool):
+            raise ValueError("frame objectness enabled must be boolean")
+        if not isinstance(objectness.freeze_base_model, bool):
+            raise ValueError("frame objectness freeze_base_model must be boolean")
+        if objectness.freeze_base_model and not objectness.enabled:
+            raise ValueError("freezing the base model requires frame objectness")
+        if _finite_real(objectness.frame_ms, "frame objectness frame_ms") <= 0:
+            raise ValueError("frame objectness frame_ms must be positive")
+        _positive_integer(
+            objectness.spatial_block_size_x,
+            "frame objectness spatial_block_size_x",
+        )
+        _positive_integer(
+            objectness.spatial_block_size_y,
+            "frame objectness spatial_block_size_y",
+        )
+        if _finite_real(objectness.loss_weight, "frame objectness loss_weight") < 0:
+            raise ValueError("frame objectness loss_weight must be non-negative")
         mixture = self.sparse_mixture
         if not isinstance(mixture.enabled, bool):
             raise ValueError("sparse mixture enabled must be boolean")
@@ -530,6 +562,7 @@ def load_config(path: Path | str) -> HUAVConfig:
         "loss",
         "threshold_augmentation",
         "sparse_mixture",
+        "frame_objectness",
         "evaluation",
     }
     unknown_sections = set(raw) - allowed_sections
@@ -567,6 +600,9 @@ def load_config(path: Path | str) -> HUAVConfig:
             loss=LossConfig(**raw.get("loss", {})),
             threshold_augmentation=ThresholdAugmentationConfig(**raw_augmentation),
             sparse_mixture=SparseMixtureConfig(**raw.get("sparse_mixture", {})),
+            frame_objectness=FrameObjectnessConfig(
+                **raw.get("frame_objectness", {})
+            ),
             evaluation=EvaluationConfig(**raw.get("evaluation", {})),
         )
     except TypeError as error:

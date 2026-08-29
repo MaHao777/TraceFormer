@@ -20,7 +20,9 @@ from huav.training.engine import (
     _autocast_dtype,
     _dense_sequence_loss_weight,
     _forward_with_sparse_mixture,
+    _frame_objectness_loss,
     _initialize_full_path,
+    _initialize_objectness_path,
     _sparse_mixture_auxiliary_losses,
     _sparse_mixture_weight,
     _threshold_augmentation_weight,
@@ -56,9 +58,14 @@ def main() -> None:
         help="one-based epoch used for threshold augmentation scheduling",
     )
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cuda")
-    parser.add_argument(
+    initialization = parser.add_mutually_exclusive_group()
+    initialization.add_argument(
         "--initialize-full",
         help="历史最佳 best.pt；冻结 Full 配置必须提供",
+    )
+    initialization.add_argument(
+        "--initialize-objectness",
+        help="schema 5 best.pt；只训练 frame objectness 头",
     )
     arguments = parser.parse_args()
 
@@ -87,7 +94,19 @@ def main() -> None:
     if arguments.epoch <= 0:
         parser.error("--epoch must be positive")
     model = build_model(config).to(device)
-    if config.sparse_mixture.freeze_full_model:
+    if config.frame_objectness.freeze_base_model:
+        if arguments.initialize_objectness is None:
+            parser.error(
+                "frozen frame objectness resource check requires "
+                "--initialize-objectness"
+            )
+        _initialize_objectness_path(
+            model,
+            config,
+            arguments.initialize_objectness,
+            device=device,
+        )
+    elif config.sparse_mixture.freeze_full_model:
         if arguments.initialize_full is None:
             parser.error("frozen Full resource check requires --initialize-full")
         _initialize_full_path(
@@ -179,6 +198,12 @@ def main() -> None:
             full_timestamps_ms=timestamps_ms,
             full_coordinates=events[:, :2],
         )
+        objectness_loss = _frame_objectness_loss(
+            output,
+            labels,
+            criterion,
+            config,
+        )
         sparse_total = full_losses["total"] * 0.0
         consistency = full_losses["total"] * 0.0
         sparse_output = None
@@ -226,9 +251,10 @@ def main() -> None:
                 timestamps_ms,
                 frame_ms=config.evaluation.frame_ms,
             )
-        combined_total = full_losses["total"] * _dense_sequence_loss_weight(
-            events, labels, config
-        )
+        combined_total = (
+            full_losses["total"]
+            + config.frame_objectness.loss_weight * objectness_loss
+        ) * _dense_sequence_loss_weight(events, labels, config)
         combined_total = combined_total + augmentation_weight * (
             config.threshold_augmentation.sparse_loss_weight * sparse_total
             + config.threshold_augmentation.consistency_loss_weight * consistency
@@ -269,6 +295,9 @@ def main() -> None:
             name: float(value.detach().float().item())
             for name, value in full_losses.items()
         },
+        "frame_objectness": float(
+            objectness_loss.detach().float().item()
+        ),
         "false_alarm": float(full_losses["false_alarm"].detach().float().item()),
         "focal": float(full_losses["focal"].detach().float().item()),
         "object_frame": float(

@@ -99,6 +99,13 @@ sparse_mixture:
   sparse_false_peak_block_size_x: 8
   sparse_false_peak_block_size_y: 8
   gate_regularization_weight: 0.001
+frame_objectness:
+  enabled: true
+  frame_ms: 50
+  spatial_block_size_x: 8
+  spatial_block_size_y: 8
+  loss_weight: 0.2
+  freeze_base_model: true
 evaluation:
   optimize_threshold: true
   threshold_steps: 19

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import json
-from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -12,25 +11,13 @@ import torch
 
 from huav.config import HUAVConfig, load_config
 from huav.data import LoadedEventSequence, NPZEventDataset, simulate_high_threshold_events
-from huav.training.engine import CHECKPOINT_SCHEMA_VERSION, build_model
+from huav.training.engine import _validate_checkpoint_contract, build_model
 from huav.training.metrics import (
     EventMetricAccumulator,
     EVUAVMetricAccumulator,
     competition_metrics,
 )
 from huav.training.runtime import prepare_device
-
-
-def _serializable(value: Any) -> Any:
-    if isinstance(value, Path):
-        return str(value)
-    if isinstance(value, tuple):
-        return [_serializable(item) for item in value]
-    if isinstance(value, list):
-        return [_serializable(item) for item in value]
-    if isinstance(value, dict):
-        return {key: _serializable(item) for key, item in value.items()}
-    return value
 
 
 def _new_accumulators(
@@ -103,12 +90,7 @@ def evaluate_threshold_robustness(
     torch_device = runtime.device
     checkpoint_path = Path(checkpoint_path)
     checkpoint = torch.load(checkpoint_path, map_location=torch_device, weights_only=True)
-    if checkpoint.get("schema_version") != CHECKPOINT_SCHEMA_VERSION:
-        raise ValueError("unsupported checkpoint schema version")
-    if checkpoint.get("model_config") != _serializable(asdict(config.model)):
-        raise ValueError("checkpoint model configuration does not match the supplied config")
-    if checkpoint.get("resolution") != _serializable(asdict(config.resolution)):
-        raise ValueError("checkpoint resolution does not match the supplied config")
+    _validate_checkpoint_contract(checkpoint, config)
 
     model = build_model(config).to(torch_device)
     model.load_state_dict(checkpoint["model_state"])

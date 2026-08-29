@@ -9,6 +9,7 @@ from huav.training.losses import (
     binary_dice_loss,
     binary_focal_loss,
     false_alarm_pixel_loss,
+    frame_cell_objectness_loss,
     object_frame_recall_loss,
     positive_logit_preservation_loss,
     sparse_block_false_peak_loss,
@@ -140,6 +141,47 @@ def test_focal_and_dice_losses_prefer_correct_logits() -> None:
 
     assert binary_focal_loss(correct, labels) < binary_focal_loss(wrong, labels)
     assert binary_dice_loss(correct, labels) < binary_dice_loss(wrong, labels)
+
+
+def test_frame_cell_objectness_loss_uses_group_max_targets_and_backpropagates() -> None:
+    indices = torch.tensor([0, 0, 1, 1])
+    labels = torch.tensor([0.0, 1.0, 0.0, 0.0])
+    correct = torch.tensor([4.0, -4.0], requires_grad=True)
+    wrong = -correct.detach()
+
+    correct_loss = frame_cell_objectness_loss(
+        correct,
+        indices,
+        labels,
+        alpha=0.75,
+        gamma=2.0,
+    )
+    wrong_loss = frame_cell_objectness_loss(
+        wrong,
+        indices,
+        labels,
+        alpha=0.75,
+        gamma=2.0,
+    )
+    correct_loss.backward()
+
+    assert correct_loss < wrong_loss
+    assert correct.grad is not None and torch.isfinite(correct.grad).all()
+
+
+def test_frame_cell_objectness_loss_empty_input_is_backward_safe() -> None:
+    logits = torch.empty(0, requires_grad=True)
+    loss = frame_cell_objectness_loss(
+        logits,
+        torch.empty(0, dtype=torch.long),
+        torch.empty(0),
+        alpha=0.75,
+        gamma=2.0,
+    )
+    loss.backward()
+
+    assert loss.item() == 0.0
+    assert logits.grad is not None
 
 
 def test_total_loss_is_focal_plus_configured_per_sample_dice() -> None:

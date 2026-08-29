@@ -11,6 +11,7 @@ def _model(
     causal_mode: bool = False,
     debug: bool = True,
     sparse_mixture: bool = False,
+    frame_objectness: bool = False,
 ) -> SpatioTemporalConeDetector:
     return SpatioTemporalConeDetector(
         width=16,
@@ -38,6 +39,11 @@ def _model(
         sparse_mixture_enabled=sparse_mixture,
         sparse_mixture_router_bias=-2.0,
         sparse_mixture_residual_scale=0.01,
+        frame_objectness_enabled=frame_objectness,
+        frame_objectness_frame_ms=50.0,
+        duration_ms=100.0,
+        frame_objectness_block_size_x=4,
+        frame_objectness_block_size_y=4,
     )
 
 
@@ -73,6 +79,10 @@ def test_forward_returns_required_event_token_and_attention_outputs() -> None:
 
     assert {
         "event_logits",
+        "base_event_logits",
+        "frame_objectness_cell_logits",
+        "frame_objectness_event_cell_indices",
+        "frame_objectness_event_logits",
         "full_event_logits",
         "sparse_event_logits",
         "sparse_source_indices",
@@ -87,6 +97,8 @@ def test_forward_returns_required_event_token_and_attention_outputs() -> None:
     } == set(output)
     assert output["event_logits"].shape == (5,)
     assert torch.equal(output["event_logits"], output["full_event_logits"])
+    assert torch.equal(output["event_logits"], output["base_event_logits"])
+    assert torch.equal(output["frame_objectness_event_logits"], torch.zeros(5))
     assert output["sparse_event_logits"].shape == (0,)
     assert output["event_token_indices"].shape == (5,)
     assert output["token_features"].shape[1] == 16
@@ -169,4 +181,30 @@ def test_paired_sparse_view_preserves_full_event_order_and_trains_router() -> No
     assert all(
         parameter.grad is not None and torch.isfinite(parameter.grad).all()
         for parameter in mixture_parameters
+    )
+
+
+def test_frame_objectness_zero_initialization_preserves_base_logits() -> None:
+    output = _model(frame_objectness=True)(_events())
+
+    torch.testing.assert_close(output["event_logits"], output["base_event_logits"])
+    assert output["frame_objectness_cell_logits"].ndim == 1
+    assert output["frame_objectness_event_cell_indices"].shape == (5,)
+    assert torch.equal(output["frame_objectness_event_logits"], torch.zeros(5))
+
+
+def test_freeze_base_for_objectness_keeps_only_new_head_trainable() -> None:
+    model = _model(sparse_mixture=True, frame_objectness=True)
+    model.freeze_base_for_objectness()
+    model.train()
+
+    for module in (model.tokenizer, model.encoder, model.decoder, model.sparse_mixture):
+        assert module is not None
+        assert not module.training
+        assert not any(parameter.requires_grad for parameter in module.parameters())
+    assert model.frame_objectness_head is not None
+    assert model.frame_objectness_head.training
+    assert all(
+        parameter.requires_grad
+        for parameter in model.frame_objectness_head.parameters()
     )

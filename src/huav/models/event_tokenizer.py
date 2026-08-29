@@ -16,6 +16,9 @@ class TokenizedEvents:
     token_batch_indices: torch.Tensor
     event_token_indices: torch.Tensor
     event_local_features: torch.Tensor
+    event_xy: torch.Tensor
+    normalized_time: torch.Tensor
+    event_batch_indices: torch.Tensor
     token_statistics: torch.Tensor
     event_counts: torch.Tensor
 
@@ -190,6 +193,11 @@ class EventTokenizer(nn.Module):
             event_local_features=torch.empty(
                 (0, self.event_feature_dim), dtype=dtype, device=device
             ),
+            event_xy=torch.empty((0, 2), dtype=events.dtype, device=events.device),
+            normalized_time=torch.empty(0, dtype=events.dtype, device=events.device),
+            event_batch_indices=torch.empty(
+                0, dtype=torch.long, device=events.device
+            ),
             token_statistics=torch.empty(
                 (0, self.statistic_dim), dtype=dtype, device=device
             ),
@@ -349,6 +357,9 @@ class EventTokenizer(nn.Module):
             token_batch_indices=token_batches,
             event_token_indices=inverse,
             event_local_features=local_features,
+            event_xy=torch.stack((x, y), dim=1),
+            normalized_time=normalized_time,
+            event_batch_indices=parsed_batches,
             token_statistics=statistics,
             event_counts=counts[inverse],
         )

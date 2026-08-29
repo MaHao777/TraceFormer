@@ -54,6 +54,13 @@ def main() -> None:
         metavar="BEST_PT",
         help="initialize and freeze the Full path from a historical best.pt",
     )
+    resume_group.add_argument(
+        "--initialize-objectness",
+        type=str,
+        default=None,
+        metavar="BEST_PT",
+        help="initialize schema-5 base weights and train only frame objectness",
+    )
     parser.add_argument(
         "--additional-epochs",
         type=int,
@@ -90,6 +97,9 @@ def main() -> None:
                 config_source=arguments.config,
                 resume_state_path=arguments.resume_state,
                 initial_full_checkpoint_path=arguments.initialize_full,
+                initial_objectness_checkpoint_path=(
+                    arguments.initialize_objectness
+                ),
             )
     except (OSError, RuntimeError, ValueError) as error:
         parser.error(str(error))

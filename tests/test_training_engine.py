@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import random
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -15,6 +15,7 @@ from huav.analysis.threshold_robustness import evaluate_threshold_robustness
 from huav.config import (
     ConeHeadConfig,
     DatasetConfig,
+    FrameObjectnessConfig,
     HUAVConfig,
     ModelConfig,
     TrainingConfig,
@@ -28,9 +29,11 @@ from huav.training.engine import (
     _grad_scaler_is_enabled,
     _restore_rng_state,
     _select_competition_threshold,
+    _serializable,
     _sparse_mixture_weight,
     _threshold_augmentation_weight,
     _threshold_ratio_for_epoch,
+    build_model,
     evaluate_checkpoint,
     resume_training,
     run_training,
@@ -198,6 +201,7 @@ def test_cpu_training_writes_reproducible_metrics_and_checkpoint() -> None:
             "dice",
             "object_frame",
             "false_alarm",
+            "frame_objectness",
         }
         assert all(
             value >= 0.0 for value in history[0]["validation_loss"].values()
@@ -207,8 +211,9 @@ def test_cpu_training_writes_reproducible_metrics_and_checkpoint() -> None:
         checkpoint = __import__("torch").load(
             run_dir / "best.pt", map_location="cpu", weights_only=True
         )
-        assert checkpoint["schema_version"] == 5
+        assert checkpoint["schema_version"] == 6
         assert checkpoint["sparse_mixture_config"]["enabled"] is False
+        assert checkpoint["frame_objectness_config"]["enabled"] is False
         assert checkpoint["decision_threshold"] == metrics["threshold"]
         changed_config = replace(
             _config(data_root, output_root),
@@ -243,6 +248,72 @@ def test_cpu_training_writes_reproducible_metrics_and_checkpoint() -> None:
             )
         with pytest.raises(FileExistsError, match="not empty"):
             run_training(_config(data_root, output_root), output_dir=run_dir)
+
+
+def test_objectness_initialization_loads_schema5_base_and_trains_only_new_head() -> None:
+    with TemporaryDirectory(dir=Path.cwd()) as directory:
+        temporary_root = Path(directory)
+        data_root = temporary_root / "data"
+        train_root = data_root / "train"
+        val_root = data_root / "val"
+        train_root.mkdir(parents=True)
+        val_root.mkdir(parents=True)
+        _write_sequence(train_root / "train_000.npz", 0)
+        _write_sequence(val_root / "val_000.npz", 1)
+        output_root = temporary_root / "outputs"
+        source_config = _config(data_root, output_root)
+        source_model = build_model(source_config)
+        source_path = temporary_root / "schema5.pt"
+        torch.save(
+            {
+                "schema_version": 5,
+                "model_state": source_model.state_dict(),
+                "model_config": _serializable(asdict(source_config.model)),
+                "sparse_mixture_config": _serializable(
+                    asdict(source_config.sparse_mixture)
+                ),
+                "resolution": _serializable(asdict(source_config.resolution)),
+                "epoch": 7,
+            },
+            source_path,
+        )
+        target_config = replace(
+            source_config,
+            frame_objectness=FrameObjectnessConfig(
+                enabled=True,
+                frame_ms=50.0,
+                spatial_block_size_x=4,
+                spatial_block_size_y=3,
+                loss_weight=0.2,
+                freeze_base_model=True,
+            ),
+        ).validate()
+
+        summary = run_training(
+            target_config,
+            output_dir=output_root / "objectness",
+            initial_objectness_checkpoint_path=source_path,
+        )
+
+        run_dir = Path(summary["run_dir"])
+        checkpoint = torch.load(
+            run_dir / "best.pt", map_location="cpu", weights_only=True
+        )
+        trained_model = build_model(target_config)
+        assert trained_model.frame_objectness_head is not None
+        expected_trainable = sum(
+            parameter.numel()
+            for parameter in trained_model.frame_objectness_head.parameters()
+        )
+        assert summary["trainable_parameter_count"] == expected_trainable
+        assert summary["full_initialization"]["kind"] == "frame_objectness"
+        assert summary["full_initialization"]["epoch"] == 7
+        assert checkpoint["schema_version"] == 6
+        assert checkpoint["frame_objectness_config"]["enabled"] is True
+        for name, tensor in source_model.state_dict().items():
+            assert torch.equal(checkpoint["model_state"][name], tensor)
+        history = json.loads((run_dir / "history.json").read_text(encoding="utf-8"))
+        assert history[0]["train_loss"]["frame_objectness"] > 0.0
 
 
 def test_training_curve_failure_warns_without_aborting_training(
@@ -431,6 +502,7 @@ def test_resumed_training_records_validation_loss() -> None:
             "dice",
             "object_frame",
             "false_alarm",
+            "frame_objectness",
         }
         assert all(
             value >= 0.0 for value in history[0]["validation_loss"].values()

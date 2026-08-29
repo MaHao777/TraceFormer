@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from huav.config import (
     ConeHeadConfig,
+    FrameObjectnessConfig,
     HUAVConfig,
     SparseMixtureConfig,
     ThresholdAugmentationConfig,
@@ -66,6 +67,36 @@ def test_score_config_enables_sparse_mixture_and_disables_legacy_augmentation() 
         sparse_false_peak_block_size_y=8,
         gate_regularization_weight=0.001,
     )
+    assert config.frame_objectness == FrameObjectnessConfig(
+        enabled=True,
+        frame_ms=50.0,
+        spatial_block_size_x=8,
+        spatial_block_size_y=8,
+        loss_weight=0.2,
+        freeze_base_model=True,
+    )
+
+
+def test_frame_objectness_validation_rejects_invalid_values() -> None:
+    base = HUAVConfig.default()
+    for field, value in (
+        ("enabled", 1),
+        ("frame_ms", 0.0),
+        ("spatial_block_size_x", 0),
+        ("spatial_block_size_y", True),
+        ("loss_weight", -0.1),
+        ("freeze_base_model", 1),
+    ):
+        raises(
+            ValueError,
+            lambda field=field, value=value: replace(
+                base,
+                frame_objectness=replace(
+                    base.frame_objectness,
+                    **{field: value},
+                ),
+            ).validate(),
+        )
 
 
 def test_sparse_mixture_freeze_and_preservation_validation() -> None:
