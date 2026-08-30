@@ -14,9 +14,15 @@ from huav.postprocessing.contracts import (
     fold_of,
     make_internal_split,
 )
+from huav.postprocessing.direct_verifier import (
+    apply_direct_verifier,
+    direct_candidate_features,
+    saturate_probability,
+)
 from huav.postprocessing.features import EVENT_FEATURE_DIM, build_event_features
 from huav.postprocessing.learning import blend_scores, convex_weights, sample_event_rows
 from huav.postprocessing.metrics import score_binary
+from huav.postprocessing.pipeline import release_event_models
 from huav.postprocessing.refinement import (
     apply_component_model,
     component_features,
@@ -27,7 +33,7 @@ from huav.postprocessing.submission import (
     evaluate_predictions,
     write_prediction_npz,
 )
-from huav.postprocessing.tracking import track_prediction
+from huav.postprocessing.tracking import rescue_reference_tracks, track_prediction
 
 
 def _cache(*, labels: bool = True) -> EventCache:
@@ -117,6 +123,202 @@ def test_tracking_recovers_only_events_near_a_stable_track() -> None:
     assert not prediction[1::2].any()
 
 
+def test_reference_track_rescue_only_adds_dense_long_tracks() -> None:
+    rows = []
+    for frame in range(8):
+        rows.append([20 + frame, 30, frame * 50 + 1])
+    for frame in range(7):
+        rows.append([120 + frame, 130, frame * 50 + 2])
+    locations = np.asarray(rows, dtype=np.int64)
+    current = np.zeros(len(locations), dtype=bool)
+    reference = np.ones(len(locations), dtype=bool)
+
+    rescued, report = rescue_reference_tracks(
+        locations,
+        current,
+        reference,
+        density_group="dense",
+    )
+
+    assert rescued[:8].all()
+    assert not rescued[8:].any()
+    assert report == {"candidate_events": 15, "selected_tracks": 1, "added_events": 8}
+
+
+def test_reference_track_rescue_preserves_sparse_prediction() -> None:
+    locations = np.asarray(
+        [[20 + frame, 30, frame * 50 + 1] for frame in range(8)],
+        dtype=np.int64,
+    )
+    current = np.zeros(8, dtype=bool)
+    current[0] = True
+    reference = np.ones(8, dtype=bool)
+
+    rescued, report = rescue_reference_tracks(
+        locations,
+        current,
+        reference,
+        density_group="sparse",
+    )
+
+    assert np.array_equal(rescued, current)
+    assert report == {"candidate_events": 7, "selected_tracks": 0, "added_events": 0}
+
+
+class _KeepFirstCandidate:
+    def predict(self, features: np.ndarray, *, num_threads: int) -> np.ndarray:
+        assert num_threads == 1
+        result = np.zeros(len(features), dtype=np.float32)
+        result[0] = 1.0
+        return result
+
+
+def test_direct_verifier_only_gates_untracked_components() -> None:
+    locations = np.asarray(
+        [
+            [10, 10, 1],
+            [11, 10, 2],
+            [100, 100, 1],
+            [200, 200, 1],
+        ],
+        dtype=np.int64,
+    )
+    cache = EventCache(
+        name="direct.npz",
+        locations=locations,
+        raw_features=np.column_stack(
+            (
+                np.zeros((4, 3), dtype=np.float32),
+                np.asarray([1, 1, 0, 1], dtype=np.float32),
+            )
+        ),
+        base_probability=np.asarray([0.9, 0.8, 0.99, 0.98], dtype=np.float32),
+        token_features=np.zeros((1, 64), dtype=np.float32),
+        event_token_indices=np.zeros(4, dtype=np.int64),
+        prediction=np.ones(4, dtype=bool),
+        labels=np.asarray([1, 1, 0, 0], dtype=bool),
+        target_ids=np.asarray([1, 1, 0, 0], dtype=np.int64),
+    )
+    tracked = np.asarray([1, 1, 0, 0], dtype=bool)
+    direct = np.ones(4, dtype=bool)
+    batch = direct_candidate_features(
+        cache,
+        cache.base_probability,
+        tracked,
+        direct,
+        include_targets=True,
+    )
+
+    assert len(batch.features) == 2
+    assert batch.labels is not None and batch.labels.tolist() == [False, False]
+    gated = apply_direct_verifier(
+        batch,
+        tracked,
+        direct,
+        _KeepFirstCandidate(),
+        0.5,
+        density_group="sparse",
+    )
+    assert gated.tolist() == [True, True, True, False]
+
+
+def test_direct_verifier_preserves_dense_predictions() -> None:
+    cache = _cache()
+    tracked = np.asarray([1, 0, 0, 0], dtype=bool)
+    direct = np.asarray([1, 1, 1, 0], dtype=bool)
+    batch = direct_candidate_features(
+        cache,
+        cache.base_probability,
+        tracked,
+        direct,
+        include_targets=False,
+    )
+    gated = apply_direct_verifier(
+        batch,
+        tracked,
+        direct,
+        _RejectModel(),
+        0.5,
+        density_group="dense",
+    )
+    assert np.array_equal(gated, tracked | direct)
+
+
+def test_saturation_is_monotonic_and_preserves_probability_order() -> None:
+    probability = np.asarray([0.1, 0.4, 0.8, 0.99], dtype=np.float32)
+    saturated = saturate_probability(probability, scale=2.0, bias=0.75)
+    assert np.all(np.diff(saturated) > 0)
+    assert saturated[-1] > probability[-1]
+
+
+def test_event_release_trains_all_cache_sequences(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    names = ["train_000.npz", "train_001.npz", "train_002.npz"]
+    for name in names:
+        (cache_dir / name).touch()
+    training_dir = tmp_path / "development"
+    training_dir.mkdir()
+    training_report = {
+        "protocol": {
+            "seed": 37,
+            "holdout_files": 1,
+            "folds": 2,
+            "hard_negative_threshold": 0.03,
+            "negative_to_positive_ratio": 4,
+            "minimum_negative_samples": 10,
+            "small_rounds": 1,
+            "large_rounds": 1,
+            "blend_step": 0.05,
+        },
+        "training_names": names[1:],
+        "holdout_names": names[:1],
+        "status": "rejected_component_stage",
+        "event_stage": {
+            "gate": {"passed": True},
+            "direct_weights": [0.0, 0.9, 0.1],
+            "track_weights": [0.0, 0.8, 0.2],
+            "direct_threshold": 0.88,
+            "tracking": {"sparse": {}, "ordinary": {}, "dense": {}},
+        },
+    }
+    report_path = training_dir / "training_report.json"
+    report_path.write_text(json.dumps(training_report), encoding="utf-8")
+    observed: dict[str, object] = {}
+
+    def fake_train_event_models(
+        cache_root: Path,
+        training_names: list[str],
+        model_dir: Path,
+        protocol: PostprocessProtocol,
+    ) -> tuple[dict[str, object], dict[str, object]]:
+        observed["cache_root"] = Path(cache_root)
+        observed["training_names"] = list(training_names)
+        observed["protocol"] = protocol
+        Path(model_dir).mkdir(parents=True)
+        for model_name in ("small.txt", "large.txt"):
+            (Path(model_dir) / model_name).write_text(model_name, encoding="ascii")
+        return {}, {"training_sequences": list(training_names)}
+
+    monkeypatch.setattr(
+        "huav.postprocessing.pipeline.train_event_models",
+        fake_train_event_models,
+    )
+    output_dir = tmp_path / "release"
+    release = release_event_models(cache_dir, report_path, output_dir, progress=lambda _: None)
+
+    assert observed["cache_root"] == cache_dir
+    assert observed["training_names"] == names
+    assert isinstance(observed["protocol"], PostprocessProtocol)
+    assert release["training_files"] == 3
+    assert release["event_contract"]["direct_threshold"] == pytest.approx(0.88)
+    assert (output_dir / "events" / "small.txt").is_file()
+    assert json.loads((output_dir / "release_report.json").read_text(encoding="utf-8")) == release
+
+
 class _RejectModel:
     def predict(self, features: np.ndarray, *, num_threads: int) -> np.ndarray:
         assert num_threads == 1
@@ -199,5 +401,13 @@ def test_binary_metric_uses_strict_frame_boundaries() -> None:
 def test_postprocess_cli_exposes_all_commands() -> None:
     parser = build_parser()
     help_text = parser.format_help()
-    for command in ("cache", "train", "predict", "evaluate", "audit"):
+    for command in (
+        "cache",
+        "train",
+        "release-event",
+        "train-direct-verifier",
+        "predict",
+        "evaluate",
+        "audit",
+    ):
         assert command in help_text

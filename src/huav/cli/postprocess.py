@@ -10,7 +10,12 @@ from pathlib import Path
 from huav.config import load_config
 from huav.postprocessing.cache import cache_split
 from huav.postprocessing.contracts import PostprocessProtocol
-from huav.postprocessing.pipeline import predict_pipeline, train_pipeline
+from huav.postprocessing.direct_verifier import train_direct_verifier
+from huav.postprocessing.pipeline import (
+    predict_pipeline,
+    release_event_models,
+    train_pipeline,
+)
 from huav.postprocessing.submission import audit_submission, evaluate_predictions
 
 
@@ -51,6 +56,22 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--output-dir", required=True)
     train.add_argument("--control-dir")
     _add_training_controls(train)
+
+    release_event = commands.add_parser(
+        "release-event",
+        help="冻结开发参数并用全部训练缓存发布事件模型",
+    )
+    release_event.add_argument("--cache-dir", required=True)
+    release_event.add_argument("--training-report", required=True)
+    release_event.add_argument("--output-dir", required=True)
+
+    direct_verifier = commands.add_parser(
+        "train-direct-verifier",
+        help="训练只审查direct-only组件的时序证据门",
+    )
+    direct_verifier.add_argument("--cache-dir", required=True)
+    direct_verifier.add_argument("--training-report", required=True)
+    direct_verifier.add_argument("--output-dir", required=True)
 
     predict = commands.add_parser("predict", help="使用冻结发布级联进行盲推")
     predict.add_argument("--cache-dir", required=True)
@@ -101,6 +122,20 @@ def main() -> None:
                 arguments.output_dir,
                 _protocol(arguments),
                 control_dir=arguments.control_dir,
+                progress=lambda message: print(message, flush=True),
+            )
+        elif arguments.command == "release-event":
+            payload = release_event_models(
+                arguments.cache_dir,
+                arguments.training_report,
+                arguments.output_dir,
+                progress=lambda message: print(message, flush=True),
+            )
+        elif arguments.command == "train-direct-verifier":
+            payload = train_direct_verifier(
+                arguments.cache_dir,
+                arguments.training_report,
+                arguments.output_dir,
                 progress=lambda message: print(message, flush=True),
             )
         elif arguments.command == "predict":

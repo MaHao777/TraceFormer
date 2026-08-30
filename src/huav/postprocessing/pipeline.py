@@ -3,13 +3,20 @@
 from __future__ import annotations
 
 import json
+import shutil
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
 import numpy as np
 
-from .contracts import EventCache, PostprocessProtocol, density_group, make_internal_split
+from .contracts import (
+    EventCache,
+    PostprocessProtocol,
+    density_group,
+    make_internal_split,
+    sha256_file,
+)
 from .learning import (
     blend_scores,
     convex_weights,
@@ -343,6 +350,57 @@ def _load_control(directory: Path, names: Iterable[str]) -> dict[str, np.ndarray
     return result
 
 
+def release_event_models(
+    cache_dir: str | Path,
+    training_report_path: str | Path,
+    output_dir: str | Path,
+    *,
+    progress: Callable[[str], None] = print,
+) -> dict[str, Any]:
+    """冻结开发参数，并用全部训练缓存重训事件模型。"""
+
+    cache_dir = Path(cache_dir)
+    training_report_path = Path(training_report_path)
+    output_dir = Path(output_dir)
+    source = json.loads(training_report_path.read_text(encoding="utf-8"))
+    event_stage = source.get("event_stage", {})
+    if not event_stage.get("gate", {}).get("passed", False):
+        raise ValueError("event stage did not pass its development gate")
+    names = _cache_names(cache_dir)
+    declared = sorted(source.get("training_names", []) + source.get("holdout_names", []))
+    if names != declared:
+        raise ValueError("training cache names do not match the development split")
+
+    protocol = PostprocessProtocol(**source["protocol"])
+    protocol.validate()
+    output_dir.mkdir(parents=True, exist_ok=False)
+    contract_snapshot = output_dir / "development_contract.json"
+    shutil.copy2(training_report_path, contract_snapshot)
+    progress(f"使用全部{len(names)}个训练序列发布事件重评分模型")
+    model_dir = output_dir / "events"
+    _, model_report = train_event_models(cache_dir, names, model_dir, protocol)
+    contract = {
+        key: event_stage[key]
+        for key in ("direct_weights", "track_weights", "direct_threshold", "tracking")
+    }
+    release = {
+        "source_training_report": str(contract_snapshot.resolve()),
+        "source_training_report_sha256": sha256_file(contract_snapshot),
+        "training_files": len(names),
+        "model_dir": str(model_dir.resolve()),
+        "model": model_report,
+        "event_contract": contract,
+        "event_model_sha256": {
+            name: sha256_file(model_dir / name) for name in ("small.txt", "large.txt")
+        },
+    }
+    (output_dir / "release_report.json").write_text(
+        json.dumps(release, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return release
+
+
 def train_pipeline(
     cache_dir: str | Path,
     output_dir: str | Path,
@@ -439,6 +497,24 @@ def train_pipeline(
             json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
         )
         return report
+
+    # 事件级门槛独立于后续组件级门槛；通过后立即发布全99序列模型。
+    training_report_path = output_dir / "training_report.json"
+    training_report_path.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    event_release_dir = output_dir / "event_release"
+    report["event_stage"]["release"] = release_event_models(
+        cache_dir,
+        training_report_path,
+        event_release_dir,
+        progress=progress,
+    )
+    training_report_path.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
 
     progress("生成79序列OOF分数并训练组件剪枝")
     caches.update(
@@ -574,7 +650,7 @@ def train_pipeline(
     progress("所有留出门槛通过，使用99序列重训发布级联")
     release = output_dir / "release"
     release_events = release / "events"
-    train_event_models(cache_dir, names, release_events, protocol)
+    shutil.copytree(event_release_dir / "events", release_events)
     release_oof = release / "oof_99"
     generate_oof_scores(cache_dir, names, release_oof, protocol)
     release_scores = _load_oof_scores(release_oof, names)
