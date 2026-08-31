@@ -47,9 +47,7 @@ class ModelConfig:
     cone_heads: tuple[ConeHeadConfig, ...] = DEFAULT_CONE_HEADS
     layer_time_scales: tuple[float, ...] = (0.5, 0.75, 1.0)
     max_neighbors_per_cone: int = 8
-    causal_mode: bool = False
     direction_dropout: float = 0.0
-    debug_attention_stats: bool = False
 
 
 @dataclass(frozen=True)
@@ -65,6 +63,7 @@ class DatasetConfig:
 
 @dataclass(frozen=True)
 class TrainingConfig:
+    stage: str = "full"
     device: str = "cpu"
     epochs: int = 3
     learning_rate: float = 0.001
@@ -106,20 +105,7 @@ class LossConfig:
 
 
 @dataclass(frozen=True)
-class ThresholdAugmentationConfig:
-    enabled: bool = False
-    min_events: int = 300000
-    max_polarity_fraction: float = 0.65
-    threshold_ratios: tuple[float, ...] = (1.5, 2.0)
-    warmup_epochs: int = 3
-    ramp_epochs: int = 3
-    sparse_loss_weight: float = 0.5
-    consistency_loss_weight: float = 0.1
-
-
-@dataclass(frozen=True)
 class SparseMixtureConfig:
-    enabled: bool = False
     min_events: int = 300000
     max_polarity_fraction: float = 0.65
     threshold_ratio: float = 1.5
@@ -127,7 +113,6 @@ class SparseMixtureConfig:
     ramp_epochs: int = 3
     initial_router_bias: float = -2.0
     initial_residual_scale: float = 0.01
-    freeze_full_model: bool = False
     full_aux_loss_weight: float = 0.25
     sparse_loss_weight: float = 0.15
     object_frame_consistency_weight: float = 0.1
@@ -163,11 +148,9 @@ DEFAULT_REFINEMENT_SCALES = (
 class FrameRefinementConfig:
     """多尺度 cell 上下文和事件级残差精修配置。"""
 
-    enabled: bool = False
     context_dim: int = 16
     scales: tuple[RefinementScaleConfig, ...] = DEFAULT_REFINEMENT_SCALES
     loss_weight: float = 0.2
-    freeze_base_model: bool = False
 
 
 @dataclass(frozen=True)
@@ -204,7 +187,6 @@ class HUAVConfig:
     dataset: DatasetConfig = DatasetConfig()
     training: TrainingConfig = TrainingConfig()
     loss: LossConfig = LossConfig()
-    threshold_augmentation: ThresholdAugmentationConfig = ThresholdAugmentationConfig()
     sparse_mixture: SparseMixtureConfig = SparseMixtureConfig()
     frame_refinement: FrameRefinementConfig = FrameRefinementConfig()
     evaluation: EvaluationConfig = EvaluationConfig()
@@ -260,21 +242,21 @@ class HUAVConfig:
             if value < previous_scale:
                 raise ValueError("layer_time_scales must be non-decreasing")
             previous_scale = value
-        if not isinstance(self.model.causal_mode, bool):
-            raise ValueError("causal_mode must be boolean")
         direction_dropout = _finite_real(
             self.model.direction_dropout, "direction_dropout"
         )
         if not 0 <= direction_dropout <= 1:
             raise ValueError("direction_dropout must be in [0,1]")
-        if not isinstance(self.model.debug_attention_stats, bool):
-            raise ValueError("debug_attention_stats must be boolean")
         threshold = _finite_real(self.inference.sigmoid_threshold, "sigmoid_threshold")
         if not 0.0 <= threshold <= 1.0:
             raise ValueError("sigmoid_threshold must be in [0, 1]")
         _path_value(self.dataset.root, "dataset root")
         if _finite_real(self.dataset.duration_ms, "duration_ms") <= 0:
             raise ValueError("duration_ms must be positive")
+        if self.training.stage not in {"full", "sparse_mixture", "refinement"}:
+            raise ValueError(
+                "training stage must be 'full', 'sparse_mixture' or 'refinement'"
+            )
         if self.training.device not in {"cpu", "cuda"}:
             raise ValueError("training device must be 'cpu' or 'cuda'")
         _positive_integer(self.training.epochs, "epochs")
@@ -405,54 +387,7 @@ class HUAVConfig:
             self.loss.false_alarm_logit_margin,
             "loss false_alarm_logit_margin",
         )
-        augmentation = self.threshold_augmentation
-        if not isinstance(augmentation.enabled, bool):
-            raise ValueError("threshold augmentation enabled must be boolean")
-        _positive_integer(augmentation.min_events, "threshold augmentation min_events")
-        maximum_polarity = _finite_real(
-            augmentation.max_polarity_fraction,
-            "threshold augmentation max_polarity_fraction",
-        )
-        if not 0.5 <= maximum_polarity <= 1.0:
-            raise ValueError(
-                "threshold augmentation max_polarity_fraction must be in [0.5,1]"
-            )
-        if not isinstance(augmentation.threshold_ratios, (tuple, list)):
-            raise ValueError("threshold augmentation threshold_ratios must be a sequence")
-        ratios = tuple(
-            _finite_real(value, "threshold augmentation threshold ratio")
-            for value in augmentation.threshold_ratios
-        )
-        if not ratios or any(value <= 1.0 for value in ratios):
-            raise ValueError(
-                "threshold augmentation threshold ratios must be non-empty and greater than 1"
-            )
-        if len(set(ratios)) != len(ratios):
-            raise ValueError("threshold augmentation threshold ratios must be unique")
-        if (
-            isinstance(augmentation.warmup_epochs, bool)
-            or not isinstance(augmentation.warmup_epochs, Integral)
-            or augmentation.warmup_epochs < 0
-        ):
-            raise ValueError(
-                "threshold augmentation warmup_epochs must be a non-negative integer"
-            )
-        _positive_integer(
-            augmentation.ramp_epochs,
-            "threshold augmentation ramp_epochs",
-        )
-        for name in ("sparse_loss_weight", "consistency_loss_weight"):
-            if _finite_real(
-                getattr(augmentation, name), f"threshold augmentation {name}"
-            ) < 0:
-                raise ValueError(f"threshold augmentation {name} must be non-negative")
         refinement = self.frame_refinement
-        if not isinstance(refinement.enabled, bool):
-            raise ValueError("frame refinement enabled must be boolean")
-        if not isinstance(refinement.freeze_base_model, bool):
-            raise ValueError("frame refinement freeze_base_model must be boolean")
-        if refinement.freeze_base_model and not refinement.enabled:
-            raise ValueError("freezing the base model requires frame refinement")
         _positive_integer(refinement.context_dim, "frame refinement context_dim")
         if not isinstance(refinement.scales, (tuple, list)) or not refinement.scales:
             raise ValueError("frame refinement scales must not be empty")
@@ -489,16 +424,6 @@ class HUAVConfig:
         if _finite_real(refinement.loss_weight, "frame refinement loss_weight") < 0:
             raise ValueError("frame refinement loss_weight must be non-negative")
         mixture = self.sparse_mixture
-        if not isinstance(mixture.enabled, bool):
-            raise ValueError("sparse mixture enabled must be boolean")
-        if not isinstance(mixture.freeze_full_model, bool):
-            raise ValueError("sparse mixture freeze_full_model must be boolean")
-        if mixture.freeze_full_model and not mixture.enabled:
-            raise ValueError("freezing the full model requires sparse mixture")
-        if mixture.enabled and augmentation.enabled:
-            raise ValueError(
-                "sparse mixture and threshold augmentation cannot both be enabled"
-            )
         _positive_integer(mixture.min_events, "sparse mixture min_events")
         mixture_polarity = _finite_real(
             mixture.max_polarity_fraction,
@@ -598,7 +523,6 @@ def load_config(path: Path | str) -> HUAVConfig:
         "dataset",
         "training",
         "loss",
-        "threshold_augmentation",
         "sparse_mixture",
         "frame_refinement",
         "evaluation",
@@ -621,14 +545,6 @@ def load_config(path: Path | str) -> HUAVConfig:
             raw_model["layer_time_scales"] = tuple(
                 raw_model["layer_time_scales"]
             )
-        raw_augmentation = dict(raw.get("threshold_augmentation", {}))
-        if "threshold_ratios" in raw_augmentation:
-            threshold_ratios = raw_augmentation["threshold_ratios"]
-            if not isinstance(threshold_ratios, (tuple, list)):
-                raise ValueError(
-                    "threshold_augmentation threshold_ratios must be a sequence"
-                )
-            raw_augmentation["threshold_ratios"] = tuple(threshold_ratios)
         raw_refinement = dict(raw.get("frame_refinement", {}))
         if "scales" in raw_refinement:
             scale_values = raw_refinement["scales"]
@@ -645,7 +561,6 @@ def load_config(path: Path | str) -> HUAVConfig:
             dataset=DatasetConfig(**raw.get("dataset", {})),
             training=TrainingConfig(**raw.get("training", {})),
             loss=LossConfig(**raw.get("loss", {})),
-            threshold_augmentation=ThresholdAugmentationConfig(**raw_augmentation),
             sparse_mixture=SparseMixtureConfig(**raw.get("sparse_mixture", {})),
             frame_refinement=FrameRefinementConfig(**raw_refinement),
             evaluation=EvaluationConfig(**raw.get("evaluation", {})),

@@ -2,8 +2,14 @@
 set -euo pipefail
 
 MODE="${1:-smoke}"
+INITIAL_CHECKPOINT="${2:-${HUAV_REFINEMENT_CHECKPOINT:-}}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+
+if [[ -z "$INITIAL_CHECKPOINT" ]]; then
+  echo "usage: bash scripts/autodl_train.sh [smoke|full] SCHEMA5_BEST_PT" >&2
+  exit 2
+fi
 
 case "$MODE" in
   smoke)
@@ -32,6 +38,7 @@ mkdir -p "$RUN_ROOT"
 
 python -m huav.cli.train \
   --config "$CONFIG" \
+  --initialize-refinement "$INITIAL_CHECKPOINT" \
   --device cuda \
   --output-dir "$RUN_DIR" \
   2>&1 | tee "$LOG_PATH"

@@ -10,7 +10,7 @@ def test_readme_documents_editable_install_and_console_scripts() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     assert "python -m pip install -e ." in readme
     assert 'python -m pip install -e ".[dev]"' in readme
-    assert "huav-inspect --help" in readme
+    assert "huav-train --help" in readme
     assert "python -m unittest discover -s tests -v" in readme
     assert "python -m pytest" in readme
 
@@ -44,6 +44,7 @@ def test_autodl_launcher_preflights_gpu_and_uses_unique_run_directories() -> Non
     assert 'RUN_ROOT="$PROJECT_ROOT/smoke_outputs"' in contents
     assert 'RUN_ROOT="$PROJECT_ROOT/outputs"' in contents
     assert "--device cuda" in contents
+    assert '--initialize-refinement "$INITIAL_CHECKPOINT"' in contents
     assert "tee" in contents
 
 
@@ -67,8 +68,7 @@ def test_largest_sequence_check_runs_forward_loss_backward_and_reports_memory() 
     assert 'full_logits=output["event_logits"]' in contents
     assert "full_coordinates=events[:, :2]" in contents
     assert "combined_total.backward()" in contents
-    assert "simulate_high_threshold_events" in contents
-    assert "object_frame_threshold_consistency_loss" in contents
+    assert "config.training.stage" in contents
     assert '"focal"' in contents
     assert '"object_frame"' in contents
     assert '"false_alarm"' in contents

@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-COMMANDS = ("inspect", "train", "evaluate", "predict", "package", "check_gpu")
+COMMANDS = ("train", "evaluate", "predict", "check_gpu")
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -18,7 +18,7 @@ def run(command: str, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def test_each_phase_one_command_has_successful_help() -> None:
+def test_each_command_has_successful_help() -> None:
     for command in COMMANDS:
         result = run(command, "--help")
         assert result.returncode == 0
@@ -28,16 +28,8 @@ def test_each_phase_one_command_has_successful_help() -> None:
             assert "--config" in result.stdout
 
 
-def test_normal_execution_validates_config_then_fails_explicitly() -> None:
-    for command in ("inspect", "package"):
-        result = run(command, "--config", "configs/huav_base.yaml")
-        assert result.returncode != 0
-        assert "Phase 1" in result.stderr
-        assert "not implemented" in result.stderr
-
-
 def test_predict_requires_checkpoint_argument() -> None:
-    result = run("predict", "--config", "configs/huav_base.yaml")
+    result = run("predict", "--config", "configs/huav_score_optimized.yaml")
     assert result.returncode != 0
     assert "--checkpoint" in result.stderr
     assert "required" in result.stderr
@@ -67,7 +59,7 @@ def test_malformed_yaml_is_a_concise_cli_parser_error_without_traceback() -> Non
     with TemporaryDirectory() as directory:
         config = Path(directory) / "bad.yaml"
         config.write_text("resolution: [", encoding="utf-8")
-        result = run("inspect", "--config", str(config))
+        result = run("train", "--config", str(config), "--quiet")
     assert result.returncode != 0
     assert "error:" in result.stderr
     assert "Traceback" not in result.stderr

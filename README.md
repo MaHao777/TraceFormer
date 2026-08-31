@@ -1,227 +1,101 @@
-# HUAV：稀疏时空锥事件分割
+# HUAV 固定 schema-7 事件检测模型
 
-本仓库使用完整 8 秒事件流，直接为每个原始事件预测微小目标概率。当前模型不再使用双视图投影、多尺度输入、FPN、辅助分割头或跨视图损失；核心是稀疏三维块 Token 和双向多锥中心注意力。
-
-## 架构
+本仓库当前只保留一套正式模型结构：
 
 ```text
-原始事件 (batch, x, y, t, p)
-  → 仅对非空 (x_block, y_block, t_block) 生成 Token
-  → Event MLP + 均值/最大池化 + 块统计 + 位置编码
-  → 过去锥 / 未来锥分别做稀疏中心注意力
-  → Token 条件的双向门控融合
-  → 父 Token + 事件局部坐标/极性/块统计
-  → 每个原始事件一个 logit
+EventTokenizer
+  → 双向时空锥 Transformer
+  → Full/Sparse Token 混合
+  → 事件解码器
+  → 多尺度事件精修头
+  → 每个原始事件的二分类 logit
 ```
 
-模型不会创建完整三维体素，也不会创建 `M×M` 注意力矩阵。邻域按 batch 和时间切片建立 `cKDTree`，使用 Chebyshev 空间距离，并在每个头、每个方向上限制邻居数量。完整张量流程见 [docs/architecture.md](docs/architecture.md)。
+模型结构固定为 schema-7。稀疏混合模块和多尺度精修头始终构造并参与推理，不再通过配置选择性增减模块。对不满足密集、极性平衡条件的序列，不生成 Sparse 子流，但模型结构和 checkpoint 参数不变。
 
-`forward` 返回：
-
-```python
-{
-    "event_logits": event_logits,
-    "token_features": updated_tokens,
-    "token_coords": token_coords,
-    "token_batch_indices": token_batch_indices,
-    "event_token_indices": event_token_indices,
-    "past_attention_stats": past_attention_stats,
-    "future_attention_stats": future_attention_stats,
-}
-```
-
-输入既支持 `[N,5] = [batch,x,y,t,p]`，也支持 `[N,4]` 加独立 `batch_indices`。模型层面支持变长 batch、空事件、无目标事件、因果模式和 CUDA 混合精度。
-
-## 数据驱动的锥参数
-
-对 99 个训练序列、274,122 个正事件按 `4×4` 像素和 128 个时间块分析目标中心轨迹。Chebyshev 斜率的中位数及 90/95/99 分位为：
-
-| q50 | q90 | q95 | q99 |
-|---:|---:|---:|---:|
-| 0.640625 | 1.250000 | 1.446429 | 1.875000 |
-
-单位是“每相隔一个时间块移动多少空间块”。据此使用四种锥斜率 `0.5 / 1.0 / 1.5 / 2.0` 和基础半径 `1 / 1 / 2 / 2`。完整方法、逐时间距离和逐序列结果见 [docs/cone_slope_analysis.md](docs/cone_slope_analysis.md) 与 `docs/cone_slope_analysis.json`。
-
-CPU 完整训练配置使用 `8×8` 像素、64 个时间块；时间和空间同时扩大 2 倍，因此一个斜率单位仍对应约 `64 px/s`，实测斜率数值无需换算。该配置把训练集非空 Token 总量从约 613 万降到约 274 万，同时保留事件级解码。
-
-## 数据与损失
-
-默认数据根目录为 `../训练集、验证集`，包含 `train/*.npz` 和 `val/*.npz`。每个文件读取结构化数组 `ev[x,y,t,p,label,name]`；时间按 8000 ms 归一化，事件顺序和数量保持不变。
-
-训练只使用：
-
-```text
-Total Loss = STC-Focal Loss
-           + lambda_fa × Margin False-alarm Loss
-```
-
-训练时保留全部正事件，并为 STC-Focal 分类项采样背景事件。STC 邻域使用原始像素 `x/y` 和保留的毫秒时间，按双向时空锥进行稀疏体素查找；邻居概率会 `detach()`，仅作为当前事件的损失权重。Fa margin 损失使用完整前向结果，按 `(batch, 50 ms 帧, x, y)` 将背景事件聚合成像素，每个像素只保留最高 logit，再把每帧最高的 32 个背景像素压到 logit `-1` 以下。所有原始事件始终参与 Token 生成、锥上下文建模和事件解码；验证始终使用全部事件。公式、单位和全部超参数见 [docs/stc_focal_loss.md](docs/stc_focal_loss.md)。
-
-## 安装、分析与训练
+## 安装与检查
 
 ```powershell
 python -m pip install -e .
-huav-inspect --help
-huav-train --config configs/huav_base.yaml --device cpu
+python -m pip install -e ".[dev]"
+
+huav-train --help
+huav-evaluate --help
+huav-predict --help
+huav-check-gpu --help
 ```
 
-训练未指定 `--output-dir` 时，统一创建 `outputs/<device>_YYYYMMDD_HHMMSS/`；
-同一设备在同一秒启动的后续任务依次追加 `_02`、`_03`。`--output-dir` 仍可用于精确指定
-目录。建议用 `--note` 写明本轮主要修改，例如：
+运行测试与静态检查：
+
+```powershell
+python -m unittest discover -s tests -v
+python -m pytest
+python -m ruff check src tests scripts
+git diff --check
+```
+
+## 固定配置
+
+仅保留四份当前模型配置：
+
+- `configs/huav_score_optimized.yaml`：本地 CPU 正式配置
+- `configs/huav_score_optimized_smoke.yaml`：本地 CPU 冒烟配置
+- `configs/huav_score_optimized_autodl.yaml`：CUDA 正式配置
+- `configs/huav_score_optimized_autodl_smoke.yaml`：CUDA 冒烟配置
+
+四份配置的模型结构完全相同，只允许设备、混合精度、线程、数据文件上限和输出目录等运行环境字段不同。训练配置中的 `stage` 只控制哪些参数参与优化，不改变模型组成：
+
+- `full`：训练完整固定结构
+- `sparse_mixture`：冻结主干和精修头，只训练稀疏混合
+- `refinement`：冻结主干和稀疏混合，只训练多尺度精修头
+
+当前正式配置固定为 `refinement`。新建这一阶段的训练必须通过 `--initialize-refinement` 明确提供基线 checkpoint；精确续训只使用 `--resume-state`，它会恢复模型、优化器、学习率控制器和随机数状态。
+
+## 训练、复评与预测
+
+精修阶段示例：
 
 ```powershell
 huav-train `
   --config configs/huav_score_optimized.yaml `
-  --device cpu `
-  --note "尝试新的背景抑制参数"
+  --initialize-refinement path/to/schema5_best.pt `
+  --output-dir outputs/fixed_schema7_refinement
 ```
 
-复现锥斜率分析：
+从完整训练状态继续：
 
 ```powershell
-python -m huav.analysis.cone_slopes data/ev-uav/train `
-  --json docs/cone_slope_analysis.json `
-  --markdown docs/cone_slope_analysis.md
+huav-train `
+  --config path/to/run/config.yaml `
+  --resume-state path/to/run/training_state.pt `
+  --output-dir outputs/resumed_run
 ```
 
-真实数据烟雾训练：
+复评和生成预测时，应优先使用 checkpoint 同目录保存的 `config.yaml`：
 
 ```powershell
-python -m huav.cli.train `
-  --config configs/huav_cpu_smoke.yaml `
-  --device cpu `
-  --note "真实数据 smoke 链路检查"
-```
+huav-evaluate `
+  --config path/to/run/config.yaml `
+  --checkpoint path/to/run/best.pt `
+  --device cpu
 
-烟雾配置默认写入独立的 `smoke_outputs/<device>_YYYYMMDD_HHMMSS/`，不会进入正式训练的
-`outputs/` 或 `outputs/INDEX.md`。成功的 smoke 产物在完整训练启动后可以手工删除；程序不会
-自动删除，因为失败现场中的配置、日志、checkpoint 和指标常用于定位链路或资源问题。
-
-独立复评 checkpoint：
-
-```powershell
-python -m huav.cli.evaluate `
-  --config <run-root>/<run>/config.yaml `
-  --checkpoint <run-root>/<run>/best.pt `
+huav-predict `
+  --config path/to/run/config.yaml `
+  --checkpoint path/to/run/best.pt `
   --device cpu
 ```
 
-未指定 `--output` 时，复评结果默认写入 checkpoint 同目录的
-`reproduced_metrics.json`。提交预测同样默认写入 checkpoint 同目录的 `submission/`：
+schema-7 加载会严格检查真实模型结构、分辨率、Sparse 推理门限和精修头结构。历史 checkpoint 元数据中的 `causal_mode=false`、`debug_attention_stats=false`、`enabled=true` 和冻结字段只会被识别为旧记录，不会恢复成运行时开关。
 
-```powershell
-python -m huav.cli.predict `
-  --config outputs/<run>/config.yaml `
-  --checkpoint outputs/<run>/best.pt `
-  --device cpu
+## 输出产物
 
-python -m huav.cli.index_outputs --output-root outputs
-```
+训练目录保存：
 
-每次训练写入：
+- `best.pt`：固定 schema-7 模型及推理契约
+- `config.yaml`：本次运行的完整配置
+- `history.json`、`metrics.json`、`metrics.md`
+- `dataset_manifest.json`
+- `training_state.pt` 与可选的分 epoch 状态
+- `summary.json`、`experiment.md`、`training_curves.png`
 
-- `best.pt`：比赛官网总分最优的权重、阈值和模型配置；
-- `config.yaml`：完整配置快照；
-- `dataset_manifest.json`：所有训练/验证 NPZ 的大小和 SHA-256；
-- `history.json`：逐 epoch 分开记录 `train_loss`、可复现的
-  `validation_loss`（total/STC-Focal/Fa）和阈值验证指标；
-- `metrics.json` / `metrics.md`：最佳 checkpoint 指标；
-- `summary.json`：设备、参数量、epoch 和最佳结果。
-- `experiment.md`：本轮说明、Git 状态、训练状态、指标、独立复评和提交审计；自动维护区之外可自由补充，不会被后续更新覆盖；
-- `reproduced_metrics.json`：同一轮 `best.pt` 的独立复评结果；
-- `submission/`：同一轮比赛 TXT 和根目录仅含 TXT 的 `submission.zip`。
-
-训练、复评和预测结束后会自动重建对应根目录的索引：正式训练使用 `outputs/INDEX.md`，
-烟雾训练使用 `smoke_outputs/INDEX.md`。索引按时间倒序列出新旧运行；无法从历史产物可靠
-恢复的字段显示为“历史产物／未知”，不会猜测 checkpoint 归属。
-
-## 指标口径
-
-`metrics.json` 首先提供 `competition` 字段，严格复现比赛官网口径：
-
-- `IoU = TP / (TP + FP + FN)`；
-- `SegAcc = TP / (TP + FN)`，只统计正事件，并非整体二分类准确率；
-- `Pd = detected_objects / objects`；
-- `Fa = false_alarms / (frames × 346 × 260)`；
-- `ScoreFa = exp(-10000 × Fa)`；
-- `Score = 0.2 × IoU + 0.1 × SegAcc + 0.4 × Pd + 0.3 × ScoreFa`。
-
-目标级指标按 50 ms 等效帧计算。官网实际使用 `floor(t_ms)` 后的整数毫秒坐标，并以严格开区间划分帧；这是 NPZ 中 `ev_loc[:, 2]` 的时间口径。`event` 字段继续保留整体准确率、事件级虚警率和 precision 等诊断指标，但训练选择最佳 checkpoint 时以 `competition.score` 为主。验证集阈值只在训练阶段选择并写入 checkpoint；独立复评直接使用保存阈值。
-
-验证 loss 与训练 loss 使用相同的正样本保留、hard-negative 背景采样、密集序列权重和完整事件 Fa 上下文，但使用独立且固定种子的验证采样器。这样每轮 loss 可以横向比较，同时不会推进训练采样器状态；`metrics.json` 仍只保存阈值指标，不混入 loss。
-
-## 官网分数优化实验
-
-`configs/huav_score_optimized.yaml` 针对高密度、背景极性接近平衡的数据域：
-
-- 使用可覆盖全部高密度文件的 `8×8` 空间块和 64 个时间块；
-- 将 Token 维度提升到 48，使用 3 层锥 Transformer 和每头 8 个邻居；
-- 事件和 Token 同时编码相对全序列的极性偏差，减少绝对极性捷径；
-- 邻居上限按时间距离交错分配，避免近时间片占满全部名额；
-- 训练损失使用 STC-Focal 和完整事件背景像素 margin Fa 抑制项，并结合高置信硬负样本；
-- 对事件数不少于 300,000 且背景极性均值位于 `[0.35, 0.65]` 的序列使用 3 倍损失权重；
-- 验证阈值按官网总分进行粗到细搜索，而不是只按事件 IoU 搜索。
-
-对应烟雾配置为 `configs/huav_score_optimized_smoke.yaml`。本轮损失及配置契约已移除 Dice 和 object-frame recall，并增加 STC 邻域参数，因此 checkpoint schema 为 `5`；schema `2/3/4` 结果继续保留为历史产物，不能直接用于本轮续训或复评。
-
-## 完整训练结果
-
-2026-07-24 在本机 CPU 上完成 99 个训练文件、24 个验证文件、3 个 epoch 的全量训练，耗时 33 分 17 秒。模型共 30,570 个参数，最佳权重来自 epoch 2：
-
-| 官网总分 | IoU | SegAcc | Pd | Fa | ScoreFa |
-|---:|---:|---:|---:|---:|---:|
-| **0.878893722080** | 0.831009035707 | 0.873278783623 | 0.864762704746 | 7.09270455194e-06 | 0.931529848925 |
-
-该官网提交的原始计数为：`intersection/union=57205/68838`、`detected_objects/objects=4118/4762`、`false_alarms/frames=2394/3752`。最佳阈值为 `0.85`。
-
-相较仓库此前双视图完整验证记录，IoU 从 `0.778678` 提升到 `0.831009`，事件 Fa 从 `0.004137` 降至 `0.002452`。逐 epoch 损失、混淆矩阵、EV-UAV-compatible 指标、运行环境和所有产物路径见 [docs/cone_training_results_20260724.md](docs/cone_training_results_20260724.md)。
-
-### 2026-07-25 分数优化结果
-
-分数优化配置完成 99 个训练文件、24 个验证文件、6 个 epoch 的 CPU
-全量训练，模型共 67,114 个参数，最佳权重来自 epoch 6：
-
-| 官网总分 | IoU | SegAcc | Pd | Fa | ScoreFa |
-|---:|---:|---:|---:|---:|---:|
-| **0.895289886309** | 0.832017229002 | 0.902344823375 | 0.925871482570 | 1.11664174838e-05 | 0.894344550478 |
-
-相较上一轮基线，官网总分提高 `0.016396164230`，Pd 提高
-`0.061108777824`，多检出 291 个目标帧实例。独立复评覆盖全部
-1,424,330 个验证事件，生成的 JSON 与训练阶段保存指标逐字节一致。
-配置、逐 epoch 指标、高密度域诊断、资源安全调整和完整产物路径见
-[docs/score_optimized_training_results_20260725.md](docs/score_optimized_training_results_20260725.md)。
-
-### 2026-07-27 NVIDIA RTX 5090 大规模训练结果
-
-在 **NVIDIA RTX 5090**（32 GB VRAM）上使用 CUDA 12.8、bfloat16 混合精度完成两次 18 epoch 全量训练。
-
-**第一次：分数优化配置（2026-07-26）**
-
-分数优化配置在 5090 上完成 18 epoch 全量训练，模型共 103,066 个参数，最佳权重来自 epoch 16（阈值为 `0.9225`）：
-
-| 官网总分 | IoU | SegAcc | Pd | Fa | ScoreFa |
-|---:|---:|---:|---:|---:|---:|
-| **0.908613156238** | 0.857514583095 | 0.915610783745 | 0.935741285174 | 1.00731810679e-05 | 0.904175490583 |
-
-检出 4,456 / 4,762 个目标帧实例。相较 CPU 分数优化结果（0.89529），官网总分提高 `+0.01332`，Pd 提高 `+0.00987`。
-
-**第二次：Fa 损失优化（2026-07-27）**
-
-加入针对性的 Fa 损失以减少模型冗余虚警，模型共 102,874 个参数，最佳权重来自 epoch 15（阈值为 `0.9000`）：
-
-| 官网总分 | IoU | SegAcc | Pd | Fa | ScoreFa |
-|---:|---:|---:|---:|---:|---:|
-| **0.907187730912** | 0.856255673549 | 0.907168808964 | 0.926711465771 | 8.87032474040e-06 | 0.915117096659 |
-
-虚警率从 `1.007e-05` 降至 `8.87e-06`（降幅 11.9%），ScoreFa 从 `0.90418` 提升至 `0.91512`。虚警连通分量从 3,400 降至 2,994，减少 406 个。检出 4,413 / 4,762 个目标帧实例。逐 epoch 指标和完整环境见对应 run 目录的 `history.json`。
-
-## 开发验证
-
-```powershell
-python -m pip install -e ".[dev]"
-python -m unittest discover -s tests -v
-python -m pytest
-python -m ruff check src tests
-```
-
-测试覆盖真实 NPZ 契约、斜率分析、稀疏 Token 映射、batch 隔离、过去/未来锥、多锥头、空锥、因果模式、事件级解码、STC-Focal/Fa margin 反向传播、训练产物和 checkpoint 独立复评。
+详细结构见 [docs/architecture.md](docs/architecture.md)。历史实验计划和淘汰方案只作为记录保存在 `docs/superpowers/plans/` 与既有输出目录中，不再进入当前配置和代码路径。

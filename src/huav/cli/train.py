@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 
 from huav.config import load_config
-from huav.training.engine import resume_training, run_training
+from huav.training.engine import run_training
 
 
 def main() -> None:
@@ -15,7 +15,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--config",
-        default="configs/huav_base.yaml",
+        default="configs/huav_score_optimized.yaml",
         help="path to the YAML configuration",
     )
     parser.add_argument(
@@ -33,13 +33,6 @@ def main() -> None:
         help="short description of the main change in this experiment",
     )
     resume_group = parser.add_mutually_exclusive_group()
-    resume_group.add_argument(
-        "--resume",
-        type=str,
-        default=None,
-        metavar="BEST_PT",
-        help="resume training from a best.pt checkpoint",
-    )
     resume_group.add_argument(
         "--resume-state",
         type=str,
@@ -61,46 +54,20 @@ def main() -> None:
         metavar="BEST_PT",
         help="initialize schema-5 base weights and train only event refinement",
     )
-    parser.add_argument(
-        "--additional-epochs",
-        type=int,
-        default=None,
-        metavar="N",
-        help="number of extra epochs when resuming (config.epochs is ignored)",
-    )
     arguments = parser.parse_args()
     try:
         config = load_config(arguments.config)
-        if arguments.resume:
-            additional_epochs = (
-                arguments.additional_epochs
-                if arguments.additional_epochs is not None
-                else config.training.epochs
-            )
-            summary = resume_training(
-                config,
-                arguments.resume,
-                additional_epochs=additional_epochs,
-                output_dir=arguments.output_dir,
-                device=arguments.device,
-                progress=not arguments.quiet,
-                note=arguments.note,
-                config_source=arguments.config,
-            )
-        else:
-            summary = run_training(
-                config,
-                output_dir=arguments.output_dir,
-                device=arguments.device,
-                progress=not arguments.quiet,
-                note=arguments.note,
-                config_source=arguments.config,
-                resume_state_path=arguments.resume_state,
-                initial_full_checkpoint_path=arguments.initialize_full,
-                initial_refinement_checkpoint_path=(
-                    arguments.initialize_refinement
-                ),
-            )
+        summary = run_training(
+            config,
+            output_dir=arguments.output_dir,
+            device=arguments.device,
+            progress=not arguments.quiet,
+            note=arguments.note,
+            config_source=arguments.config,
+            resume_state_path=arguments.resume_state,
+            initial_full_checkpoint_path=arguments.initialize_full,
+            initial_refinement_checkpoint_path=arguments.initialize_refinement,
+        )
     except (OSError, RuntimeError, ValueError) as error:
         parser.error(str(error))
     print(f"run artifacts: {summary['run_dir']}")

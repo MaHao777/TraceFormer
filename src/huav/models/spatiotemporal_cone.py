@@ -34,8 +34,6 @@ class SpatioTemporalConeDetector(nn.Module):
         "token_coords",
         "token_batch_indices",
         "event_token_indices",
-        "past_attention_stats",
-        "future_attention_stats",
     )
 
     def __init__(
@@ -55,14 +53,10 @@ class SpatioTemporalConeDetector(nn.Module):
         cone_heads: tuple[ConeHeadConfig, ...],
         layer_time_scales: tuple[float, ...],
         max_neighbors_per_cone: int,
-        causal_mode: bool,
         direction_dropout: float,
-        debug_attention_stats: bool,
         num_pool_queries: int = 4,
-        sparse_mixture_enabled: bool = False,
         sparse_mixture_router_bias: float = -2.0,
         sparse_mixture_residual_scale: float = 0.01,
-        frame_refinement_enabled: bool = False,
         frame_refinement_context_dim: int = 16,
         frame_refinement_scales: tuple[
             RefinementScaleConfig, ...
@@ -92,84 +86,63 @@ class SpatioTemporalConeDetector(nn.Module):
             max_neighbors_per_cone=max_neighbors_per_cone,
             mlp_ratio=mlp_ratio,
             dropout=dropout,
-            causal_mode=causal_mode,
             direction_dropout=direction_dropout,
-            debug_attention_stats=debug_attention_stats,
         )
         self.decoder = EventDecoder(token_dim=token_dim, dropout=dropout)
-        self.sparse_mixture = (
-            SparseTokenMixture(
-                token_dim=token_dim,
-                num_x_blocks=self.tokenizer.num_x_blocks,
-                num_y_blocks=self.tokenizer.num_y_blocks,
-                num_time_blocks=num_time_blocks,
-                initial_router_bias=sparse_mixture_router_bias,
-                initial_residual_scale=sparse_mixture_residual_scale,
-            )
-            if sparse_mixture_enabled
-            else None
+        self.sparse_mixture = SparseTokenMixture(
+            token_dim=token_dim,
+            num_x_blocks=self.tokenizer.num_x_blocks,
+            num_y_blocks=self.tokenizer.num_y_blocks,
+            num_time_blocks=num_time_blocks,
+            initial_router_bias=sparse_mixture_router_bias,
+            initial_residual_scale=sparse_mixture_residual_scale,
         )
-        self.event_refinement_head = (
-            MultiScaleEventRefinementHead(
-                token_dim=token_dim,
-                event_feature_dim=6,
-                context_dim=frame_refinement_context_dim,
-                width=width,
-                height=height,
-                duration_ms=duration_ms,
-                scales=frame_refinement_scales,
-                dropout=dropout,
-            )
-            if frame_refinement_enabled
-            else None
+        self.event_refinement_head = MultiScaleEventRefinementHead(
+            token_dim=token_dim,
+            event_feature_dim=6,
+            context_dim=frame_refinement_context_dim,
+            width=width,
+            height=height,
+            duration_ms=duration_ms,
+            scales=frame_refinement_scales,
+            dropout=dropout,
         )
-        self._full_path_frozen = False
-        self._base_for_refinement_frozen = False
+        self._frozen_modules: tuple[nn.Module, ...] = ()
 
-    def freeze_full_path(self) -> None:
-        """冻结历史 Full 主干，只让稀疏混合模块学习修正。"""
+    def configure_training_stage(self, stage: str) -> None:
+        """按唯一训练阶段开放参数，模型结构始终保持不变。"""
 
-        if self.sparse_mixture is None:
-            raise ValueError("freezing the full path requires sparse mixture")
-        for module in (self.tokenizer, self.encoder, self.decoder):
+        self.requires_grad_(True)
+        if stage == "full":
+            frozen: tuple[nn.Module, ...] = ()
+        elif stage == "sparse_mixture":
+            frozen = (
+                self.tokenizer,
+                self.encoder,
+                self.decoder,
+                self.event_refinement_head,
+            )
+        elif stage == "refinement":
+            frozen = (
+                self.tokenizer,
+                self.encoder,
+                self.decoder,
+                self.sparse_mixture,
+            )
+        else:
+            raise ValueError(f"unsupported training stage: {stage}")
+        for module in frozen:
             module.requires_grad_(False)
             module.eval()
-        self._full_path_frozen = True
+        self._frozen_modules = frozen
 
     def train(self, mode: bool = True) -> SpatioTemporalConeDetector:
         """训练时保持冻结主干为评估态，关闭其中的 dropout。"""
 
         super().train(mode)
-        if self._full_path_frozen:
-            for module in (self.tokenizer, self.encoder, self.decoder):
-                module.eval()
-        if self._base_for_refinement_frozen:
-            for module in (
-                self.tokenizer,
-                self.encoder,
-                self.decoder,
-                self.sparse_mixture,
-            ):
-                if module is not None:
-                    module.eval()
+        for module in self._frozen_modules:
+            module.eval()
         return self
-
-    def freeze_base_for_refinement(self) -> None:
-        """冻结现有检测器，只训练多尺度事件精修头。"""
-
-        if self.event_refinement_head is None:
-            raise ValueError("freezing the base requires event refinement")
-        for module in (
-            self.tokenizer,
-            self.encoder,
-            self.decoder,
-            self.sparse_mixture,
-        ):
-            if module is not None:
-                module.requires_grad_(False)
-                module.eval()
-        self.event_refinement_head.requires_grad_(True)
-        self._base_for_refinement_frozen = True
 
     def forward(
         self,
@@ -211,8 +184,6 @@ class SpatioTemporalConeDetector(nn.Module):
                 "sparse_events and sparse_source_indices must be provided together"
             )
         if sparse_events is not None and sparse_source_indices is not None:
-            if self.sparse_mixture is None:
-                raise ValueError("sparse mixture inputs require an enabled mixture module")
             if (
                 sparse_source_indices.ndim != 1
                 or sparse_source_indices.dtype != torch.long
@@ -260,28 +231,19 @@ class SpatioTemporalConeDetector(nn.Module):
             )
             returned_source_indices = sparse_source_indices
         base_event_logits = event_logits
-        if self.event_refinement_head is not None:
-            refinement = self.event_refinement_head(
-                token_features=token_features,
-                event_token_indices=tokenized.event_token_indices,
-                event_local_features=tokenized.event_local_features,
-                event_xy=tokenized.event_xy,
-                normalized_time=tokenized.normalized_time,
-                event_batch_indices=tokenized.event_batch_indices,
-                base_event_logits=base_event_logits,
-            )
-            refinement_cell_logits = refinement.cell_logits
-            refinement_event_cell_indices = refinement.event_cell_indices
-            refinement_event_logits = refinement.event_logits
-            event_logits = base_event_logits + refinement_event_logits
-        else:
-            refinement_cell_logits = base_event_logits.new_empty((0,))
-            refinement_event_cell_indices = torch.empty(
-                0, dtype=torch.long, device=events.device
-            )
-            refinement_event_logits = base_event_logits.new_zeros(
-                len(base_event_logits)
-            )
+        refinement = self.event_refinement_head(
+            token_features=token_features,
+            event_token_indices=tokenized.event_token_indices,
+            event_local_features=tokenized.event_local_features,
+            event_xy=tokenized.event_xy,
+            normalized_time=tokenized.normalized_time,
+            event_batch_indices=tokenized.event_batch_indices,
+            base_event_logits=base_event_logits,
+        )
+        refinement_cell_logits = refinement.cell_logits
+        refinement_event_cell_indices = refinement.event_cell_indices
+        refinement_event_logits = refinement.event_logits
+        event_logits = base_event_logits + refinement_event_logits
         return {
             "event_logits": event_logits,
             "base_event_logits": base_event_logits,
@@ -297,8 +259,6 @@ class SpatioTemporalConeDetector(nn.Module):
             "token_coords": tokenized.token_coords,
             "token_batch_indices": tokenized.token_batch_indices,
             "event_token_indices": tokenized.event_token_indices,
-            "past_attention_stats": encoded.past_attention_stats,
-            "future_attention_stats": encoded.future_attention_stats,
         }
 
 

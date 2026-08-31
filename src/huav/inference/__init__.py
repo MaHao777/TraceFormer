@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import math
 import zipfile
-from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from numbers import Integral, Real
 from pathlib import Path
@@ -24,14 +23,6 @@ def validate_prediction_logits(sequence: EventSequence, logits: torch.Tensor) ->
     if not bool(torch.isfinite(logits).all()):
         raise ValueError("prediction logits must be finite")
     return logits
-
-
-class Predictor(ABC):
-    """Future predictor interface. Implementations must preserve event count and order."""
-
-    @abstractmethod
-    def predict_sequence(self, sequence: EventSequence) -> torch.Tensor:
-        """Return one floating logit per original input event, in original input order."""
 
 
 @dataclass(frozen=True)
@@ -130,14 +121,6 @@ def validate_submission_contract(
             raise ValueError("submission rows must preserve source x y t p event order")
 
 
-class SubmissionWriter(ABC):
-    """Future writer contract; Phase 1 intentionally implements validation only."""
-
-    @abstractmethod
-    def validate(self, sequence: EventSequence, rows: Sequence[SubmissionRow], manifest: SubmissionManifest) -> None:
-        """Validate five-column rows and root-level txt-only zip manifest before writing."""
-
-
 def generate_submission_rows(
     sequence: EventSequence,
     logits: torch.Tensor,
@@ -214,7 +197,7 @@ def pack_submission_zip(
 
 
 __all__ = [
-    "Predictor", "SubmissionManifest", "SubmissionRow", "SubmissionWriter",
+    "SubmissionManifest", "SubmissionRow",
     "generate_submission_rows", "write_prediction_txt", "pack_submission_zip",
     "validate_prediction_logits", "validate_submission_contract", "validate_zip_members",
 ]

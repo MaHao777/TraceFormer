@@ -5,7 +5,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import huav
 from huav import NPZEventDataset, SpatioTemporalConeDetector
-from huav.data import EventBatch, EventSequence, EventWindow
+from huav.data import EventSequence
 from huav.inference import (
     SubmissionManifest,
     SubmissionRow,
@@ -14,7 +14,6 @@ from huav.inference import (
     validate_submission_contract,
     write_prediction_txt,
 )
-from huav.models import EventSegmenter, ModelOutput
 from huav.training import EvaluationResult, Evaluator, EventMetricAccumulator, Trainer
 
 
@@ -23,11 +22,7 @@ def test_public_contracts_are_importable() -> None:
         (
             EventSequence,
             NPZEventDataset,
-            EventWindow,
-            EventBatch,
-            EventSegmenter,
             SpatioTemporalConeDetector,
-            ModelOutput,
             Trainer,
             Evaluator,
             EvaluationResult,
@@ -42,3 +37,6 @@ def test_public_contracts_are_importable() -> None:
     )
     assert not hasattr(huav, "DualViewEventClassifier")
     assert not hasattr(huav, "SpatioTemporalWindowDetector")
+    assert not hasattr(huav, "EventBatch")
+    assert not hasattr(huav, "EventWindow")
+    assert not hasattr(huav, "ModelOutput")

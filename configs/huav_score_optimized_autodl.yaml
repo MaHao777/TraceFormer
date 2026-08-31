@@ -30,15 +30,14 @@ model:
   - 0.75
   - 1.0
   max_neighbors_per_cone: 8
-  causal_mode: false
   direction_dropout: 0.1
-  debug_attention_stats: false
 inference:
   sigmoid_threshold: 0.5
 dataset:
   root: ../data/ev-uav
   duration_ms: 8000
 training:
+  stage: refinement
   device: cuda
   epochs: 24
   learning_rate: 0.0007
@@ -67,17 +66,7 @@ loss:
   lambda_false_alarm: 0.05
   false_alarm_logit_margin: 0.0
   false_alarm_topk_per_frame: 32
-threshold_augmentation:
-  enabled: false
-  min_events: 300000
-  max_polarity_fraction: 0.65
-  threshold_ratios: [1.5, 2.0]
-  warmup_epochs: 3
-  ramp_epochs: 3
-  sparse_loss_weight: 0.5
-  consistency_loss_weight: 0.1
 sparse_mixture:
-  enabled: true
   min_events: 300000
   max_polarity_fraction: 0.65
   threshold_ratio: 1.5
@@ -85,7 +74,6 @@ sparse_mixture:
   ramp_epochs: 3
   initial_router_bias: -2.0
   initial_residual_scale: 0.01
-  freeze_full_model: true
   full_aux_loss_weight: 0.0
   sparse_loss_weight: 0.05
   object_frame_consistency_weight: 0.0
@@ -100,7 +88,6 @@ sparse_mixture:
   sparse_false_peak_block_size_y: 8
   gate_regularization_weight: 0.001
 frame_refinement:
-  enabled: true
   context_dim: 16
   scales:
   - spatial_block_size_x: 2
@@ -113,7 +100,6 @@ frame_refinement:
     spatial_block_size_y: 8
     frame_ms: 50.0
   loss_weight: 0.2
-  freeze_base_model: true
 evaluation:
   optimize_threshold: true
   threshold_steps: 19

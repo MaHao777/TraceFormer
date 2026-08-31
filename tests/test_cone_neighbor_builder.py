@@ -110,21 +110,6 @@ def test_neighbor_cap_preserves_available_longer_time_lags() -> None:
     assert set(neighbors.past_indices[4, 0].tolist()) == {0, 1}
 
 
-def test_causal_mode_never_constructs_future_neighbors() -> None:
-    coords = torch.tensor([[0, 0, 0], [0, 0, 1]], dtype=torch.long)
-    batches = torch.zeros(2, dtype=torch.long)
-    builder = ConeNeighborBuilder(
-        cone_heads=(ConeHeadConfig(1.0, 1.0, 2),),
-        max_neighbors_per_cone=2,
-        causal_mode=True,
-    )
-
-    neighbors = builder(coords, batches)
-
-    assert torch.all(neighbors.future_indices == -1)
-    assert neighbors.past_indices[1, 0, 0].item() == 0
-
-
 def test_empty_tokens_return_padded_empty_neighborhoods() -> None:
     builder = ConeNeighborBuilder(
         cone_heads=(ConeHeadConfig(1.0, 1.0, 2),),

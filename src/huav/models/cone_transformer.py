@@ -9,14 +9,12 @@ from torch import nn
 
 from huav.config import ConeHeadConfig
 
-from .cone_attention import AttentionStats, BidirectionalConeAttention
+from .cone_attention import BidirectionalConeAttention
 
 
 @dataclass(frozen=True)
 class ConeTransformerOutput:
     token_features: torch.Tensor
-    past_attention_stats: list[AttentionStats] | None
-    future_attention_stats: list[AttentionStats] | None
 
 
 class ConeTransformerBlock(nn.Module):
@@ -30,9 +28,7 @@ class ConeTransformerBlock(nn.Module):
         layer_time_scale: float,
         mlp_ratio: float,
         dropout: float,
-        causal_mode: bool,
         direction_dropout: float,
-        debug_attention_stats: bool,
     ) -> None:
         super().__init__()
         hidden_dim = max(1, int(round(token_dim * mlp_ratio)))
@@ -44,9 +40,7 @@ class ConeTransformerBlock(nn.Module):
             max_neighbors_per_cone=max_neighbors_per_cone,
             layer_time_scale=layer_time_scale,
             dropout=dropout,
-            causal_mode=causal_mode,
             direction_dropout=direction_dropout,
-            debug_attention_stats=debug_attention_stats,
         )
         self.feed_forward_norm = nn.LayerNorm(token_dim)
         self.feed_forward = nn.Sequential(
@@ -62,7 +56,7 @@ class ConeTransformerBlock(nn.Module):
         tokens: torch.Tensor,
         token_coords: torch.Tensor,
         token_batch_indices: torch.Tensor,
-    ) -> tuple[torch.Tensor, AttentionStats | None, AttentionStats | None]:
+    ) -> torch.Tensor:
         attention = self.attention(
             self.attention_norm(tokens),
             token_coords,
@@ -72,11 +66,7 @@ class ConeTransformerBlock(nn.Module):
         tokens = tokens + self.residual_dropout(
             self.feed_forward(self.feed_forward_norm(tokens))
         )
-        return (
-            tokens,
-            attention.past_attention_stats,
-            attention.future_attention_stats,
-        )
+        return tokens
 
 
 class ConeTransformerEncoder(nn.Module):
@@ -90,14 +80,11 @@ class ConeTransformerEncoder(nn.Module):
         max_neighbors_per_cone: int,
         mlp_ratio: float,
         dropout: float,
-        causal_mode: bool,
         direction_dropout: float,
-        debug_attention_stats: bool,
     ) -> None:
         super().__init__()
         if not layer_time_scales:
             raise ValueError("layer_time_scales must not be empty")
-        self.debug_attention_stats = bool(debug_attention_stats)
         self.layers = nn.ModuleList(
             [
                 ConeTransformerBlock(
@@ -108,9 +95,7 @@ class ConeTransformerEncoder(nn.Module):
                     layer_time_scale=scale,
                     mlp_ratio=mlp_ratio,
                     dropout=dropout,
-                    causal_mode=causal_mode,
                     direction_dropout=direction_dropout,
-                    debug_attention_stats=debug_attention_stats,
                 )
                 for scale in layer_time_scales
             ]
@@ -123,22 +108,9 @@ class ConeTransformerEncoder(nn.Module):
         token_coords: torch.Tensor,
         token_batch_indices: torch.Tensor,
     ) -> ConeTransformerOutput:
-        past_stats: list[AttentionStats] = []
-        future_stats: list[AttentionStats] = []
         for layer in self.layers:
-            tokens, layer_past, layer_future = layer(
-                tokens, token_coords, token_batch_indices
-            )
-            if self.debug_attention_stats:
-                if layer_past is None or layer_future is None:
-                    raise RuntimeError("debug attention statistics were not returned")
-                past_stats.append(layer_past)
-                future_stats.append(layer_future)
-        return ConeTransformerOutput(
-            token_features=self.final_norm(tokens),
-            past_attention_stats=past_stats if self.debug_attention_stats else None,
-            future_attention_stats=future_stats if self.debug_attention_stats else None,
-        )
+            tokens = layer(tokens, token_coords, token_batch_indices)
+        return ConeTransformerOutput(token_features=self.final_norm(tokens))
 
 
 __all__ = [

@@ -21,8 +21,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--config",
-        default="configs/huav_base.yaml",
-        help="path to the YAML configuration (default: configs/huav_base.yaml)",
+        default="configs/huav_score_optimized.yaml",
+        help="path to the fixed schema-7 YAML configuration",
     )
     parser.add_argument(
         "--checkpoint",

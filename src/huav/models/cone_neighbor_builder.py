@@ -27,7 +27,6 @@ class ConeNeighborBuilder:
         cone_heads: tuple[ConeHeadConfig, ...],
         max_neighbors_per_cone: int,
         layer_time_scale: float = 1.0,
-        causal_mode: bool = False,
     ) -> None:
         if not cone_heads:
             raise ValueError("cone_heads must not be empty")
@@ -38,7 +37,6 @@ class ConeNeighborBuilder:
         self.cone_heads = tuple(cone_heads)
         self.max_neighbors_per_cone = int(max_neighbors_per_cone)
         self.layer_time_scale = float(layer_time_scale)
-        self.causal_mode = bool(causal_mode)
 
     def _query_direction(
         self,
@@ -159,15 +157,14 @@ class ConeNeighborBuilder:
                     output=past,
                     head_index=head_index,
                 )
-                if not self.causal_mode:
-                    self._query_direction(
-                        coordinates=coordinates,
-                        batch_indices=batch_indices,
-                        head=head,
-                        direction=1,
-                        output=future,
-                        head_index=head_index,
-                    )
+                self._query_direction(
+                    coordinates=coordinates,
+                    batch_indices=batch_indices,
+                    head=head,
+                    direction=1,
+                    output=future,
+                    head_index=head_index,
+                )
         device = token_coords.device
         return ConeNeighborhoods(
             past_indices=torch.from_numpy(past).to(device=device),

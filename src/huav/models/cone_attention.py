@@ -13,14 +13,10 @@ from huav.config import ConeHeadConfig
 from .cone_neighbor_builder import ConeNeighborBuilder
 from .relative_position import RelativePositionEncoder
 
-AttentionStats = dict[str, torch.Tensor]
-
 
 @dataclass(frozen=True)
 class ConeAttentionOutput:
     features: torch.Tensor
-    past_attention_stats: AttentionStats | None
-    future_attention_stats: AttentionStats | None
 
 
 class BidirectionalConeAttention(nn.Module):
@@ -35,9 +31,7 @@ class BidirectionalConeAttention(nn.Module):
         max_neighbors_per_cone: int,
         layer_time_scale: float = 1.0,
         dropout: float = 0.1,
-        causal_mode: bool = False,
         direction_dropout: float = 0.0,
-        debug_attention_stats: bool = False,
     ) -> None:
         super().__init__()
         if token_dim <= 0 or num_heads <= 0 or token_dim % num_heads:
@@ -49,14 +43,11 @@ class BidirectionalConeAttention(nn.Module):
         self.token_dim = int(token_dim)
         self.num_heads = int(num_heads)
         self.head_dim = self.token_dim // self.num_heads
-        self.causal_mode = bool(causal_mode)
         self.direction_dropout = float(direction_dropout)
-        self.debug_attention_stats = bool(debug_attention_stats)
         self.neighbor_builder = ConeNeighborBuilder(
             cone_heads=cone_heads,
             max_neighbors_per_cone=max_neighbors_per_cone,
             layer_time_scale=layer_time_scale,
-            causal_mode=causal_mode,
         )
 
         self.query_projection = nn.Linear(self.token_dim, self.token_dim)
@@ -121,7 +112,7 @@ class BidirectionalConeAttention(nn.Module):
         self,
         availability: torch.Tensor,
     ) -> torch.Tensor:
-        if not self.training or self.direction_dropout <= 0 or self.causal_mode:
+        if not self.training or self.direction_dropout <= 0:
             return availability
         draw = float(torch.rand((), device=availability.device).item())
         if draw < self.direction_dropout * 0.5:
@@ -131,25 +122,6 @@ class BidirectionalConeAttention(nn.Module):
             availability = availability.clone()
             availability[:, 0] = False
         return availability
-
-    def _stats(
-        self,
-        counts: torch.Tensor,
-        gate_weights: torch.Tensor,
-    ) -> AttentionStats:
-        return {
-            "neighbor_counts": counts.detach(),
-            "edge_count": counts.sum().detach(),
-            "mean_neighbors": (
-                counts.float().mean().detach()
-                if counts.numel()
-                else counts.new_zeros((), dtype=torch.float32)
-            ),
-            "max_neighbors": (
-                counts.max().detach() if counts.numel() else counts.new_zeros(())
-            ),
-            "gate_weights": gate_weights.detach(),
-        }
 
     def forward(
         self,
@@ -162,16 +134,7 @@ class BidirectionalConeAttention(nn.Module):
         if len(tokens) != len(token_coords):
             raise ValueError("tokens and token_coords must have equal length")
         if len(tokens) == 0:
-            empty_counts = torch.empty(
-                (0, self.num_heads), dtype=torch.long, device=tokens.device
-            )
-            empty_gates = torch.empty((0,), dtype=tokens.dtype, device=tokens.device)
-            stats = (
-                self._stats(empty_counts, empty_gates)
-                if self.debug_attention_stats
-                else None
-            )
-            return ConeAttentionOutput(tokens, stats, stats)
+            return ConeAttentionOutput(tokens)
 
         neighborhoods = self.neighbor_builder(token_coords, token_batch_indices)
         query = self._reshape_heads(self.query_projection(tokens))
@@ -202,8 +165,6 @@ class BidirectionalConeAttention(nn.Module):
             ),
             dim=1,
         )
-        if self.causal_mode:
-            availability[:, 1] = False
         availability = self._apply_direction_dropout(availability)
         raw_gates = torch.softmax(self.direction_gate(tokens), dim=-1)
         gates = raw_gates * availability.to(raw_gates.dtype)
@@ -215,21 +176,10 @@ class BidirectionalConeAttention(nn.Module):
         )
         fused = gates[:, :1] * past_flat + gates[:, 1:] * future_flat
         features = self.output_projection(fused)
-        past_stats = (
-            self._stats(past_counts, gates[:, 0])
-            if self.debug_attention_stats
-            else None
-        )
-        future_stats = (
-            self._stats(future_counts, gates[:, 1])
-            if self.debug_attention_stats
-            else None
-        )
-        return ConeAttentionOutput(features, past_stats, future_stats)
+        return ConeAttentionOutput(features)
 
 
 __all__ = [
-    "AttentionStats",
     "BidirectionalConeAttention",
     "ConeAttentionOutput",
 ]

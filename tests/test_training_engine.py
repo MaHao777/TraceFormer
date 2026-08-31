@@ -11,7 +11,6 @@ import numpy as np
 import pytest
 import torch
 
-from huav.analysis.threshold_robustness import evaluate_threshold_robustness
 from huav.config import (
     ConeHeadConfig,
     DatasetConfig,
@@ -32,11 +31,8 @@ from huav.training.engine import (
     _select_competition_threshold,
     _serializable,
     _sparse_mixture_weight,
-    _threshold_augmentation_weight,
-    _threshold_ratio_for_epoch,
     build_model,
     evaluate_checkpoint,
-    resume_training,
     run_training,
 )
 from huav.training.losses import EventFocalDiceLoss
@@ -126,7 +122,6 @@ def _config(data_root: Path, output_root: Path) -> HUAVConfig:
             ),
             mlp_ratio=2.0,
             dropout=0.0,
-            debug_attention_stats=False,
         ),
         training=TrainingConfig(
             device="cpu",
@@ -213,8 +208,8 @@ def test_cpu_training_writes_reproducible_metrics_and_checkpoint() -> None:
             run_dir / "best.pt", map_location="cpu", weights_only=True
         )
         assert checkpoint["schema_version"] == 7
-        assert checkpoint["sparse_mixture_config"]["enabled"] is False
-        assert checkpoint["frame_refinement_config"]["enabled"] is False
+        assert "enabled" not in checkpoint["sparse_mixture_config"]
+        assert "enabled" not in checkpoint["frame_refinement_config"]
         assert checkpoint["decision_threshold"] == metrics["threshold"]
         changed_config = replace(
             _config(data_root, output_root),
@@ -229,6 +224,26 @@ def test_cpu_training_writes_reproducible_metrics_and_checkpoint() -> None:
         reproduced = evaluate_checkpoint(changed_config, run_dir / "best.pt", device="cpu")
         assert reproduced["threshold"] == metrics["threshold"]
         assert reproduced["event"] == metrics["event"]
+        legacy_metadata_checkpoint = run_dir / "legacy-metadata.pt"
+        checkpoint["model_config"]["causal_mode"] = False
+        checkpoint["model_config"]["debug_attention_stats"] = False
+        torch.save(checkpoint, legacy_metadata_checkpoint)
+        legacy_reproduced = evaluate_checkpoint(
+            changed_config,
+            legacy_metadata_checkpoint,
+            device="cpu",
+        )
+        assert legacy_reproduced["event"] == metrics["event"]
+        checkpoint["model_config"]["causal_mode"] = True
+        torch.save(checkpoint, legacy_metadata_checkpoint)
+        with pytest.raises(ValueError, match="model configuration"):
+            evaluate_checkpoint(
+                changed_config,
+                legacy_metadata_checkpoint,
+                device="cpu",
+            )
+        checkpoint["model_config"].pop("causal_mode")
+        checkpoint["model_config"].pop("debug_attention_stats")
         incompatible_config = replace(
             _config(data_root, output_root),
             model=replace(
@@ -268,7 +283,11 @@ def test_refinement_initialization_loads_schema5_base_and_trains_only_new_head()
         torch.save(
             {
                 "schema_version": 5,
-                "model_state": source_model.state_dict(),
+                "model_state": {
+                    name: value
+                    for name, value in source_model.state_dict().items()
+                    if not name.startswith("event_refinement_head.")
+                },
                 "model_config": _serializable(asdict(source_config.model)),
                 "sparse_mixture_config": _serializable(
                     asdict(source_config.sparse_mixture)
@@ -280,15 +299,14 @@ def test_refinement_initialization_loads_schema5_base_and_trains_only_new_head()
         )
         target_config = replace(
             source_config,
+            training=replace(source_config.training, stage="refinement"),
             frame_refinement=FrameRefinementConfig(
-                enabled=True,
                 context_dim=4,
                 scales=(
                     RefinementScaleConfig(2, 2, 10.0),
                     RefinementScaleConfig(8, 8, 50.0),
                 ),
                 loss_weight=0.2,
-                freeze_base_model=True,
             ),
         ).validate()
 
@@ -312,8 +330,10 @@ def test_refinement_initialization_loads_schema5_base_and_trains_only_new_head()
         assert summary["full_initialization"]["kind"] == "event_refinement"
         assert summary["full_initialization"]["epoch"] == 7
         assert checkpoint["schema_version"] == 7
-        assert checkpoint["frame_refinement_config"]["enabled"] is True
+        assert "enabled" not in checkpoint["frame_refinement_config"]
         for name, tensor in source_model.state_dict().items():
+            if name.startswith("event_refinement_head."):
+                continue
             assert torch.equal(checkpoint["model_state"][name], tensor)
         history = json.loads((run_dir / "history.json").read_text(encoding="utf-8"))
         assert history[0]["train_loss"]["event_refinement"] > 0.0
@@ -467,55 +487,6 @@ def test_training_success_reports_bookkeeping_failure(
             run_training(config, output_dir=temporary_root / "outputs" / "run")
 
 
-def test_resumed_training_records_validation_loss() -> None:
-    with TemporaryDirectory(dir=Path.cwd()) as directory:
-        temporary_root = Path(directory)
-        data_root = temporary_root / "data"
-        train_root = data_root / "train"
-        val_root = data_root / "val"
-        train_root.mkdir(parents=True)
-        val_root.mkdir(parents=True)
-        _write_sequence(train_root / "train_000.npz", 0)
-        _write_sequence(val_root / "val_000.npz", 1)
-        output_root = temporary_root / "outputs"
-        config = _config(data_root, output_root)
-        initial = run_training(config, output_dir=output_root / "initial")
-
-        resumed = resume_training(
-            config,
-            Path(initial["run_dir"]) / "best.pt",
-            additional_epochs=1,
-            note="续训验证",
-        )
-
-        resumed_dir = Path(resumed["run_dir"])
-        assert resumed_dir.name.startswith("cpu_")
-        assert "resume" not in resumed_dir.name
-        experiment = (resumed_dir / "experiment.md").read_text(encoding="utf-8")
-        assert "续训验证" in experiment
-        assert "训练类型：续训" in experiment
-        assert "续训源 epoch：1" in experiment
-        assert not (resumed_dir / "resumed_from.txt").exists()
-        history = json.loads((resumed_dir / "history.json").read_text(encoding="utf-8"))
-        assert history[0]["epoch"] == 2
-        assert history[0]["resumed_epoch"] == 1
-        assert set(history[0]["validation_loss"]) == {
-            "total",
-            "focal",
-            "dice",
-            "object_frame",
-            "false_alarm",
-            "event_refinement",
-        }
-        assert all(
-            value >= 0.0 for value in history[0]["validation_loss"].values()
-        )
-        assert "loss" not in history[0]["validation"]
-        assert (resumed_dir / "training_curves.png").read_bytes().startswith(
-            b"\x89PNG\r\n\x1a\n"
-        )
-
-
 def test_exact_training_state_branch_matches_uninterrupted_cpu_run() -> None:
     with TemporaryDirectory(dir=Path.cwd()) as directory:
         temporary_root = Path(directory)
@@ -603,27 +574,6 @@ def test_restore_rng_state_keeps_serialized_generator_states_on_cpu(
     assert len(cuda_states) == 1
     assert cuda_states[0].device.type == "cpu"
     assert cuda_states[0].dtype == torch.uint8
-
-
-def test_failed_resume_keeps_readable_checkpoint_source_epoch(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    with TemporaryDirectory(dir=Path.cwd()) as directory:
-        temporary_root = Path(directory)
-        checkpoint = temporary_root / "source.pt"
-        torch.save({"epoch": 7}, checkpoint)
-        run_dir = temporary_root / "outputs" / "failed-resume"
-        config = _config(temporary_root / "data", temporary_root / "outputs")
-        monkeypatch.setattr(
-            "huav.training.engine._resume_training_impl",
-            lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("later failure")),
-        )
-
-        with pytest.raises(ValueError, match="later failure"):
-            resume_training(config, checkpoint, output_dir=run_dir)
-
-        experiment = (run_dir / "experiment.md").read_text(encoding="utf-8")
-        assert "续训源 epoch：7" in experiment
 
 
 def test_amp_is_enabled_only_when_requested_on_cuda() -> None:
@@ -717,40 +667,12 @@ def test_dense_balanced_polarity_sequences_receive_configured_loss_weight() -> N
     assert weight == pytest.approx(3.0)
 
 
-def test_threshold_schedule_warms_then_alternates_deterministically() -> None:
-    base = HUAVConfig.default()
-    config = replace(
-        base,
-        threshold_augmentation=replace(
-            base.threshold_augmentation,
-            enabled=True,
-            threshold_ratios=(1.5, 2.0),
-            warmup_epochs=3,
-            ramp_epochs=3,
-        ),
-    ).validate()
-
-    assert [_threshold_augmentation_weight(config, epoch) for epoch in range(1, 8)] == [
-        0.0,
-        0.0,
-        0.0,
-        pytest.approx(1 / 3),
-        pytest.approx(2 / 3),
-        1.0,
-        1.0,
-    ]
-    assert _threshold_ratio_for_epoch(config, epoch=4, dataset_index=1) == 1.5
-    assert _threshold_ratio_for_epoch(config, epoch=7, dataset_index=0) == 2.0
-    assert _threshold_ratio_for_epoch(config, epoch=7, dataset_index=1) == 1.5
-
-
 def test_sparse_mixture_schedule_holds_router_then_ramps() -> None:
     base = HUAVConfig.default()
     config = replace(
         base,
         sparse_mixture=replace(
             base.sparse_mixture,
-            enabled=True,
             warmup_epochs=2,
             ramp_epochs=2,
         ),
@@ -781,7 +703,6 @@ def test_training_records_sparse_mixture_losses_and_paired_inference() -> None:
             config,
             sparse_mixture=replace(
                 config.sparse_mixture,
-                enabled=True,
                 min_events=1,
                 max_polarity_fraction=1.0,
                 warmup_epochs=0,
@@ -806,52 +727,6 @@ def test_training_records_sparse_mixture_losses_and_paired_inference() -> None:
     assert history[0]["sparse_mixture"]["augmented_files"] == 1
     assert mixture[0]["ratio_usage"] == {"1.5": 1}
     assert reproduced["event"]["event_count"] == 4
-
-
-def test_training_adds_sparse_branch_only_for_enabled_eligible_stream() -> None:
-    with TemporaryDirectory(dir=Path.cwd()) as directory:
-        temporary_root = Path(directory)
-        data_root = temporary_root / "data"
-        train_root = data_root / "train"
-        val_root = data_root / "val"
-        train_root.mkdir(parents=True)
-        val_root.mkdir(parents=True)
-        _write_imbalanced_sequence(train_root / "train_000.npz")
-        _write_sequence(val_root / "val_000.npz", 0)
-        output_root = temporary_root / "outputs"
-        config = _config(data_root, output_root)
-        config = replace(
-            config,
-            threshold_augmentation=replace(
-                config.threshold_augmentation,
-                enabled=True,
-                min_events=1,
-                max_polarity_fraction=1.0,
-                threshold_ratios=(1.5, 2.0),
-                warmup_epochs=0,
-                ramp_epochs=1,
-            ),
-        ).validate()
-
-        summary = run_training(config, output_dir=output_root / "run")
-        run_dir = Path(summary["run_dir"])
-        history = json.loads((run_dir / "history.json").read_text(encoding="utf-8"))
-        augmentation = json.loads(
-            (run_dir / "threshold_augmentation.json").read_text(encoding="utf-8")
-        )
-        stress = evaluate_threshold_robustness(
-            config,
-            run_dir / "best.pt",
-            threshold_ratios=(1.5,),
-            files=("val_000.npz",),
-        )
-
-    assert history[0]["train_loss"]["sparse_total"] >= 0.0
-    assert history[0]["train_loss"]["threshold_consistency"] >= 0.0
-    assert history[0]["threshold_augmentation"]["augmented_files"] == 1
-    assert augmentation[0]["ratio_usage"] == {"1.5": 1}
-    assert stress["validation_files"] == ["val_000.npz"]
-    assert stress["results"]["1.5"]["counts"]["source_events"] == 4
 
 
 def test_training_forwards_all_events_before_sampling_loss(
