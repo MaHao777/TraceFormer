@@ -9,8 +9,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from huav.config import (
     ConeHeadConfig,
-    FrameObjectnessConfig,
+    FrameRefinementConfig,
     HUAVConfig,
+    RefinementScaleConfig,
     SparseMixtureConfig,
     ThresholdAugmentationConfig,
     load_config,
@@ -67,23 +68,24 @@ def test_score_config_enables_sparse_mixture_and_disables_legacy_augmentation() 
         sparse_false_peak_block_size_y=8,
         gate_regularization_weight=0.001,
     )
-    assert config.frame_objectness == FrameObjectnessConfig(
+    assert config.frame_refinement == FrameRefinementConfig(
         enabled=True,
-        frame_ms=50.0,
-        spatial_block_size_x=8,
-        spatial_block_size_y=8,
+        context_dim=16,
+        scales=(
+            RefinementScaleConfig(2, 2, 10.0),
+            RefinementScaleConfig(4, 4, 25.0),
+            RefinementScaleConfig(8, 8, 50.0),
+        ),
         loss_weight=0.2,
         freeze_base_model=True,
     )
 
 
-def test_frame_objectness_validation_rejects_invalid_values() -> None:
+def test_frame_refinement_validation_rejects_invalid_values() -> None:
     base = HUAVConfig.default()
     for field, value in (
         ("enabled", 1),
-        ("frame_ms", 0.0),
-        ("spatial_block_size_x", 0),
-        ("spatial_block_size_y", True),
+        ("context_dim", 0),
         ("loss_weight", -0.1),
         ("freeze_base_model", 1),
     ):
@@ -91,10 +93,29 @@ def test_frame_objectness_validation_rejects_invalid_values() -> None:
             ValueError,
             lambda field=field, value=value: replace(
                 base,
-                frame_objectness=replace(
-                    base.frame_objectness,
+                frame_refinement=replace(
+                    base.frame_refinement,
                     **{field: value},
                 ),
+            ).validate(),
+        )
+
+    invalid_scales = (
+        (RefinementScaleConfig(0, 2, 10.0),),
+        (RefinementScaleConfig(2, True, 10.0),),
+        (RefinementScaleConfig(2, 2, 0.0),),
+        (
+            RefinementScaleConfig(4, 4, 25.0),
+            RefinementScaleConfig(2, 2, 10.0),
+        ),
+        (RefinementScaleConfig(4, 4, 25.0),),
+    )
+    for scales in invalid_scales:
+        raises(
+            ValueError,
+            lambda scales=scales: replace(
+                base,
+                frame_refinement=replace(base.frame_refinement, scales=scales),
             ).validate(),
         )
 
@@ -274,6 +295,17 @@ def test_score_optimized_yaml_exposes_dense_domain_training_configuration() -> N
     assert config.loss.lambda_false_alarm == 0.05
     assert smoke.model == config.model
     assert smoke.loss == config.loss
+    assert smoke.sparse_mixture == config.sparse_mixture
+    assert smoke.frame_refinement == config.frame_refinement
+
+
+def test_autodl_smoke_preserves_checkpoint_source_contract() -> None:
+    full = load_config(Path("configs/huav_score_optimized_autodl.yaml"))
+    smoke = load_config(Path("configs/huav_score_optimized_autodl_smoke.yaml"))
+
+    assert smoke.model == full.model
+    assert smoke.sparse_mixture == full.sparse_mixture
+    assert smoke.frame_refinement == full.frame_refinement
 
 
 def test_smoke_configs_use_a_separate_output_root() -> None:

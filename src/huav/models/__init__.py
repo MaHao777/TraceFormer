@@ -9,7 +9,7 @@ import torch
 
 from huav.data import EventBatch
 
-from .frame_objectness import FrameCellObjectnessHead, FrameObjectnessOutput
+from .event_refinement import EventRefinementOutput, MultiScaleEventRefinementHead
 from .sparse_mixture import SparseMixtureOutput, SparseTokenMixture
 from .spatiotemporal_cone import SpatioTemporalConeDetector
 
@@ -41,9 +41,9 @@ class EventSegmenter(ABC):
 
 __all__ = [
     "EventSegmenter",
-    "FrameCellObjectnessHead",
-    "FrameObjectnessOutput",
+    "EventRefinementOutput",
     "ModelOutput",
+    "MultiScaleEventRefinementHead",
     "SpatioTemporalConeDetector",
     "SparseMixtureOutput",
     "SparseTokenMixture",

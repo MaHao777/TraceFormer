@@ -15,9 +15,10 @@ from huav.analysis.threshold_robustness import evaluate_threshold_robustness
 from huav.config import (
     ConeHeadConfig,
     DatasetConfig,
-    FrameObjectnessConfig,
+    FrameRefinementConfig,
     HUAVConfig,
     ModelConfig,
+    RefinementScaleConfig,
     TrainingConfig,
 )
 from huav.data import LoadedEventSequence
@@ -201,7 +202,7 @@ def test_cpu_training_writes_reproducible_metrics_and_checkpoint() -> None:
             "dice",
             "object_frame",
             "false_alarm",
-            "frame_objectness",
+            "event_refinement",
         }
         assert all(
             value >= 0.0 for value in history[0]["validation_loss"].values()
@@ -211,9 +212,9 @@ def test_cpu_training_writes_reproducible_metrics_and_checkpoint() -> None:
         checkpoint = __import__("torch").load(
             run_dir / "best.pt", map_location="cpu", weights_only=True
         )
-        assert checkpoint["schema_version"] == 6
+        assert checkpoint["schema_version"] == 7
         assert checkpoint["sparse_mixture_config"]["enabled"] is False
-        assert checkpoint["frame_objectness_config"]["enabled"] is False
+        assert checkpoint["frame_refinement_config"]["enabled"] is False
         assert checkpoint["decision_threshold"] == metrics["threshold"]
         changed_config = replace(
             _config(data_root, output_root),
@@ -250,7 +251,7 @@ def test_cpu_training_writes_reproducible_metrics_and_checkpoint() -> None:
             run_training(_config(data_root, output_root), output_dir=run_dir)
 
 
-def test_objectness_initialization_loads_schema5_base_and_trains_only_new_head() -> None:
+def test_refinement_initialization_loads_schema5_base_and_trains_only_new_head() -> None:
     with TemporaryDirectory(dir=Path.cwd()) as directory:
         temporary_root = Path(directory)
         data_root = temporary_root / "data"
@@ -279,11 +280,13 @@ def test_objectness_initialization_loads_schema5_base_and_trains_only_new_head()
         )
         target_config = replace(
             source_config,
-            frame_objectness=FrameObjectnessConfig(
+            frame_refinement=FrameRefinementConfig(
                 enabled=True,
-                frame_ms=50.0,
-                spatial_block_size_x=4,
-                spatial_block_size_y=3,
+                context_dim=4,
+                scales=(
+                    RefinementScaleConfig(2, 2, 10.0),
+                    RefinementScaleConfig(8, 8, 50.0),
+                ),
                 loss_weight=0.2,
                 freeze_base_model=True,
             ),
@@ -291,8 +294,8 @@ def test_objectness_initialization_loads_schema5_base_and_trains_only_new_head()
 
         summary = run_training(
             target_config,
-            output_dir=output_root / "objectness",
-            initial_objectness_checkpoint_path=source_path,
+            output_dir=output_root / "refinement",
+            initial_refinement_checkpoint_path=source_path,
         )
 
         run_dir = Path(summary["run_dir"])
@@ -300,20 +303,20 @@ def test_objectness_initialization_loads_schema5_base_and_trains_only_new_head()
             run_dir / "best.pt", map_location="cpu", weights_only=True
         )
         trained_model = build_model(target_config)
-        assert trained_model.frame_objectness_head is not None
+        assert trained_model.event_refinement_head is not None
         expected_trainable = sum(
             parameter.numel()
-            for parameter in trained_model.frame_objectness_head.parameters()
+            for parameter in trained_model.event_refinement_head.parameters()
         )
         assert summary["trainable_parameter_count"] == expected_trainable
-        assert summary["full_initialization"]["kind"] == "frame_objectness"
+        assert summary["full_initialization"]["kind"] == "event_refinement"
         assert summary["full_initialization"]["epoch"] == 7
-        assert checkpoint["schema_version"] == 6
-        assert checkpoint["frame_objectness_config"]["enabled"] is True
+        assert checkpoint["schema_version"] == 7
+        assert checkpoint["frame_refinement_config"]["enabled"] is True
         for name, tensor in source_model.state_dict().items():
             assert torch.equal(checkpoint["model_state"][name], tensor)
         history = json.loads((run_dir / "history.json").read_text(encoding="utf-8"))
-        assert history[0]["train_loss"]["frame_objectness"] > 0.0
+        assert history[0]["train_loss"]["event_refinement"] > 0.0
 
 
 def test_training_curve_failure_warns_without_aborting_training(
@@ -502,7 +505,7 @@ def test_resumed_training_records_validation_loss() -> None:
             "dice",
             "object_frame",
             "false_alarm",
-            "frame_objectness",
+            "event_refinement",
         }
         assert all(
             value >= 0.0 for value in history[0]["validation_loss"].values()

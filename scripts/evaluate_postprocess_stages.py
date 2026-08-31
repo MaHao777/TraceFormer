@@ -84,6 +84,7 @@ def main() -> None:
     output_dir = Path(arguments.output_dir)
     output_dir.mkdir(parents=True, exist_ok=False)
     event_dir = output_dir / "event_release"
+    event_rescue_dir = output_dir / "event_release_dense_rescue"
     gate_dir = output_dir / "event_release_direct_gate"
     rescue_dir = output_dir / "event_release_direct_gate_dense_rescue"
     base_dir = output_dir / "objectness"
@@ -135,6 +136,13 @@ def main() -> None:
             density_group=group,
         )
         reference_prediction = _load_named_prediction(reference_dir, cache_path.name)
+        # 先对正式事件发布结果做救回，保持与历史最佳相同的比较口径。
+        event_rescue_prediction, event_rescue_report = rescue_reference_tracks(
+            cache.locations,
+            event_prediction,
+            reference_prediction,
+            density_group=group,
+        )
         rescue_prediction, rescue_report = rescue_reference_tracks(
             cache.locations,
             gate_prediction,
@@ -143,6 +151,7 @@ def main() -> None:
         )
         write_prediction_npz(base_dir / cache_path.name, cache.prediction)
         write_prediction_npz(event_dir / cache_path.name, event_prediction)
+        write_prediction_npz(event_rescue_dir / cache_path.name, event_rescue_prediction)
         write_prediction_npz(gate_dir / cache_path.name, gate_prediction)
         write_prediction_npz(rescue_dir / cache_path.name, rescue_prediction)
         records[cache_path.name] = {
@@ -151,6 +160,8 @@ def main() -> None:
             "events_per_frame": density,
             "objectness_positive": int(cache.prediction.sum()),
             "event_positive": int(event_prediction.sum()),
+            "event_rescue_positive": int(event_rescue_prediction.sum()),
+            "event_rescue": event_rescue_report,
             "gate_positive": int(gate_prediction.sum()),
             "gate": {
                 "candidate_components": int(len(candidate_batch.features)),
@@ -166,6 +177,7 @@ def main() -> None:
     original = _load_original(Path(arguments.original_report))
     objectness = evaluate_predictions(base_dir, dataset_root)
     event_stage = evaluate_predictions(event_dir, dataset_root)
+    event_rescue_stage = evaluate_predictions(event_rescue_dir, dataset_root)
     gate_stage = evaluate_predictions(gate_dir, dataset_root)
     rescue_stage = evaluate_predictions(rescue_dir, dataset_root)
     comparison = {
@@ -197,6 +209,7 @@ def main() -> None:
         "original": original,
         "objectness": objectness,
         "event_release": event_stage,
+        "event_release_dense_rescue": event_rescue_stage,
         "event_release_direct_gate": gate_stage,
         "event_release_direct_gate_dense_rescue": rescue_stage,
         "objectness_vs_original_delta": _metric_delta(
@@ -204,6 +217,9 @@ def main() -> None:
         ),
         "event_release_vs_objectness_delta": _metric_delta(
             event_stage["aggregate"], objectness["aggregate"]
+        ),
+        "dense_rescue_vs_event_release_delta": _metric_delta(
+            event_rescue_stage["aggregate"], event_stage["aggregate"]
         ),
         "direct_gate_vs_event_release_delta": _metric_delta(
             gate_stage["aggregate"], event_stage["aggregate"]
@@ -215,6 +231,7 @@ def main() -> None:
             "original": original["files"]["val_015.npz"],
             "objectness": objectness["files"]["val_015.npz"],
             "event_release": event_stage["files"]["val_015.npz"],
+            "event_release_dense_rescue": event_rescue_stage["files"]["val_015.npz"],
             "event_release_direct_gate": gate_stage["files"]["val_015.npz"],
             "event_release_direct_gate_dense_rescue": rescue_stage["files"][
                 "val_015.npz"
@@ -224,6 +241,7 @@ def main() -> None:
             "original": original["files"]["val_023.npz"],
             "objectness": objectness["files"]["val_023.npz"],
             "event_release": event_stage["files"]["val_023.npz"],
+            "event_release_dense_rescue": event_rescue_stage["files"]["val_023.npz"],
             "event_release_direct_gate": gate_stage["files"]["val_023.npz"],
             "event_release_direct_gate_dense_rescue": rescue_stage["files"][
                 "val_023.npz"

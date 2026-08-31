@@ -7,12 +7,12 @@ from typing import Any
 import torch
 from torch import nn
 
-from huav.config import ConeHeadConfig
+from huav.config import DEFAULT_REFINEMENT_SCALES, ConeHeadConfig, RefinementScaleConfig
 
 from .cone_transformer import ConeTransformerEncoder
 from .event_decoder import EventDecoder
+from .event_refinement import MultiScaleEventRefinementHead
 from .event_tokenizer import EventTokenizer
-from .frame_objectness import FrameCellObjectnessHead
 from .sparse_mixture import SparseTokenMixture
 
 
@@ -22,9 +22,9 @@ class SpatioTemporalConeDetector(nn.Module):
     output_names = (
         "event_logits",
         "base_event_logits",
-        "frame_objectness_cell_logits",
-        "frame_objectness_event_cell_indices",
-        "frame_objectness_event_logits",
+        "event_refinement_cell_logits",
+        "event_refinement_event_cell_indices",
+        "event_refinement_event_logits",
         "full_event_logits",
         "sparse_event_logits",
         "sparse_source_indices",
@@ -62,11 +62,12 @@ class SpatioTemporalConeDetector(nn.Module):
         sparse_mixture_enabled: bool = False,
         sparse_mixture_router_bias: float = -2.0,
         sparse_mixture_residual_scale: float = 0.01,
-        frame_objectness_enabled: bool = False,
-        frame_objectness_frame_ms: float = 50.0,
+        frame_refinement_enabled: bool = False,
+        frame_refinement_context_dim: int = 16,
+        frame_refinement_scales: tuple[
+            RefinementScaleConfig, ...
+        ] = DEFAULT_REFINEMENT_SCALES,
         duration_ms: float = 8000.0,
-        frame_objectness_block_size_x: int = 8,
-        frame_objectness_block_size_y: int = 8,
     ) -> None:
         super().__init__()
         if num_layers != len(layer_time_scales):
@@ -108,23 +109,22 @@ class SpatioTemporalConeDetector(nn.Module):
             if sparse_mixture_enabled
             else None
         )
-        self.frame_objectness_head = (
-            FrameCellObjectnessHead(
+        self.event_refinement_head = (
+            MultiScaleEventRefinementHead(
                 token_dim=token_dim,
                 event_feature_dim=6,
+                context_dim=frame_refinement_context_dim,
                 width=width,
                 height=height,
-                spatial_block_size_x=frame_objectness_block_size_x,
-                spatial_block_size_y=frame_objectness_block_size_y,
                 duration_ms=duration_ms,
-                frame_ms=frame_objectness_frame_ms,
+                scales=frame_refinement_scales,
                 dropout=dropout,
             )
-            if frame_objectness_enabled
+            if frame_refinement_enabled
             else None
         )
         self._full_path_frozen = False
-        self._base_for_objectness_frozen = False
+        self._base_for_refinement_frozen = False
 
     def freeze_full_path(self) -> None:
         """冻结历史 Full 主干，只让稀疏混合模块学习修正。"""
@@ -143,7 +143,7 @@ class SpatioTemporalConeDetector(nn.Module):
         if self._full_path_frozen:
             for module in (self.tokenizer, self.encoder, self.decoder):
                 module.eval()
-        if self._base_for_objectness_frozen:
+        if self._base_for_refinement_frozen:
             for module in (
                 self.tokenizer,
                 self.encoder,
@@ -154,11 +154,11 @@ class SpatioTemporalConeDetector(nn.Module):
                     module.eval()
         return self
 
-    def freeze_base_for_objectness(self) -> None:
-        """冻结现有检测器，只训练帧单元对象头。"""
+    def freeze_base_for_refinement(self) -> None:
+        """冻结现有检测器，只训练多尺度事件精修头。"""
 
-        if self.frame_objectness_head is None:
-            raise ValueError("freezing the base requires frame objectness")
+        if self.event_refinement_head is None:
+            raise ValueError("freezing the base requires event refinement")
         for module in (
             self.tokenizer,
             self.encoder,
@@ -168,8 +168,8 @@ class SpatioTemporalConeDetector(nn.Module):
             if module is not None:
                 module.requires_grad_(False)
                 module.eval()
-        self.frame_objectness_head.requires_grad_(True)
-        self._base_for_objectness_frozen = True
+        self.event_refinement_head.requires_grad_(True)
+        self._base_for_refinement_frozen = True
 
     def forward(
         self,
@@ -260,33 +260,34 @@ class SpatioTemporalConeDetector(nn.Module):
             )
             returned_source_indices = sparse_source_indices
         base_event_logits = event_logits
-        if self.frame_objectness_head is not None:
-            objectness = self.frame_objectness_head(
-                token_features,
-                tokenized.event_token_indices,
-                tokenized.event_local_features,
-                tokenized.event_xy,
-                tokenized.normalized_time,
-                tokenized.event_batch_indices,
+        if self.event_refinement_head is not None:
+            refinement = self.event_refinement_head(
+                token_features=token_features,
+                event_token_indices=tokenized.event_token_indices,
+                event_local_features=tokenized.event_local_features,
+                event_xy=tokenized.event_xy,
+                normalized_time=tokenized.normalized_time,
+                event_batch_indices=tokenized.event_batch_indices,
+                base_event_logits=base_event_logits,
             )
-            objectness_cell_logits = objectness.cell_logits
-            objectness_event_cell_indices = objectness.event_cell_indices
-            objectness_event_logits = objectness.event_logits
-            event_logits = base_event_logits + objectness_event_logits
+            refinement_cell_logits = refinement.cell_logits
+            refinement_event_cell_indices = refinement.event_cell_indices
+            refinement_event_logits = refinement.event_logits
+            event_logits = base_event_logits + refinement_event_logits
         else:
-            objectness_cell_logits = base_event_logits.new_empty((0,))
-            objectness_event_cell_indices = torch.empty(
+            refinement_cell_logits = base_event_logits.new_empty((0,))
+            refinement_event_cell_indices = torch.empty(
                 0, dtype=torch.long, device=events.device
             )
-            objectness_event_logits = base_event_logits.new_zeros(
+            refinement_event_logits = base_event_logits.new_zeros(
                 len(base_event_logits)
             )
         return {
             "event_logits": event_logits,
             "base_event_logits": base_event_logits,
-            "frame_objectness_cell_logits": objectness_cell_logits,
-            "frame_objectness_event_cell_indices": objectness_event_cell_indices,
-            "frame_objectness_event_logits": objectness_event_logits,
+            "event_refinement_cell_logits": refinement_cell_logits,
+            "event_refinement_event_cell_indices": refinement_event_cell_indices,
+            "event_refinement_event_logits": refinement_event_logits,
             "full_event_logits": full_event_logits,
             "sparse_event_logits": sparse_event_logits,
             "sparse_source_indices": returned_source_indices,

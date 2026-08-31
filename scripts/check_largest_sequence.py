@@ -19,10 +19,10 @@ from huav.training.engine import (
     _amp_is_enabled,
     _autocast_dtype,
     _dense_sequence_loss_weight,
+    _event_refinement_loss,
     _forward_with_sparse_mixture,
-    _frame_objectness_loss,
     _initialize_full_path,
-    _initialize_objectness_path,
+    _initialize_refinement_head,
     _sparse_mixture_auxiliary_losses,
     _sparse_mixture_weight,
     _threshold_augmentation_weight,
@@ -64,8 +64,8 @@ def main() -> None:
         help="历史最佳 best.pt；冻结 Full 配置必须提供",
     )
     initialization.add_argument(
-        "--initialize-objectness",
-        help="schema 5 best.pt；只训练 frame objectness 头",
+        "--initialize-refinement",
+        help="schema 5 best.pt；只训练多尺度事件精修头",
     )
     arguments = parser.parse_args()
 
@@ -94,16 +94,16 @@ def main() -> None:
     if arguments.epoch <= 0:
         parser.error("--epoch must be positive")
     model = build_model(config).to(device)
-    if config.frame_objectness.freeze_base_model:
-        if arguments.initialize_objectness is None:
+    if config.frame_refinement.freeze_base_model:
+        if arguments.initialize_refinement is None:
             parser.error(
-                "frozen frame objectness resource check requires "
-                "--initialize-objectness"
+                "frozen event refinement resource check requires "
+                "--initialize-refinement"
             )
-        _initialize_objectness_path(
+        _initialize_refinement_head(
             model,
             config,
-            arguments.initialize_objectness,
+            arguments.initialize_refinement,
             device=device,
         )
     elif config.sparse_mixture.freeze_full_model:
@@ -198,7 +198,7 @@ def main() -> None:
             full_timestamps_ms=timestamps_ms,
             full_coordinates=events[:, :2],
         )
-        objectness_loss = _frame_objectness_loss(
+        refinement_loss = _event_refinement_loss(
             output,
             labels,
             criterion,
@@ -253,7 +253,7 @@ def main() -> None:
             )
         combined_total = (
             full_losses["total"]
-            + config.frame_objectness.loss_weight * objectness_loss
+            + config.frame_refinement.loss_weight * refinement_loss
         ) * _dense_sequence_loss_weight(events, labels, config)
         combined_total = combined_total + augmentation_weight * (
             config.threshold_augmentation.sparse_loss_weight * sparse_total
@@ -295,8 +295,8 @@ def main() -> None:
             name: float(value.detach().float().item())
             for name, value in full_losses.items()
         },
-        "frame_objectness": float(
-            objectness_loss.detach().float().item()
+        "event_refinement": float(
+            refinement_loss.detach().float().item()
         ),
         "false_alarm": float(full_losses["false_alarm"].detach().float().item()),
         "focal": float(full_losses["focal"].detach().float().item()),
@@ -349,10 +349,23 @@ def main() -> None:
             for parameter in model.parameters()
             if parameter.requires_grad
         ),
-        "frozen_full_has_gradient": any(
+        "frozen_base_has_gradient": any(
             parameter.grad is not None
-            for module in (model.tokenizer, model.encoder, model.decoder)
+            for module in (
+                model.tokenizer,
+                model.encoder,
+                model.decoder,
+                model.sparse_mixture,
+            )
+            if module is not None
             for parameter in module.parameters()
+        ),
+        "refinement_has_finite_gradient": bool(
+            model.event_refinement_head is not None
+            and all(
+                parameter.grad is not None and torch.isfinite(parameter.grad).all()
+                for parameter in model.event_refinement_head.parameters()
+            )
         ),
     }
     print(json.dumps(result, ensure_ascii=False, indent=2))

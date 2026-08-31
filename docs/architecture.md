@@ -119,15 +119,17 @@ mixed_token = full_token + residual_scale * gate * sparse_adapter(features)
 
 Router 初始 bias 为 `-2`，残差 LayerScale 初始为 `0.01`。训练前几个 epoch 将 gate 权重固定为零，随后逐步升到一；因此新分支开始训练时模型行为接近原 Full 模型。普通序列直接跳过 Sparse forward。最终仍使用 Full 视图的 `event_token_indices` 解码全部原始事件，输出数量和顺序不受稀疏化影响。
 
-### 5.2 帧单元对象置信度头
+### 5.2 多尺度事件精修头
 
-启用 `frame_objectness` 后，模型把最终父 Token 与六维事件局部特征融合，再按 `(batch, 50 ms frame, 8×8 spatial block)` 聚合均值和最大值。每个占用单元产生一个共享 objectness logit，并以残差形式加到单元内所有事件的基础 logit：
+启用 `frame_refinement` 后，模型把最终父 Token、六维事件局部特征和基础 logit 共享投影一次，再按 `2×2×10 ms`、`4×4×25 ms`、`8×8×50 ms` 三个尺度聚合占用 cell 的均值、最大值和事件数。每个尺度通过排序整数 key 查找同一空间 cell 的前、当前、后一时间片；不同 batch 始终隔离，不构造稠密时空体。
+
+`8×8×50 ms` 主尺度输出 cell objectness 供辅助监督。最终事件分类器同时读取事件投影、三个尺度上下文、cell logit 和基础 logit，为每个事件独立产生残差，不再把同一个 cell logit 广播给所有事件：
 
 ```text
-event_logit = base_event_logit + frame_objectness_logit[cell]
+event_logit = base_event_logit + event_refinement_delta[event]
 ```
 
-分类器末层权重和偏置均为零，因此从 schema-5 最佳检查点初始化时，首次前向与原模型完全一致。objectness 实验冻结 tokenizer、encoder、decoder 和 sparse mixture，只训练新头。
+cell 与事件分类器末层权重和偏置均为零，因此从 schema-5 最佳检查点初始化时，首次前向与原模型完全一致。单变量实验冻结 tokenizer、encoder、decoder 和 sparse mixture，只训练精修头。
 
 ## 6. 训练
 
@@ -144,7 +146,7 @@ total = focal
       + lambda_dice * dice
       + lambda_object_frame * object_frame
       + lambda_false_alarm * false_alarm
-      + frame_objectness.loss_weight * frame_objectness_focal
+      + frame_refinement.loss_weight * primary_cell_focal
 ```
 
 启用稀疏混合专家时，融合输出仍承担上述完整主损失，并增加：
@@ -165,4 +167,4 @@ total_moe = full_event_main
 
 ## 7. 评估与可复现性
 
-验证对全部事件预测；满足门槛的序列使用与训练相同的确定性 Sparse 视图和完整门控权重。输出事件级 Pd/Fa/IoU/Acc 和单独命名的 EV-UAV-compatible 指标。每次训练内验证还使用独立固定种子的采样器，按与训练一致的正样本保留、hard-negative 背景采样、密集序列权重和完整事件 Fa 上下文计算 loss；六个主损失分量写入 `history.json[*].validation_loss`，不会混入 `metrics.json`。训练时选出的事件 IoU 阈值随最佳 checkpoint 保存，复评不会再次使用标签调阈值。schema-6 checkpoint 同时保存模型、稀疏混合专家、frame objectness 配置和验证集 manifest 摘要，配置或数据不匹配时拒绝复评；只有专用初始化入口允许读取 schema-5 基线。
+验证对全部事件预测；满足门槛的序列使用与训练相同的确定性 Sparse 视图和完整门控权重。输出事件级 Pd/Fa/IoU/Acc 和单独命名的 EV-UAV-compatible 指标。每次训练内验证还使用独立固定种子的采样器，按与训练一致的正样本保留、hard-negative 背景采样、密集序列权重和完整事件 Fa 上下文计算 loss；主损失与 `event_refinement` 辅助项写入 `history.json[*].validation_loss`，不会混入 `metrics.json`。训练时选出的事件 IoU 阈值随最佳 checkpoint 保存，复评不会再次使用标签调阈值。schema-7 checkpoint 同时保存模型、稀疏混合专家、多尺度精修配置和验证集 manifest 摘要，配置或数据不匹配时拒绝复评；只有专用初始化入口允许读取 schema-5 基线。

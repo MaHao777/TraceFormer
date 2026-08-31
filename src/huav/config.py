@@ -144,13 +144,28 @@ class SparseMixtureConfig:
 
 
 @dataclass(frozen=True)
-class FrameObjectnessConfig:
-    """50 ms 时空单元对象置信度头配置。"""
+class RefinementScaleConfig:
+    """事件精修头的一个稀疏时空聚合尺度。"""
+
+    spatial_block_size_x: int
+    spatial_block_size_y: int
+    frame_ms: float
+
+
+DEFAULT_REFINEMENT_SCALES = (
+    RefinementScaleConfig(2, 2, 10.0),
+    RefinementScaleConfig(4, 4, 25.0),
+    RefinementScaleConfig(8, 8, 50.0),
+)
+
+
+@dataclass(frozen=True)
+class FrameRefinementConfig:
+    """多尺度 cell 上下文和事件级残差精修配置。"""
 
     enabled: bool = False
-    frame_ms: float = 50.0
-    spatial_block_size_x: int = 8
-    spatial_block_size_y: int = 8
+    context_dim: int = 16
+    scales: tuple[RefinementScaleConfig, ...] = DEFAULT_REFINEMENT_SCALES
     loss_weight: float = 0.2
     freeze_base_model: bool = False
 
@@ -191,7 +206,7 @@ class HUAVConfig:
     loss: LossConfig = LossConfig()
     threshold_augmentation: ThresholdAugmentationConfig = ThresholdAugmentationConfig()
     sparse_mixture: SparseMixtureConfig = SparseMixtureConfig()
-    frame_objectness: FrameObjectnessConfig = FrameObjectnessConfig()
+    frame_refinement: FrameRefinementConfig = FrameRefinementConfig()
     evaluation: EvaluationConfig = EvaluationConfig()
 
     @classmethod
@@ -431,25 +446,48 @@ class HUAVConfig:
                 getattr(augmentation, name), f"threshold augmentation {name}"
             ) < 0:
                 raise ValueError(f"threshold augmentation {name} must be non-negative")
-        objectness = self.frame_objectness
-        if not isinstance(objectness.enabled, bool):
-            raise ValueError("frame objectness enabled must be boolean")
-        if not isinstance(objectness.freeze_base_model, bool):
-            raise ValueError("frame objectness freeze_base_model must be boolean")
-        if objectness.freeze_base_model and not objectness.enabled:
-            raise ValueError("freezing the base model requires frame objectness")
-        if _finite_real(objectness.frame_ms, "frame objectness frame_ms") <= 0:
-            raise ValueError("frame objectness frame_ms must be positive")
-        _positive_integer(
-            objectness.spatial_block_size_x,
-            "frame objectness spatial_block_size_x",
-        )
-        _positive_integer(
-            objectness.spatial_block_size_y,
-            "frame objectness spatial_block_size_y",
-        )
-        if _finite_real(objectness.loss_weight, "frame objectness loss_weight") < 0:
-            raise ValueError("frame objectness loss_weight must be non-negative")
+        refinement = self.frame_refinement
+        if not isinstance(refinement.enabled, bool):
+            raise ValueError("frame refinement enabled must be boolean")
+        if not isinstance(refinement.freeze_base_model, bool):
+            raise ValueError("frame refinement freeze_base_model must be boolean")
+        if refinement.freeze_base_model and not refinement.enabled:
+            raise ValueError("freezing the base model requires frame refinement")
+        _positive_integer(refinement.context_dim, "frame refinement context_dim")
+        if not isinstance(refinement.scales, (tuple, list)) or not refinement.scales:
+            raise ValueError("frame refinement scales must not be empty")
+        previous_frame_ms = 0.0
+        for index, scale in enumerate(refinement.scales):
+            if not isinstance(scale, RefinementScaleConfig):
+                raise ValueError(
+                    f"frame refinement scale {index} must be a RefinementScaleConfig"
+                )
+            _positive_integer(
+                scale.spatial_block_size_x,
+                f"frame refinement scale {index} spatial_block_size_x",
+            )
+            _positive_integer(
+                scale.spatial_block_size_y,
+                f"frame refinement scale {index} spatial_block_size_y",
+            )
+            frame_ms = _finite_real(
+                scale.frame_ms,
+                f"frame refinement scale {index} frame_ms",
+            )
+            if frame_ms <= previous_frame_ms:
+                raise ValueError(
+                    "frame refinement scale frame_ms values must be positive and increasing"
+                )
+            previous_frame_ms = frame_ms
+        primary = refinement.scales[-1]
+        if (
+            primary.spatial_block_size_x,
+            primary.spatial_block_size_y,
+            float(primary.frame_ms),
+        ) != (8, 8, 50.0):
+            raise ValueError("frame refinement primary scale must be 8x8x50ms")
+        if _finite_real(refinement.loss_weight, "frame refinement loss_weight") < 0:
+            raise ValueError("frame refinement loss_weight must be non-negative")
         mixture = self.sparse_mixture
         if not isinstance(mixture.enabled, bool):
             raise ValueError("sparse mixture enabled must be boolean")
@@ -562,7 +600,7 @@ def load_config(path: Path | str) -> HUAVConfig:
         "loss",
         "threshold_augmentation",
         "sparse_mixture",
-        "frame_objectness",
+        "frame_refinement",
         "evaluation",
     }
     unknown_sections = set(raw) - allowed_sections
@@ -591,6 +629,15 @@ def load_config(path: Path | str) -> HUAVConfig:
                     "threshold_augmentation threshold_ratios must be a sequence"
                 )
             raw_augmentation["threshold_ratios"] = tuple(threshold_ratios)
+        raw_refinement = dict(raw.get("frame_refinement", {}))
+        if "scales" in raw_refinement:
+            scale_values = raw_refinement["scales"]
+            if not isinstance(scale_values, list):
+                raise ValueError("frame_refinement scales must be a list")
+            raw_refinement["scales"] = tuple(
+                RefinementScaleConfig(**value) if isinstance(value, dict) else value
+                for value in scale_values
+            )
         config = HUAVConfig(
             resolution=ResolutionConfig(**raw.get("resolution", {})),
             model=ModelConfig(**raw_model),
@@ -600,9 +647,7 @@ def load_config(path: Path | str) -> HUAVConfig:
             loss=LossConfig(**raw.get("loss", {})),
             threshold_augmentation=ThresholdAugmentationConfig(**raw_augmentation),
             sparse_mixture=SparseMixtureConfig(**raw.get("sparse_mixture", {})),
-            frame_objectness=FrameObjectnessConfig(
-                **raw.get("frame_objectness", {})
-            ),
+            frame_refinement=FrameRefinementConfig(**raw_refinement),
             evaluation=EvaluationConfig(**raw.get("evaluation", {})),
         )
     except TypeError as error:

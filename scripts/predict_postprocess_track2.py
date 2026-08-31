@@ -114,7 +114,12 @@ def main() -> None:
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--training-dir", type=Path, required=True)
     parser.add_argument("--event-release-dir", type=Path, required=True)
-    parser.add_argument("--direct-verifier-dir", type=Path, required=True)
+    parser.add_argument("--direct-verifier-dir", type=Path)
+    parser.add_argument(
+        "--event-only",
+        action="store_true",
+        help="仅使用已通过门槛的事件模型，不加载直接验证器",
+    )
     parser.add_argument("--training-cache-manifest", type=Path, required=True)
     parser.add_argument("--reference-prediction-dir", type=Path, required=True)
     parser.add_argument("--validation-report", type=Path, required=True)
@@ -125,8 +130,8 @@ def main() -> None:
 
     config = load_config(arguments.config)
     checkpoint = torch.load(arguments.checkpoint, map_location="cpu", weights_only=False)
-    if checkpoint.get("schema_version") != 5:
-        raise ValueError("original event-postprocess submission requires schema 5")
+    if checkpoint.get("schema_version") not in {5, 7}:
+        raise ValueError("event-postprocess submission requires schema 5 or 7")
     for name, expected in (
         ("model_config", _serializable(asdict(config.model))),
         ("sparse_mixture_config", _serializable(asdict(config.sparse_mixture))),
@@ -160,28 +165,56 @@ def main() -> None:
     for name, expected_sha256 in release_report["event_model_sha256"].items():
         if sha256_file(model_dir / name) != expected_sha256:
             raise ValueError(f"event release model hash mismatch: {name}")
-    verifier_model, verifier_report = load_direct_verifier(
-        arguments.direct_verifier_dir
-    )
-    if verifier_report["status"] != "released":
-        raise ValueError("direct verifier did not pass its development gate")
-    verifier_threshold = float(verifier_report["threshold"])
+    verifier_model = None
+    verifier_report = None
+    verifier_threshold = None
+    if not arguments.event_only:
+        if arguments.direct_verifier_dir is None:
+            raise ValueError("direct verifier directory is required without --event-only")
+        verifier_model, verifier_report = load_direct_verifier(
+            arguments.direct_verifier_dir
+        )
+        if verifier_report["status"] != "released":
+            raise ValueError("direct verifier did not pass its development gate")
+        verifier_threshold = float(verifier_report["threshold"])
     validation_report = json.loads(arguments.validation_report.read_text(encoding="utf-8"))
     baseline_validation_report = json.loads(
         arguments.baseline_validation_report.read_text(encoding="utf-8")
     )
-    validation_gate = _validation_gate(validation_report, baseline_validation_report)
+    if arguments.event_only:
+        candidate = validation_report["event_release_dense_rescue"]
+        baseline = validation_report["original"]
+        validation_gate = {
+            "score_gain": float(candidate["aggregate"]["score"])
+            - float(baseline["aggregate"]["score"]),
+            "val_023_pd_gain": float(candidate["files"]["val_023.npz"]["pd"])
+            - float(baseline["files"]["val_023.npz"]["pd"]),
+            "fa": float(candidate["aggregate"]["fa"]),
+        }
+        validation_gate["passed"] = (
+            validation_gate["score_gain"] > 0
+            and validation_gate["val_023_pd_gain"] >= 0
+            and validation_gate["fa"] <= 6.0e-6
+        )
+        if not validation_gate["passed"]:
+            raise ValueError(f"validation promotion gate failed: {validation_gate}")
+    else:
+        validation_gate = _validation_gate(
+            validation_report, baseline_validation_report
+        )
     if (
         validation_report["protocol"]["event_release_report_sha256"]
         != sha256_file(release_report_path)
     ):
         raise ValueError("validation report does not match the event release")
-    verifier_report_path = arguments.direct_verifier_dir / "training_report.json"
-    if (
-        validation_report["protocol"]["direct_verifier_report_sha256"]
-        != sha256_file(verifier_report_path)
-    ):
-        raise ValueError("validation report does not match the direct verifier")
+    verifier_report_path = None
+    if not arguments.event_only:
+        verifier_report_path = arguments.direct_verifier_dir / "training_report.json"
+        if (
+            validation_report["protocol"]["direct_verifier_report_sha256"]
+            != sha256_file(verifier_report_path)
+        ):
+            raise ValueError("validation report does not match the direct verifier")
 
     model = build_model(config)
     load_result = model.load_state_dict(checkpoint["model_state"], strict=True)
@@ -245,6 +278,7 @@ def main() -> None:
             _, direct_probability, tracked, direct = event_branches(
                 cache, scores, event_contract
             )
+            event_prediction = tracked | direct
             candidate_batch = direct_candidate_features(
                 cache,
                 direct_probability,
@@ -252,15 +286,18 @@ def main() -> None:
                 direct,
                 include_targets=False,
             )
-            event_prediction = tracked | direct
-            prediction = apply_direct_verifier(
-                candidate_batch,
-                tracked,
-                direct,
-                verifier_model,
-                verifier_threshold,
-                density_group=group,
-            )
+            if arguments.event_only:
+                # 未通过开发门槛的直接验证器不能进入正式测试预测。
+                prediction = event_prediction
+            else:
+                prediction = apply_direct_verifier(
+                    candidate_batch,
+                    tracked,
+                    direct,
+                    verifier_model,
+                    verifier_threshold,
+                    density_group=group,
+                )
             reference_prediction = _load_named_prediction(
                 arguments.reference_prediction_dir,
                 sequence.source_path.name,
@@ -308,9 +345,15 @@ def main() -> None:
         for txt_path in sorted(txt_dir.glob("*.txt")):
             archive.write(txt_path, arcname=txt_path.name)
     manifest = {
-        "scheme": "schema5_event_release99_direct_temporal_gate_dense_rescue",
+        "scheme": (
+            f"schema{checkpoint['schema_version']}_event_release99_dense_rescue"
+            if arguments.event_only
+            else "schema5_event_release99_direct_temporal_gate_dense_rescue"
+        ),
         "validation": validation_report[
-            "event_release_direct_gate_dense_rescue"
+            "event_release_dense_rescue"
+            if arguments.event_only
+            else "event_release_direct_gate_dense_rescue"
         ]["aggregate"],
         "validation_gate": validation_gate,
         "validation_report": str(arguments.validation_report.resolve()),
@@ -323,7 +366,7 @@ def main() -> None:
         "config_sha256": sha256_file(arguments.config),
         "checkpoint": str(arguments.checkpoint.resolve()),
         "checkpoint_sha256": checkpoint_sha256,
-        "checkpoint_schema_version": 5,
+        "checkpoint_schema_version": int(checkpoint["schema_version"]),
         "checkpoint_epoch": int(checkpoint["epoch"]),
         "training_report": str(training_report_path.resolve()),
         "training_report_sha256": sha256_file(training_report_path),
@@ -331,9 +374,15 @@ def main() -> None:
         "event_release_report_sha256": sha256_file(release_report_path),
         "event_model_sha256": release_report["event_model_sha256"],
         "event_release_training_files": release_report["training_files"],
-        "direct_verifier_report": str(verifier_report_path.resolve()),
-        "direct_verifier_report_sha256": sha256_file(verifier_report_path),
-        "direct_verifier_model_sha256": verifier_report["release_model"]["sha256"],
+        "direct_verifier_report": (
+            str(verifier_report_path.resolve()) if verifier_report_path else None
+        ),
+        "direct_verifier_report_sha256": (
+            sha256_file(verifier_report_path) if verifier_report_path else None
+        ),
+        "direct_verifier_model_sha256": (
+            verifier_report["release_model"]["sha256"] if verifier_report else None
+        ),
         "direct_verifier_threshold": verifier_threshold,
         "reference_prediction_dir": str(arguments.reference_prediction_dir.resolve()),
         "dense_rescue_contract": {

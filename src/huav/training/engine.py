@@ -58,8 +58,8 @@ from .metrics import (
 from .runtime import prepare_device
 from .sampling import sample_event_indices
 
-CHECKPOINT_SCHEMA_VERSION = 6
-OBJECTNESS_SOURCE_SCHEMA_VERSION = 5
+CHECKPOINT_SCHEMA_VERSION = 7
+REFINEMENT_SOURCE_SCHEMA_VERSION = 5
 TRAINING_STATE_SCHEMA_VERSION = 2
 
 
@@ -105,15 +105,10 @@ def build_model(config: HUAVConfig) -> SpatioTemporalConeDetector:
         sparse_mixture_residual_scale=(
             config.sparse_mixture.initial_residual_scale
         ),
-        frame_objectness_enabled=config.frame_objectness.enabled,
-        frame_objectness_frame_ms=config.frame_objectness.frame_ms,
+        frame_refinement_enabled=config.frame_refinement.enabled,
+        frame_refinement_context_dim=config.frame_refinement.context_dim,
+        frame_refinement_scales=tuple(config.frame_refinement.scales),
         duration_ms=config.dataset.duration_ms,
-        frame_objectness_block_size_x=(
-            config.frame_objectness.spatial_block_size_x
-        ),
-        frame_objectness_block_size_y=(
-            config.frame_objectness.spatial_block_size_y
-        ),
     )
 
 
@@ -175,52 +170,52 @@ def _initialize_full_path(
     }
 
 
-def _initialize_objectness_path(
+def _initialize_refinement_head(
     model: SpatioTemporalConeDetector,
     config: HUAVConfig,
     checkpoint_path: str | Path,
     *,
     device: torch.device,
 ) -> dict[str, Any]:
-    """严格加载 schema-5 基线，只保留新对象头为可训练。"""
+    """严格加载 schema-5 基线，只保留事件精修头为可训练。"""
 
     path = Path(checkpoint_path).resolve()
     checkpoint = torch.load(path, map_location=device, weights_only=True)
-    if checkpoint.get("schema_version") != OBJECTNESS_SOURCE_SCHEMA_VERSION:
-        raise ValueError("objectness initialization requires a schema-5 checkpoint")
+    if checkpoint.get("schema_version") != REFINEMENT_SOURCE_SCHEMA_VERSION:
+        raise ValueError("refinement initialization requires a schema-5 checkpoint")
     if checkpoint.get("model_config") != _serializable(asdict(config.model)):
-        raise ValueError("objectness source model configuration does not match")
+        raise ValueError("refinement source model configuration does not match")
     if checkpoint.get("sparse_mixture_config") != _serializable(
         asdict(config.sparse_mixture)
     ):
-        raise ValueError("objectness source sparse mixture configuration does not match")
+        raise ValueError("refinement source sparse mixture configuration does not match")
     if checkpoint.get("resolution") != _serializable(asdict(config.resolution)):
-        raise ValueError("objectness source resolution does not match")
+        raise ValueError("refinement source resolution does not match")
     source_state = checkpoint.get("model_state")
     if not isinstance(source_state, dict):
-        raise ValueError("objectness source checkpoint has no model state")
+        raise ValueError("refinement source checkpoint has no model state")
     expected_base = {
         name
         for name in model.state_dict()
-        if not name.startswith("frame_objectness_head.")
+        if not name.startswith("event_refinement_head.")
     }
     if set(source_state) != expected_base:
         missing = sorted(expected_base - set(source_state))
         extra = sorted(set(source_state) - expected_base)
         raise ValueError(
-            f"objectness source state mismatch: missing={missing}, extra={extra}"
+            f"refinement source state mismatch: missing={missing}, extra={extra}"
         )
     incompatible = model.load_state_dict(source_state, strict=False)
     expected_missing = {
         name
         for name in model.state_dict()
-        if name.startswith("frame_objectness_head.")
+        if name.startswith("event_refinement_head.")
     }
     if set(incompatible.missing_keys) != expected_missing or incompatible.unexpected_keys:
-        raise ValueError("objectness source checkpoint could not be loaded strictly")
-    model.freeze_base_for_objectness()
+        raise ValueError("refinement source checkpoint could not be loaded strictly")
+    model.freeze_base_for_refinement()
     return {
-        "kind": "frame_objectness",
+        "kind": "event_refinement",
         "path": str(path),
         "sha256": _file_sha256(path),
         "schema_version": checkpoint.get("schema_version"),
@@ -268,15 +263,15 @@ def _validate_checkpoint_contract(
     checkpoint: dict[str, Any],
     config: HUAVConfig,
 ) -> None:
-    """统一校验 schema-6 推理与恢复契约。"""
+    """统一校验 schema-7 推理与恢复契约。"""
 
     if checkpoint.get("schema_version") != CHECKPOINT_SCHEMA_VERSION:
         raise ValueError("unsupported checkpoint schema version")
     expected = {
         "model_config": _serializable(asdict(config.model)),
         "sparse_mixture_config": _serializable(asdict(config.sparse_mixture)),
-        "frame_objectness_config": _serializable(
-            asdict(config.frame_objectness)
+        "frame_refinement_config": _serializable(
+            asdict(config.frame_refinement)
         ),
         "resolution": _serializable(asdict(config.resolution)),
     }
@@ -669,19 +664,19 @@ def _add_sparse_mixture_losses(
     )
 
 
-def _frame_objectness_loss(
+def _event_refinement_loss(
     output: dict[str, Any],
     labels: torch.Tensor,
     criterion: EventFocalDiceLoss,
     config: HUAVConfig,
 ) -> torch.Tensor:
-    """对占用的 50 ms 空间单元计算对象标签损失。"""
+    """对精修头的 8x8x50 ms 主尺度计算 cell 对象损失。"""
 
-    if not config.frame_objectness.enabled:
+    if not config.frame_refinement.enabled:
         return output["event_logits"].sum() * 0.0
     return frame_cell_objectness_loss(
-        output["frame_objectness_cell_logits"],
-        output["frame_objectness_event_cell_indices"],
+        output["event_refinement_cell_logits"],
+        output["event_refinement_event_cell_indices"],
         labels,
         alpha=criterion.focal_alpha,
         gamma=criterion.focal_gamma,
@@ -823,7 +818,7 @@ def evaluate_model(
             "dice": 0.0,
             "object_frame": 0.0,
             "false_alarm": 0.0,
-            "frame_objectness": 0.0,
+            "event_refinement": 0.0,
         }
         if criterion is not None
         else None
@@ -872,16 +867,16 @@ def evaluate_model(
                 full_timestamps_ms=timestamps_ms,
                 full_coordinates=events[:, :2],
             )
-            objectness_loss = _frame_objectness_loss(
+            refinement_loss = _event_refinement_loss(
                 output,
                 labels,
                 criterion,
                 config,
             )
-            losses["frame_objectness"] = objectness_loss
+            losses["event_refinement"] = refinement_loss
             losses["total"] = (
                 losses["total"]
-                + config.frame_objectness.loss_weight * objectness_loss
+                + config.frame_refinement.loss_weight * refinement_loss
             ) * _dense_sequence_loss_weight(
                 events,
                 labels,
@@ -1144,7 +1139,7 @@ def _run_training_impl(
     progress: bool = False,
     resume_state_path: str | Path | None = None,
     initial_full_checkpoint_path: str | Path | None = None,
-    initial_objectness_checkpoint_path: str | Path | None = None,
+    initial_refinement_checkpoint_path: str | Path | None = None,
 ) -> dict[str, Any]:
     config.validate()
     device_name = device or config.training.device
@@ -1178,31 +1173,31 @@ def _run_training_impl(
     initialization: dict[str, Any] | None = None
     initialization_paths = (
         initial_full_checkpoint_path,
-        initial_objectness_checkpoint_path,
+        initial_refinement_checkpoint_path,
     )
     if resume_state_path is not None and any(
         path is not None for path in initialization_paths
     ):
         raise ValueError("initial checkpoints and resume state are mutually exclusive")
     if all(path is not None for path in initialization_paths):
-        raise ValueError("Full and objectness initialization are mutually exclusive")
-    if config.frame_objectness.freeze_base_model:
+        raise ValueError("Full and refinement initialization are mutually exclusive")
+    if config.frame_refinement.freeze_base_model:
         if resume_state_path is not None:
-            model.freeze_base_for_objectness()
-        elif initial_objectness_checkpoint_path is None:
+            model.freeze_base_for_refinement()
+        elif initial_refinement_checkpoint_path is None:
             raise ValueError(
-                "frozen frame objectness training requires --initialize-objectness"
+                "frozen event refinement training requires --initialize-refinement"
             )
         else:
-            initialization = _initialize_objectness_path(
+            initialization = _initialize_refinement_head(
                 model,
                 config,
-                initial_objectness_checkpoint_path,
+                initial_refinement_checkpoint_path,
                 device=torch_device,
             )
-    elif initial_objectness_checkpoint_path is not None:
+    elif initial_refinement_checkpoint_path is not None:
         raise ValueError(
-            "--initialize-objectness requires frame_objectness.freeze_base_model"
+            "--initialize-refinement requires frame_refinement.freeze_base_model"
         )
     elif config.sparse_mixture.freeze_full_model:
         if resume_state_path is not None:
@@ -1305,7 +1300,7 @@ def _run_training_impl(
             "dice": 0.0,
             "object_frame": 0.0,
             "false_alarm": 0.0,
-            "frame_objectness": 0.0,
+            "event_refinement": 0.0,
             "sparse_total": 0.0,
             "threshold_consistency": 0.0,
             "augmentation_weight": 0.0,
@@ -1421,7 +1416,7 @@ def _run_training_impl(
                     full_timestamps_ms=timestamps_ms,
                     full_coordinates=events[:, :2],
                 )
-                objectness_loss = _frame_objectness_loss(
+                refinement_loss = _event_refinement_loss(
                     output,
                     labels,
                     criterion,
@@ -1483,7 +1478,7 @@ def _run_training_impl(
                     )
                 combined_total = (
                     full_losses["total"]
-                    + config.frame_objectness.loss_weight * objectness_loss
+                    + config.frame_refinement.loss_weight * refinement_loss
                 ) * sequence_weight
                 combined_total = combined_total + augmentation_weight * (
                     config.threshold_augmentation.sparse_loss_weight * sparse_total
@@ -1510,7 +1505,7 @@ def _run_training_impl(
                     )
                 losses = dict(full_losses)
                 losses["total"] = combined_total
-                losses["frame_objectness"] = objectness_loss
+                losses["event_refinement"] = refinement_loss
                 losses["sparse_total"] = (
                     sparse_total + auxiliary["sparse_total"]
                 )
@@ -1652,7 +1647,7 @@ def _run_training_impl(
                 "decision_threshold": float(metrics["threshold"]),
                 "model_config": configuration["model"],
                 "sparse_mixture_config": configuration["sparse_mixture"],
-                "frame_objectness_config": configuration["frame_objectness"],
+                "frame_refinement_config": configuration["frame_refinement"],
                 "resolution": configuration["resolution"],
                 "validation_manifest_sha256": validation_manifest_digest,
                 "full_initialization": initialization,
@@ -1734,7 +1729,7 @@ def run_training(
     config_source: str | Path | None = None,
     resume_state_path: str | Path | None = None,
     initial_full_checkpoint_path: str | Path | None = None,
-    initial_objectness_checkpoint_path: str | Path | None = None,
+    initial_refinement_checkpoint_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Train while maintaining the run experiment record and output index."""
     config.validate()
@@ -1752,7 +1747,7 @@ def run_training(
         path is not None
         for path in (
             initial_full_checkpoint_path,
-            initial_objectness_checkpoint_path,
+            initial_refinement_checkpoint_path,
         )
     ):
         raise ValueError("initial checkpoints and resume state are mutually exclusive")
@@ -1782,8 +1777,8 @@ def run_training(
             progress=progress,
             resume_state_path=resume_state_path,
             initial_full_checkpoint_path=initial_full_checkpoint_path,
-            initial_objectness_checkpoint_path=(
-                initial_objectness_checkpoint_path
+            initial_refinement_checkpoint_path=(
+                initial_refinement_checkpoint_path
             ),
         )
     except BaseException as error:
@@ -1942,7 +1937,7 @@ def _resume_training_impl(
             "dice": 0.0,
             "object_frame": 0.0,
             "false_alarm": 0.0,
-            "frame_objectness": 0.0,
+            "event_refinement": 0.0,
             "sparse_total": 0.0,
             "threshold_consistency": 0.0,
             "augmentation_weight": 0.0,
@@ -2056,7 +2051,7 @@ def _resume_training_impl(
                     full_timestamps_ms=timestamps_ms,
                     full_coordinates=events[:, :2],
                 )
-                objectness_loss = _frame_objectness_loss(
+                refinement_loss = _event_refinement_loss(
                     output,
                     labels,
                     criterion,
@@ -2118,7 +2113,7 @@ def _resume_training_impl(
                     )
                 combined_total = (
                     full_losses["total"]
-                    + config.frame_objectness.loss_weight * objectness_loss
+                    + config.frame_refinement.loss_weight * refinement_loss
                 ) * sequence_weight
                 combined_total = combined_total + augmentation_weight * (
                     config.threshold_augmentation.sparse_loss_weight * sparse_total
@@ -2145,7 +2140,7 @@ def _resume_training_impl(
                     )
                 losses = dict(full_losses)
                 losses["total"] = combined_total
-                losses["frame_objectness"] = objectness_loss
+                losses["event_refinement"] = refinement_loss
                 losses["sparse_total"] = (
                     sparse_total + auxiliary["sparse_total"]
                 )
@@ -2249,7 +2244,7 @@ def _resume_training_impl(
                     "decision_threshold": float(metrics["threshold"]),
                     "model_config": configuration["model"],
                     "sparse_mixture_config": configuration["sparse_mixture"],
-                    "frame_objectness_config": configuration["frame_objectness"],
+                    "frame_refinement_config": configuration["frame_refinement"],
                     "resolution": configuration["resolution"],
                     "validation_manifest_sha256": validation_manifest_digest,
                 },
