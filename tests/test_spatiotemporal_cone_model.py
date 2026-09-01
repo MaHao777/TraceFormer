@@ -42,13 +42,17 @@ def _model() -> SpatioTemporalConeDetector:
 def _events() -> torch.Tensor:
     return torch.tensor(
         [
-            [0.0, 1.0, 2.0, 0.10, 1.0],
-            [0.0, 2.0, 2.0, 0.40, 0.0],
-            [0.0, 4.0, 3.0, 0.70, 1.0],
-            [1.0, 1.0, 2.0, 0.10, 1.0],
-            [1.0, 2.0, 2.0, 0.40, 0.0],
+            [1.0, 2.0, 0.10, 1.0],
+            [2.0, 2.0, 0.40, 0.0],
+            [4.0, 3.0, 0.70, 1.0],
+            [1.0, 2.0, 0.10, 1.0],
+            [2.0, 2.0, 0.40, 0.0],
         ]
     )
+
+
+def _batch_indices() -> torch.Tensor:
+    return torch.tensor([0, 0, 0, 1, 1])
 
 
 def test_fixed_model_always_contains_sparse_mixture_and_refinement() -> None:
@@ -110,7 +114,7 @@ def test_unknown_training_stage_is_rejected() -> None:
 
 
 def test_forward_returns_only_fixed_model_training_contract() -> None:
-    output = _model()(_events())
+    output = _model()(_events(), _batch_indices())
 
     assert set(output) == {
         "event_logits",
@@ -143,7 +147,9 @@ def test_paired_sparse_view_preserves_event_order_and_trains_router() -> None:
 
     output = model(
         events,
+        _batch_indices(),
         sparse_events=events[source_indices],
+        sparse_batch_indices=_batch_indices()[source_indices],
         sparse_source_indices=source_indices,
         mixture_weight=1.0,
     )
@@ -159,20 +165,18 @@ def test_paired_sparse_view_preserves_event_order_and_trains_router() -> None:
     )
 
 
-def test_batch_column_and_explicit_batch_indices_stay_isolated() -> None:
+def test_explicit_batch_indices_stay_isolated() -> None:
     events = _events()
-    embedded = _model()(events)
-    explicit = _model()(events[:, 1:], batch_indices=events[:, 0].long())
+    explicit = _model()(events, batch_indices=_batch_indices())
 
-    for output in (embedded, explicit):
-        assert set(output["token_batch_indices"].tolist()) == {0, 1}
-        first = output["event_token_indices"][:3]
-        second = output["event_token_indices"][3:]
-        assert not set(first.tolist()) & set(second.tolist())
+    assert set(explicit["token_batch_indices"].tolist()) == {0, 1}
+    first = explicit["event_token_indices"][:3]
+    second = explicit["event_token_indices"][3:]
+    assert not set(first.tolist()) & set(second.tolist())
 
 
 def test_empty_event_sample_returns_empty_finite_outputs() -> None:
-    output = _model()(torch.empty((0, 5)))
+    output = _model()(torch.empty((0, 4)))
 
     assert output["event_logits"].shape == (0,)
     assert output["token_features"].shape == (0, 16)
@@ -183,7 +187,7 @@ def test_end_to_end_event_logits_backpropagate_through_fixed_model() -> None:
     model = _model()
     model.configure_training_stage("full")
 
-    model(_events())["event_logits"].square().mean().backward()
+    model(_events(), _batch_indices())["event_logits"].square().mean().backward()
 
     parameters_with_grad = [
         parameter

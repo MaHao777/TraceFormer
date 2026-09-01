@@ -9,12 +9,6 @@ from torch import nn
 from torch.nn import functional as F
 
 
-def _validate_inputs(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-    if logits.ndim != 1 or targets.ndim != 1 or len(logits) != len(targets):
-        raise ValueError("logits and targets must have matching shape [N]")
-    return targets.to(dtype=logits.dtype)
-
-
 def binary_focal_loss(
     logits: torch.Tensor,
     targets: torch.Tensor,
@@ -22,7 +16,7 @@ def binary_focal_loss(
     alpha: float = 0.75,
     gamma: float = 2.0,
 ) -> torch.Tensor:
-    targets = _validate_inputs(logits, targets)
+    targets = targets.to(dtype=logits.dtype)
     if len(logits) == 0:
         return logits.sum() * 0.0
     cross_entropy = F.binary_cross_entropy_with_logits(
@@ -47,13 +41,11 @@ def binary_dice_loss(
     *,
     smooth: float = 1.0,
 ) -> torch.Tensor:
-    targets = _validate_inputs(logits, targets)
+    targets = targets.to(dtype=logits.dtype)
     if batch_indices is None:
         batch_indices = torch.zeros(
             len(logits), dtype=torch.long, device=logits.device
         )
-    if batch_indices.ndim != 1 or len(batch_indices) != len(logits):
-        raise ValueError("batch_indices must have shape [N]")
     if len(logits) == 0:
         return logits.sum() * 0.0
     probabilities = torch.sigmoid(logits)
@@ -80,26 +72,8 @@ def frame_cell_objectness_loss(
 ) -> torch.Tensor:
     """按单元内事件标签最大值监督对象置信度。"""
 
-    if cell_logits.ndim != 1:
-        raise ValueError("cell_logits must have shape [C]")
-    if (
-        event_cell_indices.ndim != 1
-        or event_targets.ndim != 1
-        or len(event_cell_indices) != len(event_targets)
-    ):
-        raise ValueError("event cell indices and targets must align")
-    if event_cell_indices.dtype != torch.long:
-        raise TypeError("event_cell_indices must be int64")
     if len(event_targets) == 0:
-        if len(cell_logits):
-            raise ValueError("empty events require empty cell logits")
         return cell_logits.sum() * 0.0
-    if len(cell_logits) == 0:
-        raise ValueError("non-empty events require cell logits")
-    if bool(torch.any(event_cell_indices < 0)) or bool(
-        torch.any(event_cell_indices >= len(cell_logits))
-    ):
-        raise ValueError("event cell indices are outside cell logits")
     cell_targets = cell_logits.new_zeros(len(cell_logits))
     cell_targets.scatter_reduce_(
         0,
@@ -125,16 +99,7 @@ def object_frame_recall_loss(
     frame_ms: float = 50.0,
     logit_margin: float = 2.0,
 ) -> torch.Tensor:
-    targets = _validate_inputs(logits, targets)
-    if not (
-        object_ids.ndim == timestamps_ms.ndim == 1
-        and len(object_ids) == len(timestamps_ms) == len(logits)
-    ):
-        raise ValueError("object ids and timestamps must align with logits")
-    if frame_ms <= 0 or not math.isfinite(frame_ms):
-        raise ValueError("frame_ms must be positive and finite")
-    if not math.isfinite(logit_margin):
-        raise ValueError("logit_margin must be finite")
+    targets = targets.to(dtype=logits.dtype)
     if len(logits) == 0:
         return logits.sum() * 0.0
     integer_time = torch.floor(timestamps_ms.to(dtype=torch.float64))
@@ -188,24 +153,7 @@ def false_alarm_pixel_loss(
     which false connected components are formed.
     """
 
-    targets = _validate_inputs(logits, targets)
-    if not (
-        batch_indices.ndim == timestamps_ms.ndim == 1
-        and len(batch_indices) == len(timestamps_ms) == len(logits)
-    ):
-        raise ValueError("batch indices and timestamps must align with logits")
-    if coordinates.shape != (len(logits), 2):
-        raise ValueError("coordinates must have shape [N,2]")
-    if frame_ms <= 0 or not math.isfinite(frame_ms):
-        raise ValueError("frame_ms must be positive and finite")
-    if not math.isfinite(logit_margin):
-        raise ValueError("logit_margin must be finite")
-    if (
-        isinstance(topk_per_frame, bool)
-        or not isinstance(topk_per_frame, int)
-        or topk_per_frame <= 0
-    ):
-        raise ValueError("topk_per_frame must be a positive integer")
+    targets = targets.to(dtype=logits.dtype)
     if len(logits) == 0:
         return logits.sum() * 0.0
 
@@ -279,24 +227,6 @@ def object_frame_threshold_consistency_loss(
 ) -> torch.Tensor:
     """Match target-frame confidence across full and high-threshold views."""
 
-    if sparse_logits.ndim != 1 or full_logits.ndim != 1:
-        raise ValueError("full and sparse logits must be one-dimensional")
-    if source_indices.ndim != 1 or source_indices.dtype != torch.long:
-        raise TypeError("source_indices must be a one-dimensional int64 tensor")
-    if len(sparse_logits) != len(source_indices):
-        raise ValueError("sparse logits must align with source_indices")
-    if not (
-        targets.ndim == object_ids.ndim == timestamps_ms.ndim == 1
-        and len(targets) == len(object_ids) == len(timestamps_ms) == len(full_logits)
-    ):
-        raise ValueError("full-view annotations must align with full logits")
-    if len(source_indices) and (
-        bool(torch.any(source_indices < 0))
-        or bool(torch.any(source_indices >= len(full_logits)))
-    ):
-        raise ValueError("source_indices are outside full logits")
-    if frame_ms <= 0 or not math.isfinite(frame_ms):
-        raise ValueError("frame_ms must be positive and finite")
     if len(source_indices) == 0:
         return sparse_logits.sum() * 0.0
 
@@ -354,23 +284,6 @@ def background_threshold_consistency_loss(
 ) -> torch.Tensor:
     """Prevent the sparse expert from raising aligned background logits."""
 
-    if sparse_logits.ndim != 1 or full_logits.ndim != 1 or targets.ndim != 1:
-        raise ValueError(
-            "sparse logits, full logits and targets must be one-dimensional"
-        )
-    if source_indices.ndim != 1 or source_indices.dtype != torch.long:
-        raise TypeError("source_indices must be a one-dimensional int64 tensor")
-    if len(sparse_logits) != len(source_indices) or len(full_logits) != len(targets):
-        raise ValueError(
-            "sparse/full tensors must align with source indices and targets"
-        )
-    if not math.isfinite(logit_margin):
-        raise ValueError("logit_margin must be finite")
-    if len(source_indices) and (
-        bool(torch.any(source_indices < 0))
-        or bool(torch.any(source_indices >= len(full_logits)))
-    ):
-        raise ValueError("source_indices are outside full logits")
     if len(source_indices) == 0:
         return sparse_logits.sum() * 0.0
     background = targets[source_indices] <= 0.5
@@ -393,12 +306,6 @@ def positive_logit_preservation_loss(
 ) -> torch.Tensor:
     """保护所有正事件，避免融合分支低于冻结的 Full 教师。"""
 
-    if fused_logits.ndim != 1 or full_logits.ndim != 1 or targets.ndim != 1:
-        raise ValueError("fused logits, full logits and targets must be one-dimensional")
-    if not (len(fused_logits) == len(full_logits) == len(targets)):
-        raise ValueError("fused logits, full logits and targets must align")
-    if not math.isfinite(logit_margin):
-        raise ValueError("logit_margin must be finite")
     positive = targets > 0.5
     if not bool(positive.any()):
         return fused_logits.sum() * 0.0
@@ -423,26 +330,6 @@ def sparse_block_false_peak_loss(
 ) -> torch.Tensor:
     """Penalize the strongest background peak in each sparse spacetime block."""
 
-    one_dimensional = (logits, targets, batch_indices, timestamps_ms)
-    if any(value.ndim != 1 for value in one_dimensional):
-        raise ValueError(
-            "logits, targets, batches and timestamps must be one-dimensional"
-        )
-    if not all(len(value) == len(logits) for value in one_dimensional[1:]):
-        raise ValueError("sparse block loss inputs must have equal length")
-    if coordinates.ndim != 2 or coordinates.shape != (len(logits), 2):
-        raise ValueError("coordinates must have shape [N,2]")
-    if frame_ms <= 0 or not math.isfinite(frame_ms):
-        raise ValueError("frame_ms must be positive and finite")
-    for value, name in (
-        (block_size_x, "block_size_x"),
-        (block_size_y, "block_size_y"),
-        (topk_per_frame, "topk_per_frame"),
-    ):
-        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-            raise ValueError(f"{name} must be a positive integer")
-    if not math.isfinite(logit_margin):
-        raise ValueError("logit_margin must be finite")
     background = targets <= 0.5
     if not bool(background.any()):
         return logits.sum() * 0.0

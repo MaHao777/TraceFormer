@@ -64,8 +64,6 @@ class SpatioTemporalConeDetector(nn.Module):
         duration_ms: float = 8000.0,
     ) -> None:
         super().__init__()
-        if num_layers != len(layer_time_scales):
-            raise ValueError("num_layers must equal len(layer_time_scales)")
         self.token_dim = int(token_dim)
         self.num_layers = int(num_layers)
         self.tokenizer = EventTokenizer(

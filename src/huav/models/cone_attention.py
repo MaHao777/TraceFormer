@@ -34,12 +34,6 @@ class BidirectionalConeAttention(nn.Module):
         direction_dropout: float = 0.0,
     ) -> None:
         super().__init__()
-        if token_dim <= 0 or num_heads <= 0 or token_dim % num_heads:
-            raise ValueError("token_dim must be positive and divisible by num_heads")
-        if len(cone_heads) != num_heads:
-            raise ValueError("cone_heads must contain one configuration per head")
-        if not 0 <= dropout < 1 or not 0 <= direction_dropout <= 1:
-            raise ValueError("dropout values are outside their valid ranges")
         self.token_dim = int(token_dim)
         self.num_heads = int(num_heads)
         self.head_dim = self.token_dim // self.num_heads
@@ -129,10 +123,6 @@ class BidirectionalConeAttention(nn.Module):
         token_coords: torch.Tensor,
         token_batch_indices: torch.Tensor,
     ) -> ConeAttentionOutput:
-        if tokens.ndim != 2 or tokens.shape[1] != self.token_dim:
-            raise ValueError(f"tokens must have shape [M,{self.token_dim}]")
-        if len(tokens) != len(token_coords):
-            raise ValueError("tokens and token_coords must have equal length")
         if len(tokens) == 0:
             return ConeAttentionOutput(tokens)
 

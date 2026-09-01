@@ -34,12 +34,6 @@ class MultiScaleEventRefinementHead(nn.Module):
         dropout: float,
     ) -> None:
         super().__init__()
-        if min(token_dim, event_feature_dim, context_dim, width, height) <= 0:
-            raise ValueError("event refinement dimensions must be positive")
-        if duration_ms <= 0 or not scales:
-            raise ValueError("event refinement duration and scales must be positive")
-        if not 0 <= dropout < 1:
-            raise ValueError("event refinement dropout must be in [0,1)")
         self.token_dim = int(token_dim)
         self.event_feature_dim = int(event_feature_dim)
         self.context_dim = int(context_dim)
@@ -220,19 +214,6 @@ class MultiScaleEventRefinementHead(nn.Module):
                 ),
                 event_logits=empty_logits,
             )
-        if event_local_features.shape != (event_count, self.event_feature_dim):
-            raise ValueError("event_local_features do not align with events")
-        if event_xy.shape != (event_count, 2):
-            raise ValueError("event_xy must have shape [N,2]")
-        one_dimensional = (
-            event_token_indices,
-            normalized_time,
-            event_batch_indices,
-            base_event_logits,
-        )
-        if any(value.ndim != 1 or len(value) != event_count for value in one_dimensional):
-            raise ValueError("event refinement inputs must align with events")
-
         parent_features = token_features[event_token_indices]
         event_features = self.event_projection(
             torch.cat(

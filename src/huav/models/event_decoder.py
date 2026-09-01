@@ -11,8 +11,6 @@ class EventDecoder(nn.Module):
 
     def __init__(self, *, token_dim: int, dropout: float) -> None:
         super().__init__()
-        if token_dim <= 0:
-            raise ValueError("token_dim must be positive")
         hidden_dim = max(8, token_dim // 2)
         self.token_dim = int(token_dim)
         self.classifier = nn.Sequential(

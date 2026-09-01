@@ -14,16 +14,6 @@ def sample_event_indices(
     generator: torch.Generator | None = None,
     max_background_without_positive: int = 4096,
 ) -> torch.Tensor:
-    if labels.ndim != 1:
-        raise ValueError("labels must have shape [N]")
-    if background_ratio < 0 or max_background_without_positive <= 0:
-        raise ValueError("sampling limits are invalid")
-    if not 0 <= hard_negative_fraction <= 1:
-        raise ValueError("hard_negative_fraction must be in [0,1]")
-    if logits is not None and (logits.ndim != 1 or len(logits) != len(labels)):
-        raise ValueError("logits and labels must have matching shape [N]")
-    if hard_negative_fraction > 0 and logits is None:
-        raise ValueError("logits are required for hard-negative sampling")
     positive = torch.where(labels > 0.5)[0]
     negative = torch.where(labels <= 0.5)[0]
     maximum_negative = (

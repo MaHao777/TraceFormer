@@ -28,12 +28,6 @@ class ConeNeighborBuilder:
         max_neighbors_per_cone: int,
         layer_time_scale: float = 1.0,
     ) -> None:
-        if not cone_heads:
-            raise ValueError("cone_heads must not be empty")
-        if max_neighbors_per_cone <= 0:
-            raise ValueError("max_neighbors_per_cone must be positive")
-        if not 0 < layer_time_scale <= 1:
-            raise ValueError("layer_time_scale must be in (0,1]")
         self.cone_heads = tuple(cone_heads)
         self.max_neighbors_per_cone = int(max_neighbors_per_cone)
         self.layer_time_scale = float(layer_time_scale)
@@ -126,13 +120,6 @@ class ConeNeighborBuilder:
         token_coords: torch.Tensor,
         token_batch_indices: torch.Tensor,
     ) -> ConeNeighborhoods:
-        if token_coords.ndim != 2 or token_coords.shape[1] != 3:
-            raise ValueError("token_coords must have shape [M,3]")
-        if (
-            token_batch_indices.ndim != 1
-            or len(token_batch_indices) != len(token_coords)
-        ):
-            raise ValueError("token_batch_indices must have shape [M]")
         token_count = len(token_coords)
         shape = (
             token_count,

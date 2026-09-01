@@ -42,18 +42,6 @@ class EventTokenizer(nn.Module):
         num_pool_queries: int = 4,
     ) -> None:
         super().__init__()
-        values = (
-            width,
-            height,
-            spatial_block_size_x,
-            spatial_block_size_y,
-            num_time_blocks,
-            event_embed_dim,
-            token_dim,
-            num_pool_queries,
-        )
-        if any(value <= 0 for value in values):
-            raise ValueError("tokenizer dimensions must be positive")
         self.width = int(width)
         self.height = int(height)
         self.spatial_block_size_x = int(spatial_block_size_x)
@@ -159,28 +147,20 @@ class EventTokenizer(nn.Module):
         events: torch.Tensor,
         batch_indices: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if events.ndim != 2 or events.shape[1] not in (4, 5):
-            raise ValueError("events must have shape [N,4] or [N,5]")
+        if events.ndim != 2 or events.shape[1] != 4:
+            raise ValueError("events must have shape [N,4]")
         if not events.is_floating_point():
             raise TypeError("events must have a floating dtype")
-        # 这儿数据处理是不是冗余了？怎么接受传入数据还要分两类处理？就固定为一种传入类型就行
-        if events.shape[1] == 5:
-            if batch_indices is not None:
-                raise ValueError("batch_indices must be omitted for [N,5] events")
-            parsed_batches = events[:, 0].long()
-            event_features = events[:, 1:]
-        else:
-            event_features = events
-            parsed_batches = (
-                torch.zeros(len(events), dtype=torch.long, device=events.device)
-                if batch_indices is None
-                else batch_indices.long()
-            )
+        parsed_batches = (
+            torch.zeros(len(events), dtype=torch.long, device=events.device)
+            if batch_indices is None
+            else batch_indices.long()
+        )
         if parsed_batches.ndim != 1 or len(parsed_batches) != len(events):
             raise ValueError("batch_indices must have shape [N]")
         if len(parsed_batches) and torch.any(parsed_batches < 0):
             raise ValueError("batch indices must be non-negative")
-        return event_features, parsed_batches
+        return events, parsed_batches
 
     def _empty(self, events: torch.Tensor) -> TokenizedEvents:
         device = events.device
@@ -214,17 +194,6 @@ class EventTokenizer(nn.Module):
             return self._empty(events)
 
         x, y, normalized_time, polarity = event_features.unbind(dim=1)
-        # 这后面也没必要接入数据安全检查啊，这个数据都经过处理了，有问题说明那块有问题，或者数据集就有问题（不可能，因为数据集是官方的）
-        if (
-            torch.any(x < 0)
-            or torch.any(x >= self.width)
-            or torch.any(y < 0)
-            or torch.any(y >= self.height)
-            or torch.any(normalized_time < 0)
-            or torch.any(normalized_time > 1)
-        ):
-            raise ValueError("event coordinates are outside configured bounds")
-
         x_index = torch.div(
             x.long(), self.spatial_block_size_x, rounding_mode="floor"
         )

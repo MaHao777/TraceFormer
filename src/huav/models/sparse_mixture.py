@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 
 import torch
@@ -32,12 +31,6 @@ class SparseTokenMixture(nn.Module):
         initial_residual_scale: float,
     ) -> None:
         super().__init__()
-        if min(token_dim, num_x_blocks, num_y_blocks, num_time_blocks) <= 0:
-            raise ValueError("sparse mixture dimensions must be positive")
-        if not math.isfinite(initial_router_bias):
-            raise ValueError("initial_router_bias must be finite")
-        if not math.isfinite(initial_residual_scale) or initial_residual_scale < 0:
-            raise ValueError("initial_residual_scale must be finite and non-negative")
         self.token_dim = int(token_dim)
         self.num_x_blocks = int(num_x_blocks)
         self.num_y_blocks = int(num_y_blocks)
@@ -99,18 +92,6 @@ class SparseTokenMixture(nn.Module):
         *,
         mixture_weight: float,
     ) -> SparseMixtureOutput:
-        if full_features.ndim != 2 or full_features.shape[1] != self.token_dim:
-            raise ValueError("full_features must have shape [T,token_dim]")
-        if sparse_features.ndim != 2 or sparse_features.shape[1] != self.token_dim:
-            raise ValueError("sparse_features must have shape [S,token_dim]")
-        if full_statistics.ndim != 2 or len(full_statistics) != len(full_features):
-            raise ValueError("full_statistics must align with full_features")
-        if sparse_statistics.ndim != 2 or len(sparse_statistics) != len(
-            sparse_features
-        ):
-            raise ValueError("sparse_statistics must align with sparse_features")
-        if not math.isfinite(float(mixture_weight)) or not 0 <= mixture_weight <= 1:
-            raise ValueError("mixture_weight must be finite and in [0,1]")
         full_keys = self._keys(full_coordinates, full_batch_indices)
         sparse_keys = self._keys(sparse_coordinates, sparse_batch_indices)
         if len(full_keys) > 1 and bool(torch.any(full_keys[1:] <= full_keys[:-1])):

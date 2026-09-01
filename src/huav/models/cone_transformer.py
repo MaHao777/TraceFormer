@@ -83,8 +83,6 @@ class ConeTransformerEncoder(nn.Module):
         direction_dropout: float,
     ) -> None:
         super().__init__()
-        if not layer_time_scales:
-            raise ValueError("layer_time_scales must not be empty")
         self.layers = nn.ModuleList(
             [
                 ConeTransformerBlock(

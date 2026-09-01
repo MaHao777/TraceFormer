@@ -13,8 +13,6 @@ class RelativePositionEncoder(nn.Module):
 
     def __init__(self, hidden_dim: int) -> None:
         super().__init__()
-        if hidden_dim <= 0:
-            raise ValueError("hidden_dim must be positive")
         self.network = nn.Sequential(
             nn.Linear(self.feature_dim, hidden_dim),
             nn.GELU(),
@@ -44,8 +42,6 @@ class RelativePositionEncoder(nn.Module):
         )
 
     def forward(self, features: torch.Tensor) -> torch.Tensor:
-        if features.shape[-1] != self.feature_dim:
-            raise ValueError("relative position features must end with dimension 6")
         return self.network(features).squeeze(-1)
 
 

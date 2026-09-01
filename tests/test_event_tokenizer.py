@@ -20,6 +20,12 @@ def _tokenizer() -> EventTokenizer:
     )
 
 
+def _tokenize(tokenizer: EventTokenizer, events: torch.Tensor):
+    """测试首列构造 batch，模型只接收固定四列事件。"""
+
+    return tokenizer(events[:, 1:], batch_indices=events[:, 0].long())
+
+
 def test_same_block_events_share_token_and_retain_local_coordinates() -> None:
     events = torch.tensor(
         [
@@ -29,7 +35,7 @@ def test_same_block_events_share_token_and_retain_local_coordinates() -> None:
         ]
     )
 
-    output = _tokenizer()(events)
+    output = _tokenize(_tokenizer(), events)
 
     assert output.tokens.shape == (2, 16)
     assert output.event_token_indices.tolist() == [0, 0, 1]
@@ -49,7 +55,7 @@ def test_batch_index_is_part_of_sparse_cell_identity() -> None:
         ]
     )
 
-    output = _tokenizer()(events)
+    output = _tokenize(_tokenizer(), events)
 
     assert output.tokens.shape[0] == 2
     assert output.event_token_indices.tolist() == [0, 1]
@@ -65,7 +71,7 @@ def test_token_statistics_include_sequence_relative_polarity_and_entropy() -> No
         ]
     )
 
-    output = _tokenizer()(events)
+    output = _tokenize(_tokenizer(), events)
     statistics = output.token_statistics[0]
 
     assert statistics.shape == (7,)
@@ -87,7 +93,7 @@ def test_sequence_polarity_features_are_isolated_by_batch() -> None:
         ]
     )
 
-    output = _tokenizer()(events)
+    output = _tokenize(_tokenizer(), events)
 
     torch.testing.assert_close(
         output.event_local_features[:, 4:],
@@ -114,7 +120,7 @@ def test_signed_polarity_is_converted_before_block_statistics() -> None:
         ]
     )
 
-    statistics = _tokenizer()(events).token_statistics[0]
+    statistics = _tokenize(_tokenizer(), events).token_statistics[0]
 
     torch.testing.assert_close(statistics[1], torch.tensor(0.5))
     torch.testing.assert_close(statistics[5], torch.tensor(0.0))
@@ -122,7 +128,7 @@ def test_signed_polarity_is_converted_before_block_statistics() -> None:
 
 
 def test_empty_event_tensor_returns_all_empty_outputs() -> None:
-    output = _tokenizer()(torch.empty((0, 5)))
+    output = _tokenize(_tokenizer(), torch.empty((0, 5)))
 
     assert output.tokens.shape == (0, 16)
     assert output.token_coords.shape == (0, 3)
@@ -172,7 +178,7 @@ def test_attention_pool_backpropagates_under_bfloat16_autocast() -> None:
     )
 
     with torch.autocast("cpu", dtype=torch.bfloat16):
-        output = tokenizer(events)
+        output = _tokenize(tokenizer, events)
         loss = output.tokens.float().square().mean()
     loss.backward()
 
@@ -206,7 +212,7 @@ def test_token_features_backpropagate_to_event_encoder_and_projection() -> None:
         ]
     )
 
-    tokenizer(events).tokens.sum().backward()
+    _tokenize(tokenizer, events).tokens.sum().backward()
 
     assert all(
         parameter.grad is not None and torch.isfinite(parameter.grad).all()
