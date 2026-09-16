@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from huav.cli import evaluate, predict
+from traceformer.cli import evaluate, predict
 
 
 def test_evaluate_defaults_to_checkpoint_run_and_records_exact_match(
@@ -24,7 +24,7 @@ def test_evaluate_defaults_to_checkpoint_run_and_records_exact_match(
     monkeypatch.setattr(
         sys,
         "argv",
-        ["huav-evaluate", "--checkpoint", str(checkpoint), "--quiet"],
+        ["traceformer-evaluate", "--checkpoint", str(checkpoint), "--quiet"],
     )
 
     evaluate.main()
@@ -45,7 +45,7 @@ def test_evaluate_explicit_output_remains_exact(tmp_path: Path, monkeypatch) -> 
     monkeypatch.setattr(
         sys,
         "argv",
-        ["huav-evaluate", "--checkpoint", str(checkpoint), "--output", str(output)],
+        ["traceformer-evaluate", "--checkpoint", str(checkpoint), "--output", str(output)],
     )
 
     evaluate.main()
@@ -78,7 +78,7 @@ def test_predict_defaults_to_checkpoint_submission_and_records_counts(
     monkeypatch.setattr(
         sys,
         "argv",
-        ["huav-predict", "--checkpoint", str(checkpoint), "--quiet"],
+        ["traceformer-predict", "--checkpoint", str(checkpoint), "--quiet"],
     )
 
     predict.main()
@@ -113,7 +113,7 @@ def test_predict_explicit_output_directory_remains_exact(tmp_path: Path, monkeyp
         sys,
         "argv",
         [
-            "huav-predict",
+            "traceformer-predict",
             "--checkpoint",
             str(checkpoint),
             "--output-dir",
@@ -140,7 +140,7 @@ def test_evaluate_artifact_update_failure_is_concise_cli_error(
         "record_evaluation",
         lambda *args, **kwargs: (_ for _ in ()).throw(OSError("record failed")),
     )
-    monkeypatch.setattr(sys, "argv", ["huav-evaluate", "--checkpoint", str(checkpoint)])
+    monkeypatch.setattr(sys, "argv", ["traceformer-evaluate", "--checkpoint", str(checkpoint)])
 
     with pytest.raises(SystemExit) as caught:
         evaluate.main()
@@ -169,7 +169,7 @@ def test_predict_artifact_update_failure_is_concise_cli_error(
         "record_submission",
         lambda *args, **kwargs: (_ for _ in ()).throw(OSError("record failed")),
     )
-    monkeypatch.setattr(sys, "argv", ["huav-predict", "--checkpoint", str(checkpoint)])
+    monkeypatch.setattr(sys, "argv", ["traceformer-predict", "--checkpoint", str(checkpoint)])
 
     with pytest.raises(SystemExit) as caught:
         predict.main()

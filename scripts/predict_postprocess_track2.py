@@ -1,4 +1,4 @@
-"""用指定HUAV检查点与事件级后处理生成Track 2提交包。"""
+"""用指定TraceFormer检查点与事件级后处理生成Track 2提交包。"""
 
 from __future__ import annotations
 
@@ -12,19 +12,19 @@ from typing import Any
 import numpy as np
 import torch
 
-from huav.config import load_config
-from huav.data import NPZEventDataset
-from huav.postprocessing.contracts import EventCache, density_group, sha256_file
-from huav.postprocessing.direct_verifier import (
+from traceformer.config import load_config
+from traceformer.data import NPZEventDataset
+from traceformer.postprocessing.contracts import EventCache, density_group, sha256_file
+from traceformer.postprocessing.direct_verifier import (
     apply_direct_verifier,
     direct_candidate_features,
     event_branches,
     load_direct_verifier,
 )
-from huav.postprocessing.learning import load_event_models, predict_event_scores
-from huav.postprocessing.submission import load_prediction
-from huav.postprocessing.tracking import rescue_reference_tracks
-from huav.training.engine import build_model, forward_with_sparse_mixture
+from traceformer.postprocessing.learning import load_event_models, predict_event_scores
+from traceformer.postprocessing.submission import load_prediction
+from traceformer.postprocessing.tracking import rescue_reference_tracks
+from traceformer.training.engine import build_model, forward_with_sparse_mixture
 
 
 def _serializable(value: Any) -> Any:

@@ -9,20 +9,20 @@ from typing import Any
 
 import numpy as np
 
-from huav.postprocessing.contracts import EventCache, density_group, sha256_file
-from huav.postprocessing.direct_verifier import (
+from traceformer.postprocessing.contracts import EventCache, density_group, sha256_file
+from traceformer.postprocessing.direct_verifier import (
     apply_direct_verifier,
     direct_candidate_features,
     event_branches,
     load_direct_verifier,
 )
-from huav.postprocessing.learning import load_event_models, predict_event_scores
-from huav.postprocessing.submission import (
+from traceformer.postprocessing.learning import load_event_models, predict_event_scores
+from traceformer.postprocessing.submission import (
     evaluate_predictions,
     load_prediction,
     write_prediction_npz,
 )
-from huav.postprocessing.tracking import rescue_reference_tracks
+from traceformer.postprocessing.tracking import rescue_reference_tracks
 
 
 def _metric_delta(after: dict[str, Any], before: dict[str, Any]) -> dict[str, float]:

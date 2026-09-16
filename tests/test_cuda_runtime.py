@@ -7,7 +7,7 @@ import torch
 
 
 def test_prepare_cpu_device_reports_reproducible_runtime_metadata() -> None:
-    from huav.training.runtime import prepare_device
+    from traceformer.training.runtime import prepare_device
 
     runtime = prepare_device("cpu", num_threads=1)
 
@@ -21,7 +21,7 @@ def test_prepare_cpu_device_reports_reproducible_runtime_metadata() -> None:
 def test_prepare_cuda_device_rejects_an_unavailable_runtime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from huav.training.runtime import prepare_device
+    from traceformer.training.runtime import prepare_device
 
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
 
@@ -32,7 +32,7 @@ def test_prepare_cuda_device_rejects_an_unavailable_runtime(
 def test_prepare_cuda_device_reports_blackwell_and_verifies_a_kernel(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from huav.training import runtime
+    from traceformer.training import runtime
 
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(torch.cuda, "get_device_name", lambda _: "NVIDIA GeForce RTX 5090")
@@ -59,7 +59,7 @@ def test_prepare_cuda_device_reports_blackwell_and_verifies_a_kernel(
 def test_prepare_cuda_device_translates_kernel_incompatibility(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from huav.training import runtime
+    from traceformer.training import runtime
 
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(torch.cuda, "get_device_name", lambda _: "NVIDIA GeForce RTX 5090")

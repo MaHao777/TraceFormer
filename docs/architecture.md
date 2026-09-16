@@ -1,4 +1,4 @@
-# HUAV 固定 schema-7 模型结构
+# TraceFormer 固定 schema-7 模型结构
 
 ## 1. 事件输入与 Token 化
 

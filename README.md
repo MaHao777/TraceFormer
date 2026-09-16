@@ -1,4 +1,8 @@
-# HUAV 固定 schema-7 事件检测模型
+# TraceFormer 固定 schema-7 事件检测模型
+
+项目地址：https://github.com/MaHao777/TraceFormer
+
+Python 包为 `traceformer`，模型入口为 `from traceformer import TraceFormer`，配置类为 `TraceFormerConfig`。命令统一使用 `traceformer-` 前缀。更名前的本地目录名与历史实验记录可继续保留；checkpoint 的张量键和数值结构不因名称变更而改变。
 
 本仓库当前只保留一套正式模型结构：
 
@@ -19,10 +23,10 @@ EventTokenizer
 python -m pip install -e .
 python -m pip install -e ".[dev]"
 
-huav-train --help
-huav-evaluate --help
-huav-predict --help
-huav-check-gpu --help
+traceformer-train --help
+traceformer-evaluate --help
+traceformer-predict --help
+traceformer-check-gpu --help
 ```
 
 运行测试与静态检查：
@@ -38,10 +42,10 @@ git diff --check
 
 仅保留四份当前模型配置：
 
-- `configs/huav_score_optimized.yaml`：本地 CPU 正式配置
-- `configs/huav_score_optimized_smoke.yaml`：本地 CPU 冒烟配置
-- `configs/huav_score_optimized_autodl.yaml`：CUDA 正式配置
-- `configs/huav_score_optimized_autodl_smoke.yaml`：CUDA 冒烟配置
+- `configs/traceformer_score_optimized.yaml`：本地 CPU 正式配置
+- `configs/traceformer_score_optimized_smoke.yaml`：本地 CPU 冒烟配置
+- `configs/traceformer_score_optimized_autodl.yaml`：CUDA 正式配置
+- `configs/traceformer_score_optimized_autodl_smoke.yaml`：CUDA 冒烟配置
 
 四份配置的模型结构完全相同，只允许设备、混合精度、线程、数据文件上限和输出目录等运行环境字段不同。训练配置中的 `stage` 只控制哪些参数参与优化，不改变模型组成：
 
@@ -56,8 +60,8 @@ git diff --check
 精修阶段示例：
 
 ```powershell
-huav-train `
-  --config configs/huav_score_optimized.yaml `
+traceformer-train `
+  --config configs/traceformer_score_optimized.yaml `
   --initialize-refinement path/to/schema5_best.pt `
   --output-dir outputs/fixed_schema7_refinement
 ```
@@ -65,7 +69,7 @@ huav-train `
 从完整训练状态继续：
 
 ```powershell
-huav-train `
+traceformer-train `
   --config path/to/run/config.yaml `
   --resume-state path/to/run/training_state.pt `
   --output-dir outputs/resumed_run
@@ -74,12 +78,12 @@ huav-train `
 复评和生成预测时，应优先使用 checkpoint 同目录保存的 `config.yaml`：
 
 ```powershell
-huav-evaluate `
+traceformer-evaluate `
   --config path/to/run/config.yaml `
   --checkpoint path/to/run/best.pt `
   --device cpu
 
-huav-predict `
+traceformer-predict `
   --config path/to/run/config.yaml `
   --checkpoint path/to/run/best.pt `
   --device cpu

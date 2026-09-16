@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from huav.training.losses import (
+from traceformer.training.losses import (
     EventFocalDiceLoss,
     background_threshold_consistency_loss,
     binary_dice_loss,
@@ -14,12 +14,12 @@ from huav.training.losses import (
     positive_logit_preservation_loss,
     sparse_block_false_peak_loss,
 )
-from huav.training.metrics import (
+from traceformer.training.metrics import (
     EventMetricAccumulator,
     EVUAVMetricAccumulator,
     competition_metrics,
 )
-from huav.training.sampling import sample_event_indices
+from traceformer.training.sampling import sample_event_indices
 
 
 def test_positive_preservation_uses_all_positive_events_and_detaches_teacher() -> None:

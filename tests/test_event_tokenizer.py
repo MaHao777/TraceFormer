@@ -5,7 +5,7 @@ import math
 import torch
 from torch import nn
 
-from huav.models.event_tokenizer import EventTokenizer
+from traceformer.models.event_tokenizer import EventTokenizer
 
 
 def _tokenizer() -> EventTokenizer:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import torch
 
-from huav.models.event_decoder import EventDecoder
+from traceformer.models.event_decoder import EventDecoder
 
 
 def test_decoder_uses_parent_tokens_and_event_local_features_only() -> None:

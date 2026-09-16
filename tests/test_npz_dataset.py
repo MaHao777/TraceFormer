@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 import torch
 
-from huav.data import NPZEventDataset
+from traceformer.data import NPZEventDataset
 
 
 def _write_npz(path: Path) -> None:

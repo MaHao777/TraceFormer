@@ -10,7 +10,7 @@ def test_readme_documents_editable_install_and_console_scripts() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     assert "python -m pip install -e ." in readme
     assert 'python -m pip install -e ".[dev]"' in readme
-    assert "huav-train --help" in readme
+    assert "traceformer-train --help" in readme
     assert "python -m unittest discover -s tests -v" in readme
     assert "python -m pytest" in readme
 
@@ -19,27 +19,27 @@ def test_root_dataset_paths_are_ignored_but_source_data_package_is_addable() -> 
     ignored = subprocess.run(["git", "check-ignore", "-q", "data/example.npz"], cwd=ROOT, check=False)
     assert ignored.returncode == 0
     source = subprocess.run(
-        ["git", "check-ignore", "-q", "src/huav/data/__init__.py"], cwd=ROOT, check=False,
+        ["git", "check-ignore", "-q", "src/traceformer/data/__init__.py"], cwd=ROOT, check=False,
     )
     assert source.returncode == 1
     tracked = subprocess.run(
-        ["git", "ls-files", "--error-unmatch", "src/huav/data/__init__.py"],
+        ["git", "ls-files", "--error-unmatch", "src/traceformer/data/__init__.py"],
         cwd=ROOT,
         check=False,
         text=True,
         capture_output=True,
     )
     assert tracked.returncode == 0
-    assert tracked.stdout.strip().replace("\\", "/") == "src/huav/data/__init__.py"
+    assert tracked.stdout.strip().replace("\\", "/") == "src/traceformer/data/__init__.py"
 
 
 def test_autodl_launcher_preflights_gpu_and_uses_unique_run_directories() -> None:
     launcher = ROOT / "scripts" / "autodl_train.sh"
     assert launcher.is_file()
     contents = launcher.read_text(encoding="utf-8")
-    assert "huav.cli.check_gpu" in contents
-    assert "huav_score_optimized_autodl_smoke.yaml" in contents
-    assert "huav_score_optimized_autodl.yaml" in contents
+    assert "traceformer.cli.check_gpu" in contents
+    assert "traceformer_score_optimized_autodl_smoke.yaml" in contents
+    assert "traceformer_score_optimized_autodl.yaml" in contents
     assert 'date +"%Y%m%d_%H%M%S"' in contents
     assert 'RUN_ROOT="$PROJECT_ROOT/smoke_outputs"' in contents
     assert 'RUN_ROOT="$PROJECT_ROOT/outputs"' in contents

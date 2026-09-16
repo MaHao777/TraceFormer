@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import torch
 
-from huav.config import ConeHeadConfig, RefinementScaleConfig
-from huav.models import SpatioTemporalConeDetector
+from traceformer.config import ConeHeadConfig, RefinementScaleConfig
+from traceformer.models import TraceFormer
 
 
-def _model() -> SpatioTemporalConeDetector:
-    return SpatioTemporalConeDetector(
+def _model() -> TraceFormer:
+    return TraceFormer(
         width=16,
         height=12,
         spatial_block_size_x=4,

@@ -3,9 +3,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "huav"
+name = "traceformer"
 version = "0.1.0"
-description = "Sparse spatiotemporal-cone event-level tiny-object detector for HUAV"
+description = "TraceFormer: a bidirectional spatiotemporal cone transformer for event-based tiny UAV detection"
 readme = "README.md"
 requires-python = ">=3.10,<3.13"
 dependencies = ["torch", "numpy", "scipy", "PyYAML", "matplotlib>=3.8"]
@@ -13,15 +13,19 @@ dependencies = ["torch", "numpy", "scipy", "PyYAML", "matplotlib>=3.8"]
 [project.optional-dependencies]
 dev = ["pytest", "ruff"]
 postprocess = ["lightgbm>=4.6,<5"]
+experiments = ["psutil>=5.9"]
+
+[project.urls]
+Repository = "https://github.com/MaHao777/TraceFormer"
 
 [project.scripts]
-huav-train = "huav.cli.train:main"
-huav-evaluate = "huav.cli.evaluate:main"
-huav-predict = "huav.cli.predict:main"
-huav-check-gpu = "huav.cli.check_gpu:main"
-huav-index-outputs = "huav.cli.index_outputs:main"
-huav-visualize = "huav.cli.visualize:main"
-huav-postprocess = "huav.cli.postprocess:main"
+traceformer-train = "traceformer.cli.train:main"
+traceformer-evaluate = "traceformer.cli.evaluate:main"
+traceformer-predict = "traceformer.cli.predict:main"
+traceformer-check-gpu = "traceformer.cli.check_gpu:main"
+traceformer-index-outputs = "traceformer.cli.index_outputs:main"
+traceformer-visualize = "traceformer.cli.visualize:main"
+traceformer-postprocess = "traceformer.cli.postprocess:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
-from huav.artifacts import (
+from traceformer.artifacts import (
     create_run_directory,
     rebuild_output_index,
     record_evaluation,
@@ -337,7 +337,7 @@ def test_concurrent_index_rebuilds_leave_one_complete_index_and_hide_lock(
 
     assert paths == [output_root / "INDEX.md", output_root / "INDEX.md"]
     index = (output_root / "INDEX.md").read_text(encoding="utf-8")
-    assert index.count("# HUAV 输出索引") == 1
+    assert index.count("# TraceFormer 输出索引") == 1
     assert index.count("cpu_20260803_213015") == 2
     assert index.count("cuda_20260803_213016") == 2
     assert ".huav-index.lock" not in index

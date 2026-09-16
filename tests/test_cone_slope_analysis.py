@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from huav.analysis.cone_slopes import (
+from traceformer.analysis.cone_slopes import (
     analyze_event_array,
     render_markdown,
     summarize_measurements,

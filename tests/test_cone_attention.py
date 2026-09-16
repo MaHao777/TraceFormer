@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import torch
 
-from huav.config import ConeHeadConfig
-from huav.models.cone_attention import BidirectionalConeAttention
-from huav.models.relative_position import RelativePositionEncoder
+from traceformer.config import ConeHeadConfig
+from traceformer.models.cone_attention import BidirectionalConeAttention
+from traceformer.models.relative_position import RelativePositionEncoder
 
 
 def _attention() -> BidirectionalConeAttention:

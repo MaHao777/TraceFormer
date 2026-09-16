@@ -7,33 +7,33 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from huav.cli.postprocess import build_parser
-from huav.postprocessing.contracts import (
+from traceformer.cli.postprocess import build_parser
+from traceformer.postprocessing.contracts import (
     EventCache,
     PostprocessProtocol,
     fold_of,
     make_internal_split,
 )
-from huav.postprocessing.direct_verifier import (
+from traceformer.postprocessing.direct_verifier import (
     apply_direct_verifier,
     direct_candidate_features,
     saturate_probability,
 )
-from huav.postprocessing.features import EVENT_FEATURE_DIM, build_event_features
-from huav.postprocessing.learning import blend_scores, convex_weights, sample_event_rows
-from huav.postprocessing.metrics import score_binary
-from huav.postprocessing.pipeline import release_event_models
-from huav.postprocessing.refinement import (
+from traceformer.postprocessing.features import EVENT_FEATURE_DIM, build_event_features
+from traceformer.postprocessing.learning import blend_scores, convex_weights, sample_event_rows
+from traceformer.postprocessing.metrics import score_binary
+from traceformer.postprocessing.pipeline import release_event_models
+from traceformer.postprocessing.refinement import (
     apply_component_model,
     component_features,
     connected_components,
 )
-from huav.postprocessing.submission import (
+from traceformer.postprocessing.submission import (
     audit_submission,
     evaluate_predictions,
     write_prediction_npz,
 )
-from huav.postprocessing.tracking import rescue_reference_tracks, track_prediction
+from traceformer.postprocessing.tracking import rescue_reference_tracks, track_prediction
 
 
 def _cache(*, labels: bool = True) -> EventCache:
@@ -304,7 +304,7 @@ def test_event_release_trains_all_cache_sequences(
         return {}, {"training_sequences": list(training_names)}
 
     monkeypatch.setattr(
-        "huav.postprocessing.pipeline.train_event_models",
+        "traceformer.postprocessing.pipeline.train_event_models",
         fake_train_event_models,
     )
     output_dir = tmp_path / "release"

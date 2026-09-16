@@ -4,12 +4,12 @@
 
 ## 环境准备
 
-代码和数据建议放在高速数据盘，例如 `/root/autodl-tmp/HUAV`：
+代码和数据建议放在高速数据盘，例如 `/root/autodl-tmp/TraceFormer`：
 
 ```bash
-cd /root/autodl-tmp/HUAV
+cd /root/autodl-tmp/TraceFormer
 python -m pip install -e ".[dev]"
-python -m huav.cli.check_gpu --device cuda
+python -m traceformer.cli.check_gpu --device cuda
 ```
 
 预检必须报告 RTX 5090、`compute_capability: 12.0`、包含 `sm_120` 的 architecture 列表和 `cuda_kernel_verified: true`。若预检失败，不要开始训练；安装 PyTorch 官方 CUDA 12.8 或更新 wheel 后重新检查。
@@ -20,7 +20,7 @@ python -m huav.cli.check_gpu --device cuda
 
 ```bash
 python scripts/check_largest_sequence.py \
-  --config configs/huav_score_optimized_autodl.yaml \
+  --config configs/traceformer_score_optimized_autodl.yaml \
   --device cuda
 ```
 
@@ -33,7 +33,7 @@ bash scripts/autodl_train.sh smoke
 训练完成后，使用 smoke 输出目录中保存的配置和权重独立复评：
 
 ```bash
-python -m huav.cli.evaluate \
+python -m traceformer.cli.evaluate \
   --config outputs/<smoke-run>/config.yaml \
   --checkpoint outputs/<smoke-run>/best.pt \
   --device cuda \
@@ -55,7 +55,7 @@ bash scripts/autodl_train.sh full
 
 ```bash
 RUN_DIR=outputs/<full-run>
-python -m huav.cli.evaluate \
+python -m traceformer.cli.evaluate \
   --config "$RUN_DIR/config.yaml" \
   --checkpoint "$RUN_DIR/best.pt" \
   --device cuda \
@@ -68,7 +68,7 @@ sha256sum "$RUN_DIR/metrics.json" "$RUN_DIR/reproduced_metrics.json"
 
 ```bash
 SUBMISSION_DIR=outputs/submission_<timestamp>
-python -m huav.cli.predict \
+python -m traceformer.cli.predict \
   --config "$RUN_DIR/config.yaml" \
   --checkpoint "$RUN_DIR/best.pt" \
   --output-dir "$SUBMISSION_DIR" \

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import torch
 
-from huav.models.sparse_mixture import SparseTokenMixture
+from traceformer.models.sparse_mixture import SparseTokenMixture
 
 
 def _module() -> SparseTokenMixture:

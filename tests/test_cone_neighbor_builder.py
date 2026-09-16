@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import torch
 
-from huav.config import ConeHeadConfig
-from huav.models.cone_neighbor_builder import ConeNeighborBuilder
+from traceformer.config import ConeHeadConfig
+from traceformer.models.cone_neighbor_builder import ConeNeighborBuilder
 
 
 def test_past_and_future_cones_obey_time_direction_and_chebyshev_radius() -> None:

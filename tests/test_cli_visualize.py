@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from huav.cli import visualize
+from traceformer.cli import visualize
 
 
 def _history() -> list[dict[str, object]]:
@@ -40,7 +40,7 @@ def _write_history(run_dir: Path, history: object) -> None:
 def test_visualize_cli_generates_one_run(tmp_path: Path, monkeypatch, capsys) -> None:
     run_dir = tmp_path / "cpu_20260808_170201"
     _write_history(run_dir, _history())
-    monkeypatch.setattr(sys, "argv", ["huav-visualize", "--run-dir", str(run_dir)])
+    monkeypatch.setattr(sys, "argv", ["traceformer-visualize", "--run-dir", str(run_dir)])
 
     visualize.main()
 
@@ -68,7 +68,7 @@ def test_visualize_cli_batch_continues_and_ignores_similar_names(
     monkeypatch.setattr(
         sys,
         "argv",
-        ["huav-visualize", "--all", "--output-root", str(output_root)],
+        ["traceformer-visualize", "--all", "--output-root", str(output_root)],
     )
 
     with pytest.raises(SystemExit) as error:
@@ -89,7 +89,7 @@ def test_visualize_cli_rejects_missing_single_run_history(
 ) -> None:
     run_dir = tmp_path / "missing"
     run_dir.mkdir()
-    monkeypatch.setattr(sys, "argv", ["huav-visualize", "--run-dir", str(run_dir)])
+    monkeypatch.setattr(sys, "argv", ["traceformer-visualize", "--run-dir", str(run_dir)])
 
     with pytest.raises(SystemExit) as error:
         visualize.main()

@@ -1,4 +1,4 @@
-"""Run forward, production loss, and backward on HUAV's largest sequence."""
+"""Run forward, production loss, and backward on TraceFormer's largest sequence."""
 
 from __future__ import annotations
 
@@ -8,9 +8,9 @@ from pathlib import Path
 
 import torch
 
-from huav.config import load_config
-from huav.data import NPZEventDataset
-from huav.training.engine import (
+from traceformer.config import load_config
+from traceformer.data import NPZEventDataset
+from traceformer.training.engine import (
     _add_sparse_mixture_losses,
     _amp_is_enabled,
     _autocast_dtype,
@@ -23,18 +23,18 @@ from huav.training.engine import (
     _sparse_mixture_weight,
     build_model,
 )
-from huav.training.losses import EventFocalDiceLoss
-from huav.training.runtime import prepare_device
-from huav.training.sampling import sample_event_indices
+from traceformer.training.losses import EventFocalDiceLoss
+from traceformer.training.runtime import prepare_device
+from traceformer.training.sampling import sample_event_indices
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Resource-check a complete HUAV sequence before full training"
+        description="Resource-check a complete TraceFormer sequence before full training"
     )
     parser.add_argument(
         "--config",
-        default="configs/huav_score_optimized_autodl.yaml",
+        default="configs/traceformer_score_optimized_autodl.yaml",
         help="training configuration",
     )
     parser.add_argument(

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from huav.visualization.training_curves import (
+from traceformer.visualization.training_curves import (
     _normalise_competition,
     render_training_curves,
 )

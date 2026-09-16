@@ -2,7 +2,7 @@
 set -euo pipefail
 
 MODE="${1:-smoke}"
-INITIAL_CHECKPOINT="${2:-${HUAV_REFINEMENT_CHECKPOINT:-}}"
+INITIAL_CHECKPOINT="${2:-${TRACEFORMER_REFINEMENT_CHECKPOINT:-}}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 
@@ -13,12 +13,12 @@ fi
 
 case "$MODE" in
   smoke)
-    CONFIG="configs/huav_score_optimized_autodl_smoke.yaml"
+    CONFIG="configs/traceformer_score_optimized_autodl_smoke.yaml"
     RUN_PREFIX="score_optimized_autodl_smoke"
     RUN_ROOT="$PROJECT_ROOT/smoke_outputs"
     ;;
   full)
-    CONFIG="configs/huav_score_optimized_autodl.yaml"
+    CONFIG="configs/traceformer_score_optimized_autodl.yaml"
     RUN_PREFIX="score_optimized_autodl_full"
     RUN_ROOT="$PROJECT_ROOT/outputs"
     ;;
@@ -29,14 +29,14 @@ case "$MODE" in
 esac
 
 cd "$PROJECT_ROOT"
-python -m huav.cli.check_gpu --device cuda --num-threads 8
+python -m traceformer.cli.check_gpu --device cuda --num-threads 8
 
 STAMP="$(date +"%Y%m%d_%H%M%S")"
 RUN_DIR="$RUN_ROOT/${RUN_PREFIX}_${STAMP}"
 LOG_PATH="$RUN_ROOT/${RUN_PREFIX}_${STAMP}.log"
 mkdir -p "$RUN_ROOT"
 
-python -m huav.cli.train \
+python -m traceformer.cli.train \
   --config "$CONFIG" \
   --initialize-refinement "$INITIAL_CHECKPOINT" \
   --device cuda \

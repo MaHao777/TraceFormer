@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def run(command: str, *args: str) -> subprocess.CompletedProcess[str]:
     env = os.environ | {"PYTHONPATH": str(ROOT / "src")}
     return subprocess.run(
-        [sys.executable, "-m", f"huav.cli.{command}", *args], cwd=ROOT,
+        [sys.executable, "-m", f"traceformer.cli.{command}", *args], cwd=ROOT,
         text=True, capture_output=True, check=False, env=env,
     )
 
@@ -29,7 +29,7 @@ def test_each_command_has_successful_help() -> None:
 
 
 def test_predict_requires_checkpoint_argument() -> None:
-    result = run("predict", "--config", "configs/huav_score_optimized.yaml")
+    result = run("predict", "--config", "configs/traceformer_score_optimized.yaml")
     assert result.returncode != 0
     assert "--checkpoint" in result.stderr
     assert "required" in result.stderr

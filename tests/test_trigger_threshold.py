@@ -6,12 +6,12 @@ import numpy as np
 import pytest
 import torch
 
-from huav.analysis.trigger_thresholds import analyze_trigger_thresholds
-from huav.data import (
+from traceformer.analysis.trigger_thresholds import analyze_trigger_thresholds
+from traceformer.data import (
     is_dense_balanced_event_stream,
     simulate_high_threshold_events,
 )
-from huav.training.losses import object_frame_threshold_consistency_loss
+from traceformer.training.losses import object_frame_threshold_consistency_loss
 
 
 def test_same_polarity_crosses_threshold_and_preserves_source_mapping() -> None:

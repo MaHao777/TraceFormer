@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import torch
 
-from huav.config import RefinementScaleConfig
-from huav.models.event_refinement import MultiScaleEventRefinementHead
+from traceformer.config import RefinementScaleConfig
+from traceformer.models.event_refinement import MultiScaleEventRefinementHead
 
 
 def _head() -> MultiScaleEventRefinementHead:

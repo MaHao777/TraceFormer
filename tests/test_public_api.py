@@ -3,10 +3,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-import huav
-from huav import NPZEventDataset, SpatioTemporalConeDetector
-from huav.data import EventSequence
-from huav.inference import (
+import traceformer
+from traceformer import NPZEventDataset, TraceFormer
+from traceformer.data import EventSequence
+from traceformer.inference import (
     SubmissionManifest,
     SubmissionRow,
     generate_submission_rows,
@@ -14,7 +14,7 @@ from huav.inference import (
     validate_submission_contract,
     write_prediction_txt,
 )
-from huav.training import EvaluationResult, Evaluator, EventMetricAccumulator, Trainer
+from traceformer.training import EvaluationResult, Evaluator, EventMetricAccumulator, Trainer
 
 
 def test_public_contracts_are_importable() -> None:
@@ -22,7 +22,7 @@ def test_public_contracts_are_importable() -> None:
         (
             EventSequence,
             NPZEventDataset,
-            SpatioTemporalConeDetector,
+            TraceFormer,
             Trainer,
             Evaluator,
             EvaluationResult,
@@ -35,8 +35,8 @@ def test_public_contracts_are_importable() -> None:
             write_prediction_txt,
         )
     )
-    assert not hasattr(huav, "DualViewEventClassifier")
-    assert not hasattr(huav, "SpatioTemporalWindowDetector")
-    assert not hasattr(huav, "EventBatch")
-    assert not hasattr(huav, "EventWindow")
-    assert not hasattr(huav, "ModelOutput")
+    assert not hasattr(traceformer, "DualViewEventClassifier")
+    assert not hasattr(traceformer, "SpatioTemporalWindowDetector")
+    assert not hasattr(traceformer, "EventBatch")
+    assert not hasattr(traceformer, "EventWindow")
+    assert not hasattr(traceformer, "ModelOutput")

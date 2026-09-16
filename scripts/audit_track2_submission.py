@@ -9,7 +9,7 @@ from pathlib import Path
 
 import numpy as np
 
-from huav.postprocessing.contracts import sha256_file
+from traceformer.postprocessing.contracts import sha256_file
 
 
 def main() -> None:

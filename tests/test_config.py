@@ -6,21 +6,21 @@ from tempfile import TemporaryDirectory
 
 import pytest
 
-from huav.config import (
+from traceformer.config import (
     FrameRefinementConfig,
-    HUAVConfig,
     ModelConfig,
     RefinementScaleConfig,
     SparseMixtureConfig,
+    TraceFormerConfig,
     load_config,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATHS = (
-    ROOT / "configs/huav_score_optimized.yaml",
-    ROOT / "configs/huav_score_optimized_smoke.yaml",
-    ROOT / "configs/huav_score_optimized_autodl.yaml",
-    ROOT / "configs/huav_score_optimized_autodl_smoke.yaml",
+    ROOT / "configs/traceformer_score_optimized.yaml",
+    ROOT / "configs/traceformer_score_optimized_smoke.yaml",
+    ROOT / "configs/traceformer_score_optimized_autodl.yaml",
+    ROOT / "configs/traceformer_score_optimized_autodl_smoke.yaml",
 )
 
 
@@ -33,7 +33,7 @@ def test_only_fixed_schema7_configs_are_shipped() -> None:
 
 
 def test_score_config_fixes_model_modules_and_refinement_stage() -> None:
-    config = load_config(ROOT / "configs/huav_score_optimized.yaml")
+    config = load_config(ROOT / "configs/traceformer_score_optimized.yaml")
 
     assert config.training.stage == "refinement"
     assert config.model.token_dim == 64
@@ -100,14 +100,14 @@ def test_runtime_variants_keep_one_model_contract() -> None:
 
 @pytest.mark.parametrize("stage", ["full", "sparse_mixture", "refinement"])
 def test_training_stage_accepts_only_explicit_fixed_model_phases(stage: str) -> None:
-    HUAVConfig(training=replace(HUAVConfig.default().training, stage=stage)).validate()
+    TraceFormerConfig(training=replace(TraceFormerConfig.default().training, stage=stage)).validate()
 
 
 def test_training_stage_rejects_boolean_or_unknown_values() -> None:
     for value in (True, "adapter", "disabled"):
         with pytest.raises(ValueError, match="training stage"):
-            HUAVConfig(
-                training=replace(HUAVConfig.default().training, stage=value)  # type: ignore[arg-type]
+            TraceFormerConfig(
+                training=replace(TraceFormerConfig.default().training, stage=value)  # type: ignore[arg-type]
             ).validate()
 
 
@@ -130,7 +130,7 @@ def test_removed_module_switches_and_legacy_augmentation_are_rejected() -> None:
 
 
 def test_refinement_requires_increasing_scales_and_fixed_primary_cell() -> None:
-    base = HUAVConfig.default()
+    base = TraceFormerConfig.default()
     invalid_scales = (
         (RefinementScaleConfig(8, 8, 50.0), RefinementScaleConfig(4, 4, 25.0)),
         (RefinementScaleConfig(4, 4, 25.0),),
@@ -144,7 +144,7 @@ def test_refinement_requires_increasing_scales_and_fixed_primary_cell() -> None:
 
 
 def test_sparse_mixture_validation_rejects_invalid_inference_gate() -> None:
-    base = HUAVConfig.default()
+    base = TraceFormerConfig.default()
     for changes in (
         {"threshold_ratio": 1.0},
         {"max_polarity_fraction": 0.49},
@@ -181,14 +181,14 @@ def test_model_config_contains_structure_not_optional_module_flags() -> None:
 
 
 def test_config_paths_resolve_relative_to_yaml() -> None:
-    config = load_config(ROOT / "configs/huav_score_optimized.yaml")
+    config = load_config(ROOT / "configs/traceformer_score_optimized.yaml")
 
     assert Path(config.dataset.root).is_absolute()
     assert Path(config.training.output_root).is_absolute()
 
 
 def test_config_overrides_are_narrow_and_validated() -> None:
-    config = HUAVConfig.default().with_overrides(
+    config = TraceFormerConfig.default().with_overrides(
         width=640,
         height=480,
         sigmoid_threshold=0.8,

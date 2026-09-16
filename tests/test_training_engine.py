@@ -11,18 +11,18 @@ import numpy as np
 import pytest
 import torch
 
-from huav.config import (
+from traceformer.config import (
     ConeHeadConfig,
     DatasetConfig,
     FrameRefinementConfig,
-    HUAVConfig,
     ModelConfig,
     RefinementScaleConfig,
+    TraceFormerConfig,
     TrainingConfig,
 )
-from huav.data import LoadedEventSequence
-from huav.models import SpatioTemporalConeDetector
-from huav.training.engine import (
+from traceformer.data import LoadedEventSequence
+from traceformer.models import TraceFormer
+from traceformer.training.engine import (
     _amp_is_enabled,
     _autocast_dtype,
     _dense_sequence_loss_weight,
@@ -35,7 +35,7 @@ from huav.training.engine import (
     evaluate_checkpoint,
     run_training,
 )
-from huav.training.losses import EventFocalDiceLoss
+from traceformer.training.losses import EventFocalDiceLoss
 
 
 def _write_sequence(path: Path, offset: int) -> None:
@@ -102,10 +102,10 @@ def _write_sparse_mixture_sequence(path: Path) -> None:
     np.savez(path, ev=np.array(rows, dtype=dtype))
 
 
-def _config(data_root: Path, output_root: Path) -> HUAVConfig:
+def _config(data_root: Path, output_root: Path) -> TraceFormerConfig:
     return replace(
-        HUAVConfig.default(),
-        resolution=replace(HUAVConfig.default().resolution, width=8, height=6),
+        TraceFormerConfig.default(),
+        resolution=replace(TraceFormerConfig.default().resolution, width=8, height=6),
         dataset=DatasetConfig(
             root=Path(os.path.relpath(data_root, Path.cwd())), duration_ms=8000
         ),
@@ -139,7 +139,7 @@ def _config(data_root: Path, output_root: Path) -> HUAVConfig:
             max_val_files=None,
         ),
         loss=replace(
-            HUAVConfig.default().loss,
+            TraceFormerConfig.default().loss,
             lambda_false_alarm=0.05,
         ),
     ).validate()
@@ -357,7 +357,7 @@ def test_training_curve_failure_warns_without_aborting_training(
             raise OSError("plot filesystem unavailable")
 
         monkeypatch.setattr(
-            "huav.training.engine.render_training_curves", fail_render
+            "traceformer.training.engine.render_training_curves", fail_render
         )
         summary = run_training(
             _config(data_root, temporary_root / "outputs"),
@@ -458,7 +458,7 @@ def test_training_primary_exception_survives_bookkeeping_failure(
         temporary_root = Path(directory)
         config = _config(temporary_root / "missing", temporary_root / "outputs")
         monkeypatch.setattr(
-            "huav.training.engine.record_run_finished",
+            "traceformer.training.engine.record_run_finished",
             lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("bookkeeping failed")),
         )
 
@@ -475,11 +475,11 @@ def test_training_success_reports_bookkeeping_failure(
         temporary_root = Path(directory)
         config = _config(temporary_root / "data", temporary_root / "outputs")
         monkeypatch.setattr(
-            "huav.training.engine._run_training_impl",
+            "traceformer.training.engine._run_training_impl",
             lambda *args, **kwargs: {"run_dir": str(temporary_root / "outputs" / "run")},
         )
         monkeypatch.setattr(
-            "huav.training.engine.record_run_finished",
+            "traceformer.training.engine.record_run_finished",
             lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("bookkeeping failed")),
         )
 
@@ -621,9 +621,9 @@ def test_threshold_selection_prefers_official_score_over_event_iou() -> None:
         source_path=Path("synthetic.npz"),
     )
     config = replace(
-        HUAVConfig.default(),
+        TraceFormerConfig.default(),
         resolution=replace(
-            HUAVConfig.default().resolution,
+            TraceFormerConfig.default().resolution,
             width=1000,
             height=1000,
         ),
@@ -642,9 +642,9 @@ def test_threshold_selection_prefers_official_score_over_event_iou() -> None:
 
 def test_dense_balanced_polarity_sequences_receive_configured_loss_weight() -> None:
     config = replace(
-        HUAVConfig.default(),
+        TraceFormerConfig.default(),
         training=replace(
-            HUAVConfig.default().training,
+            TraceFormerConfig.default().training,
             dense_sequence_event_threshold=5,
             dense_sequence_background_polarity_max=0.6,
             dense_sequence_weight=3.0,
@@ -668,7 +668,7 @@ def test_dense_balanced_polarity_sequences_receive_configured_loss_weight() -> N
 
 
 def test_sparse_mixture_schedule_holds_router_then_ramps() -> None:
-    base = HUAVConfig.default()
+    base = TraceFormerConfig.default()
     config = replace(
         base,
         sparse_mixture=replace(
@@ -734,11 +734,11 @@ def test_training_forwards_all_events_before_sampling_loss(
 ) -> None:
     model_event_counts: list[int] = []
     loss_event_counts: list[int] = []
-    original_model_forward = SpatioTemporalConeDetector.forward
+    original_model_forward = TraceFormer.forward
     original_loss_forward = EventFocalDiceLoss.forward
 
     def record_model_forward(
-        self: SpatioTemporalConeDetector,
+        self: TraceFormer,
         events: torch.Tensor,
         batch_indices: torch.Tensor | None = None,
     ) -> dict[str, object]:
@@ -761,7 +761,7 @@ def test_training_forwards_all_events_before_sampling_loss(
             **kwargs,
         )
 
-    monkeypatch.setattr(SpatioTemporalConeDetector, "forward", record_model_forward)
+    monkeypatch.setattr(TraceFormer, "forward", record_model_forward)
     monkeypatch.setattr(EventFocalDiceLoss, "forward", record_loss_forward)
     with TemporaryDirectory(dir=Path.cwd()) as directory:
         temporary_root = Path(directory)

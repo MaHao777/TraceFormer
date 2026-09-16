@@ -28,3 +28,17 @@ dist/
 *.egg-info/
 .venv/
 venv/
+
+# 本地检查、编辑器和凭据文件不进入版本库。
+/tmp/
+/.tmp_pytest/
+/.vscode/
+/.idea/
+.env
+.env.*
+!.env.example
+*.log
+*.tmp
+*.swp
+Thumbs.db
+.DS_Store

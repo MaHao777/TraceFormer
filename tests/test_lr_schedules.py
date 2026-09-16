@@ -4,8 +4,8 @@ from dataclasses import replace
 
 import pytest
 
-from huav.config import TrainingConfig
-from huav.training.lr_schedules import LearningRateController
+from traceformer.config import TrainingConfig
+from traceformer.training.lr_schedules import LearningRateController
 
 
 def _config(schedule: str, **overrides: object) -> TrainingConfig:
