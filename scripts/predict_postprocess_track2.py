@@ -14,6 +14,8 @@ import torch
 
 from traceformer.config import load_config
 from traceformer.data import NPZEventDataset
+from traceformer.gpu.runtime import add_backend_arguments, validate_backends
+from traceformer.models.gpu_neighbors import configure_neighbor_backend
 from traceformer.postprocessing.contracts import EventCache, density_group, sha256_file
 from traceformer.postprocessing.direct_verifier import (
     apply_direct_verifier,
@@ -21,7 +23,12 @@ from traceformer.postprocessing.direct_verifier import (
     event_branches,
     load_direct_verifier,
 )
-from traceformer.postprocessing.learning import load_event_models, predict_event_scores
+from traceformer.postprocessing.learning import (
+    load_event_models,
+    positive_prediction_threads,
+    predict_event_scores,
+    required_event_models,
+)
 from traceformer.postprocessing.submission import load_prediction
 from traceformer.postprocessing.tracking import rescue_reference_tracks
 from traceformer.training.engine import build_model, forward_with_sparse_mixture
@@ -106,7 +113,21 @@ def _validation_gate(
     return gate
 
 
-def main() -> None:
+def _apply_optional_direct_verifier(
+    cache, direct_probability, tracked, direct, model, threshold, *, group, event_only
+):
+    # 恒等分支不构造候选特征；dense 原验证器规则同样直接保留事件掩码。
+    if event_only or group == "dense":
+        return tracked | direct, None
+    candidates = direct_candidate_features(
+        cache, direct_probability, tracked, direct, include_targets=False
+    )
+    return apply_direct_verifier(
+        candidates, tracked, direct, model, threshold, density_group=group
+    ), candidates
+
+
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="使用原模型与事件级后处理生成Track 2测试集提交"
     )
@@ -126,7 +147,17 @@ def main() -> None:
     parser.add_argument("--baseline-validation-report", type=Path, required=True)
     parser.add_argument("--test-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--prediction-threads", type=positive_prediction_threads, default=8)
+    parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
+    add_backend_arguments(parser, neural=True, trees=True)
+    return parser
+
+
+def main() -> None:
+    parser = build_parser()
     arguments = parser.parse_args()
+    validate_backends(device=arguments.device, neighbor_backend=arguments.neighbor_backend,
+        prediction_backend=arguments.prediction_backend, feature_backend=arguments.feature_backend)
 
     config = load_config(arguments.config)
     checkpoint = torch.load(arguments.checkpoint, map_location="cpu", weights_only=False)
@@ -216,12 +247,14 @@ def main() -> None:
         ):
             raise ValueError("validation report does not match the direct verifier")
 
-    model = build_model(config)
+    model = build_model(config).to(arguments.device)
     load_result = model.load_state_dict(checkpoint["model_state"], strict=True)
     if load_result.missing_keys or load_result.unexpected_keys:
         raise RuntimeError("checkpoint did not strict-load")
     model.eval()
-    event_models = load_event_models(model_dir)
+    configure_neighbor_backend(model, arguments.neighbor_backend)
+    event_models = load_event_models(model_dir, names=required_event_models(event_contract),
+                                    backend=arguments.prediction_backend)
     dataset = NPZEventDataset(
         arguments.test_dir,
         width=config.resolution.width,
@@ -241,8 +274,8 @@ def main() -> None:
     with torch.inference_mode():
         for index in range(len(dataset)):
             sequence = dataset[index]
-            events = sequence.events
-            batch_indices = torch.zeros(len(events), dtype=torch.long)
+            events = sequence.events.to(arguments.device)
+            batch_indices = torch.zeros(len(events), dtype=torch.long, device=events.device)
             output, sparse_view = forward_with_sparse_mixture(
                 model,
                 sequence,
@@ -250,6 +283,7 @@ def main() -> None:
                 batch_indices,
                 config,
                 mixture_weight=1.0,
+                compute_sparse_logits=False,
             )
             with np.load(sequence.source_path, allow_pickle=False) as archive:
                 locations = archive["ev_loc"].astype(np.int64, copy=True)
@@ -273,31 +307,19 @@ def main() -> None:
                 labels=None,
                 target_ids=None,
             )
-            scores = predict_event_scores(cache, event_models)
+            scores = predict_event_scores(
+                cache, event_models, num_threads=arguments.prediction_threads,
+                feature_backend=arguments.feature_backend,
+            )
             group, density = density_group(cache.locations)
             _, direct_probability, tracked, direct = event_branches(
                 cache, scores, event_contract
             )
             event_prediction = tracked | direct
-            candidate_batch = direct_candidate_features(
-                cache,
-                direct_probability,
-                tracked,
-                direct,
-                include_targets=False,
+            prediction, candidate_batch = _apply_optional_direct_verifier(
+                cache, direct_probability, tracked, direct, verifier_model, verifier_threshold,
+                group=group, event_only=arguments.event_only,
             )
-            if arguments.event_only:
-                # 未通过开发门槛的直接验证器不能进入正式测试预测。
-                prediction = event_prediction
-            else:
-                prediction = apply_direct_verifier(
-                    candidate_batch,
-                    tracked,
-                    direct,
-                    verifier_model,
-                    verifier_threshold,
-                    density_group=group,
-                )
             reference_prediction = _load_named_prediction(
                 arguments.reference_prediction_dir,
                 sequence.source_path.name,
@@ -326,7 +348,10 @@ def main() -> None:
                     "events_per_frame": density,
                     "sparse_view": sparse_view is not None,
                     "direct_gate": {
-                        "candidate_components": int(len(candidate_batch.features)),
+                        "executed": candidate_batch is not None,
+                        "candidate_components": (
+                            int(len(candidate_batch.features)) if candidate_batch is not None else 0
+                        ),
                         "candidate_events": int(np.sum(direct & ~tracked)),
                         "deleted_events": int(np.sum(event_prediction & ~prediction)),
                     },
@@ -373,6 +398,12 @@ def main() -> None:
         "event_release_report": str(release_report_path.resolve()),
         "event_release_report_sha256": sha256_file(release_report_path),
         "event_model_sha256": release_report["event_model_sha256"],
+        "prediction_threads": arguments.prediction_threads,
+        "device": arguments.device,
+        "neighbor_backend": arguments.neighbor_backend,
+        "prediction_backend": arguments.prediction_backend,
+        "feature_backend": arguments.feature_backend,
+        "active_event_models": list(event_models),
         "event_release_training_files": release_report["training_files"],
         "direct_verifier_report": (
             str(verifier_report_path.resolve()) if verifier_report_path else None

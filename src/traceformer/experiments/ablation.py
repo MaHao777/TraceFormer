@@ -10,7 +10,9 @@ import torch
 from torch import nn
 
 from traceformer.config import TraceFormerConfig
+from traceformer.experiments.pooling import PoolingTokenizer
 from traceformer.models.cone_attention import BidirectionalConeAttention, ConeAttentionOutput
+from traceformer.models.cone_neighbor_builder import ConeGeometryContext
 from traceformer.models.event_refinement import EventRefinementOutput
 from traceformer.models.spatiotemporal_cone import TraceFormer
 
@@ -21,6 +23,14 @@ class AblationSpec:
     sparse: bool = True
     refinement: str = "multiscale"
     version: int = 1
+    pooling: str = "attention"
+
+    def to_dict(self) -> dict:
+        # 默认 attention 沿用旧契约，历史消融权重无需改写。
+        result = asdict(self)
+        if self.pooling == "attention":
+            del result["pooling"]
+        return result
 
     def validate(self) -> AblationSpec:
         if self.backbone not in {"cone", "window", "past", "no_position"}:
@@ -29,6 +39,10 @@ class AblationSpec:
             raise ValueError("unknown ablation refinement")
         if type(self.sparse) is not bool or self.version != 1:
             raise ValueError("unsupported ablation contract")
+        if self.pooling not in {"attention", "mean", "statistics"}:
+            raise ValueError("unknown token pooling")
+        if self.pooling != "attention" and (self.backbone != "cone" or self.sparse or self.refinement != "none"):
+            raise ValueError("pooling ablation requires cone backbone without Sparse/refinement")
         return self
 
     def validate_stage(self, stage: str) -> None:
@@ -64,11 +78,15 @@ class ZeroPositionBias(nn.Module):
 
 class PastOnlyAttention(BidirectionalConeAttention):
     def forward(
-        self, tokens: torch.Tensor, token_coords: torch.Tensor, token_batch_indices: torch.Tensor
+        self, tokens: torch.Tensor, token_coords: torch.Tensor, token_batch_indices: torch.Tensor,
+        *, geometry: ConeGeometryContext | None = None,
     ) -> ConeAttentionOutput:
         if len(tokens) == 0:
             return ConeAttentionOutput(tokens)
-        neighborhoods = self.neighbor_builder(token_coords, token_batch_indices)
+        # 单方向消融沿用 Encoder 在本次前向准备的几何索引。
+        neighborhoods = self.neighbor_builder(
+            token_coords, token_batch_indices, geometry=geometry
+        )
         past, _ = self._attend_direction(
             query=self._reshape_heads(self.query_projection(tokens)),
             key=self._reshape_heads(self.key_projection(tokens)),
@@ -83,7 +101,9 @@ class PastOnlyAttention(BidirectionalConeAttention):
 
 def apply_ablation(model: TraceFormer, config: TraceFormerConfig, spec: AblationSpec) -> TraceFormer:
     spec.validate()
-    model.ablation_spec = asdict(spec)
+    model.ablation_spec = spec.to_dict()
+    if spec.pooling != "attention":
+        model.tokenizer = PoolingTokenizer.from_attention(model.tokenizer, spec.pooling)
     if not spec.sparse:
         model.sparse_mixture = NoSparse()
     if spec.refinement == "none":

@@ -179,13 +179,52 @@ def train_event_models(
     return boosters, report
 
 
-def load_event_models(model_dir: str | Path, *, prefix: str = "") -> dict[str, Any]:
+def required_event_models(contract: dict[str, Any]) -> tuple[str, ...]:
+    """只选择 direct 或 track 融合中实际参与决策的树模型。"""
+
+    return tuple(
+        name
+        for index, name in enumerate(("small", "large"))
+        if any(contract[key][index] != 0 for key in ("direct_weights", "track_weights"))
+    )
+
+
+def positive_prediction_threads(value: str) -> int:
+    """CLI 线程数必须为正整数，禁止 LightGBM 隐式使用全部线程。"""
+
+    threads = int(value)
+    if threads <= 0:
+        raise ValueError("prediction threads must be a positive integer")
+    return threads
+
+
+def load_event_models(
+    model_dir: str | Path,
+    *,
+    prefix: str = "",
+    names: Iterable[str] = ("small", "large"),
+    backend: str = "cpu",
+    device: str = "cuda",
+) -> dict[str, Any]:
+    if backend not in {"cpu", "cuda"}:
+        raise ValueError("prediction backend must be cpu or cuda")
+    names = tuple(names)
+    if any(name not in ("small", "large") for name in names):
+        raise ValueError("event model names must be small or large")
+    # 纯 base 配置无需加载树模型，也无需导入 LightGBM。
+    if not names:
+        return {}
     lgb = require_lightgbm()
     model_dir = Path(model_dir)
-    return {
+    models = {
         size: lgb.Booster(model_file=str(model_dir / f"{prefix}{size}.txt"))
-        for size in ("small", "large")
+        for size in names
     }
+    if backend == "cuda":
+        from .gpu import CudaEventModel
+
+        models = {name: CudaEventModel(model, device=device) for name, model in models.items()}
+    return models
 
 
 def predict_event_scores(
@@ -193,17 +232,40 @@ def predict_event_scores(
     boosters: dict[str, Any],
     *,
     chunk_size: int = 200_000,
+    num_threads: int = 1,
+    feature_backend: str = "cpu",
 ) -> dict[str, np.ndarray]:
     """分块展开事件特征，控制密集序列峰值内存。"""
 
-    context = make_context(cache.locations, cache.base_probability)
+    if isinstance(num_threads, bool) or not isinstance(num_threads, int) or num_threads <= 0:
+        raise ValueError("num_threads must be a positive integer")
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
+    if feature_backend not in {"cpu", "cuda"}:
+        raise ValueError("feature backend must be cpu or cuda")
+    # 无树模型时跳过上下文和事件特征构造。
+    if not boosters:
+        return {}
+    if feature_backend == "cuda":
+        from .gpu import CudaEventFeatures, CudaEventModel
+
+        if not all(isinstance(model, CudaEventModel) for model in boosters.values()):
+            raise ValueError("CUDA features require CUDA event trees")
+        context = CudaEventFeatures(cache, device=next(iter(boosters.values())).device)
+    else:
+        context = make_context(cache.locations, cache.base_probability)
     scores = {name: np.empty(len(cache.locations), dtype=np.float32) for name in boosters}
     for start in range(0, len(cache.locations), chunk_size):
         stop = min(start + chunk_size, len(cache.locations))
-        rows = np.arange(start, stop, dtype=np.int64)
-        features = build_event_features(cache, indices=rows, context=context)
+        if feature_backend == "cuda":
+            features = context.rows(start, stop)
+        else:
+            rows = np.arange(start, stop, dtype=np.int64)
+            features = build_event_features(cache, indices=rows, context=context)
         for name, booster in boosters.items():
-            scores[name][start:stop] = booster.predict(features, num_threads=1).astype(np.float32)
+            scores[name][start:stop] = booster.predict(
+                features, num_threads=num_threads
+            ).astype(np.float32)
     return scores
 
 
@@ -272,8 +334,14 @@ def convex_weights(step: float) -> list[tuple[float, float, float]]:
 
 def blend_scores(
     base: np.ndarray,
-    small: np.ndarray,
-    large: np.ndarray,
+    small: np.ndarray | None,
+    large: np.ndarray | None,
     weights: tuple[float, float, float],
 ) -> np.ndarray:
-    return (weights[0] * small + weights[1] * large + weights[2] * base).astype(np.float32)
+    terms = []
+    for name, score, weight in zip(("small", "large"), (small, large), weights[:2]):
+        if score is None and weight != 0:
+            raise ValueError(f"missing nonzero-weight event scores: {name}")
+        # 以零标量补齐缺失项，保留原来的 small + large + base 运算顺序。
+        terms.append(np.float32(0) if score is None else weight * score)
+    return (terms[0] + terms[1] + weights[2] * base).astype(np.float32)

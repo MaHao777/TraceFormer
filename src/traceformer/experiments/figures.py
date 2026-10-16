@@ -33,7 +33,7 @@ def select_windows(config: TraceFormerConfig, root: Path) -> None:
 def render_figures(root: Path, seed: int) -> None:
     suite = json.loads((root / "suite.json").read_text(encoding="utf-8"))
     config = load_config(suite["jobs"][0]["config"])
-    variants = ["A0", "A1", "A3", "A7"]
+    variants = suite.get("figure_variants", ["A0", "A1", "A3", "A7"])
     paths = {}
     for job in suite["jobs"]:
         if job["seed"] != seed or job["result_id"] not in variants:
@@ -48,7 +48,8 @@ def render_figures(root: Path, seed: int) -> None:
     windows = json.loads((root / "visualization_windows.json").read_text(encoding="utf-8"))
     dataset = _dataset(config, "val")
     selected = {p.stem: i for i, p in enumerate(dataset.files)}
-    fig, axes = plt.subplots(len(windows), 5, figsize=(16, 3.2 * len(windows)), squeeze=False)
+    columns = len(variants) + 1
+    fig, axes = plt.subplots(len(windows), columns, figsize=(3.2 * columns, 3.2 * len(windows)), squeeze=False)
     for row, window in enumerate(windows):
         name = window["sequence"]
         sequence = dataset[selected[name]]

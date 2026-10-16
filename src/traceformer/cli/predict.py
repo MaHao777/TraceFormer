@@ -11,6 +11,7 @@ from traceformer.artifacts import (
     resolve_submission_output,
 )
 from traceformer.config import load_config
+from traceformer.gpu.runtime import add_backend_arguments
 from traceformer.training.engine import generate_submission_package
 
 
@@ -44,6 +45,7 @@ def main() -> None:
         action="store_true",
         help="hide per-file progress messages",
     )
+    add_backend_arguments(parser, neural=True)
     arguments = parser.parse_args()
     checkpoint_path = Path(arguments.checkpoint)
     output_dir = resolve_submission_output(checkpoint_path, arguments.output_dir)
@@ -54,6 +56,7 @@ def main() -> None:
             output_dir,
             device=arguments.device,
             progress=not arguments.quiet,
+            neighbor_backend=arguments.neighbor_backend,
         )
     except (OSError, RuntimeError, ValueError) as error:
         parser.error(str(error))

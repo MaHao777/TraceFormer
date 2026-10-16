@@ -296,7 +296,7 @@ def _initialize_ablation_stage(
     )
     if source.get("schema_version") != CHECKPOINT_SCHEMA_VERSION:
         raise ValueError("unsupported ablation source schema")
-    if source.get("ablation") != asdict(expected_source):
+    if source.get("ablation") != expected_source.to_dict():
         raise ValueError("ablation upstream structure mismatch")
     expected_stage = "sparse_mixture" if expected_source.sparse else "full"
     if source.get("training_stage") != expected_stage:
@@ -365,7 +365,7 @@ def _validate_checkpoint_contract(
     """统一校验 schema-7 推理与恢复契约。"""
 
     # 即使张量形状相同，也不能把窗口/单向实验权重当作正式模型加载。
-    expected_ablation = asdict(ablation) if ablation is not None else None
+    expected_ablation = ablation.to_dict() if ablation is not None else None
     if checkpoint.get("ablation") != expected_ablation:
         raise ValueError("checkpoint ablation contract does not match")
     if checkpoint.get("schema_version") != CHECKPOINT_SCHEMA_VERSION:
@@ -556,6 +556,7 @@ def _forward_with_sparse_mixture(
     config: TraceFormerConfig,
     *,
     mixture_weight: float,
+    compute_sparse_logits: bool = True,
 ) -> tuple[dict[str, Any], HighThresholdView | None]:
     """Create the deterministic paired view and preserve full-event decoding."""
 
@@ -587,6 +588,7 @@ def _forward_with_sparse_mixture(
         sparse_batch_indices=sparse_batch_indices,
         sparse_source_indices=sparse_source_indices,
         mixture_weight=mixture_weight,
+        compute_sparse_logits=compute_sparse_logits,
     )
     return output, view
 
@@ -599,6 +601,7 @@ def forward_with_sparse_mixture(
     config: TraceFormerConfig,
     *,
     mixture_weight: float = 1.0,
+    compute_sparse_logits: bool = True,
 ) -> tuple[dict[str, Any], HighThresholdView | None]:
     """复用训练和评估中的稀疏混合推理路径。"""
 
@@ -609,6 +612,7 @@ def forward_with_sparse_mixture(
         batch_indices,
         config,
         mixture_weight=mixture_weight,
+        compute_sparse_logits=compute_sparse_logits,
     )
 
 
@@ -617,6 +621,7 @@ def load_inference_model(
     checkpoint_path: str | Path,
     *,
     device: torch.device,
+    neighbor_backend: str = "cpu",
 ) -> tuple[TraceFormer, dict[str, Any]]:
     """严格校验检查点契约并构建只读推理模型。"""
 
@@ -628,6 +633,9 @@ def load_inference_model(
     model = build_model(config).to(device)
     model.load_state_dict(checkpoint["model_state"], strict=True)
     model.eval()
+    from traceformer.models.gpu_neighbors import configure_neighbor_backend
+
+    configure_neighbor_backend(model, neighbor_backend)
     return model, checkpoint
 
 def _sparse_mixture_auxiliary_losses(
@@ -1265,7 +1273,7 @@ def _run_training_impl(
     validation_manifest_digest = _manifest_identity_digest(validation_manifest)
     _write_json(run_dir / "dataset_manifest.json", manifest)
     if ablation is not None:
-        _write_json(run_dir / "ablation.json", asdict(ablation))
+        _write_json(run_dir / "ablation.json", ablation.to_dict())
     model = build_model(config, ablation=ablation).to(torch_device)
     initialization: dict[str, Any] | None = None
     initialization_paths = (
@@ -1654,7 +1662,7 @@ def _run_training_impl(
                 "resolution": configuration["resolution"],
                 "validation_manifest_sha256": validation_manifest_digest,
                 "full_initialization": initialization,
-                "ablation": asdict(ablation) if ablation is not None else None,
+                "ablation": ablation.to_dict() if ablation is not None else None,
                 "training_seed": config.training.seed,
                 "training_stage": config.training.stage,
                 "duration_ms": config.dataset.duration_ms,
@@ -1815,7 +1823,12 @@ def evaluate_checkpoint(
     device: str = "cpu",
     progress: bool = False,
     ablation: AblationSpec | None = None,
+    neighbor_backend: str = "cpu",
 ) -> dict[str, Any]:
+    from traceformer.gpu.runtime import validate_backends
+    from traceformer.models.gpu_neighbors import configure_neighbor_backend
+
+    validate_backends(device=device, neighbor_backend=neighbor_backend)
     config.validate()
     runtime = prepare_device(device, num_threads=config.training.num_threads)
     torch_device = runtime.device
@@ -1830,6 +1843,7 @@ def evaluate_checkpoint(
     if checkpoint.get("validation_manifest_sha256") != actual_validation_digest:
         raise ValueError("checkpoint validation dataset manifest does not match current data")
     model = build_model(config, ablation=ablation).to(torch_device)
+    configure_neighbor_backend(model, neighbor_backend)
     model.load_state_dict(checkpoint["model_state"])
     threshold = checkpoint.get("decision_threshold")
     return evaluate_model(
@@ -1865,6 +1879,7 @@ def generate_submission_package(
     *,
     device: str = "cpu",
     progress: bool = False,
+    neighbor_backend: str = "cpu",
 ) -> Path:
     """Load a trained checkpoint and produce a competition-ready submission ZIP.
 
@@ -1878,6 +1893,10 @@ def generate_submission_package(
 
     Returns the path of the created ZIP archive.
     """
+    from traceformer.gpu.runtime import validate_backends
+    from traceformer.models.gpu_neighbors import configure_neighbor_backend
+
+    validate_backends(device=device, neighbor_backend=neighbor_backend)
     config.validate()
     runtime = prepare_device(device, num_threads=config.training.num_threads)
     torch_device = runtime.device
@@ -1893,6 +1912,7 @@ def generate_submission_package(
         raise ValueError("checkpoint validation dataset manifest does not match current data")
     model = build_model(config).to(torch_device)
     model.load_state_dict(checkpoint["model_state"])
+    configure_neighbor_backend(model, neighbor_backend)
     threshold = float(checkpoint.get("decision_threshold", config.inference.sigmoid_threshold))
     model.eval()
 
@@ -1913,6 +1933,7 @@ def generate_submission_package(
                 batch_indices,
                 config,
                 mixture_weight=1.0,
+                compute_sparse_logits=False,
             )
         logits = output["event_logits"].detach().cpu()
         event_sequence = _loaded_to_event_sequence(sequence, config)

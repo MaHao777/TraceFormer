@@ -1,5 +1,45 @@
 # TraceFormer 核心消融（CPU）
 
+## 2026-09-18 Pool attention 编码消融
+
+固定时空锥主干，关闭 Sparse 和精修，使用 seed 37、99/24 文件、18 轮 CPU FP32、14 线程。
+
+|ID|编码|训练来源|
+|---|---|---|
+|T0|七维统计特征 → 7→64→64 MLP|从头训练|
+|T1|原逐事件 MLP + value 投影 → 块内算术平均 → 64→192→64 MLP|从头训练|
+|T2|原逐事件 MLP + 四查询 Attention pooling|复用 E1 已完成的 18 轮训练，先用当前运行时重新独立复评|
+
+三组保留相同的七维统计直连、位置编码、token/事件映射及事件解码器局部输入。
+T0 测试的是 token 编码仅使用统计描述，并非删除整个网络的逐事件信息。
+删除各替代方案中不用的 attention 参数；T1 使用实际参与计算的宽 MLP，152,010 参数与 T2 的 151,882 近似匹配（差 0.084%），T0 为 122,762 参数。
+T1−T0 检验学习逐事件表示的整体方案（包含容量差异）；T2−T1 在近似同参数量下检验注意力聚合相对平均池化的收益。FLOPs 不宣称匹配。
+比较采用相同 checkpoint/阈值选择规则，并同时报告固定阈值 0.5、完整 24 文件、困难域和逐文件结果。
+
+```powershell
+python scripts/run_paper_ablation.py --prepare-pooling-from outputs/paper_ablation_simple_cpu_20260917_231507 --suite outputs/paper_pooling_cpu_YYYYMMDD_HHMMSS
+python scripts/run_paper_ablation.py --suite outputs/paper_pooling_cpu_YYYYMMDD_HHMMSS
+```
+
+新队列先独立复评 T2，复现失败立即停止；随后串行训练 T0/T1，各自独立复评后生成表格和三组固定片段图。
+源码快照、实验契约、配置哈希、每轮完整恢复状态与旧队列隔离。正式配置及已有实验权重不改写。
+
+## 2026-09-17 精简执行方案
+
+采用单种子 37 的四组递增对照：E0 固定窗口主干、E1 时空锥主干、E2 主干+Sparse、E3 主干+Sparse+精修。
+复用 2026-09-15 队列中已经完整训练和独立复评的 B、BS，仅补跑 window_B 18 轮和 BSR 24 轮。
+BR 的 19 轮断点保留为补充记录，不继续训练；原 42 阶段队列保持暂停。
+
+```powershell
+python scripts/run_paper_ablation.py --prepare-simple-from outputs/paper_ablation_cpu_20260915_235356 --suite outputs/paper_ablation_simple_cpu_YYYYMMDD_HHMMSS
+python scripts/run_paper_ablation.py --suite outputs/paper_ablation_simple_cpu_YYYYMMDD_HHMMSS
+```
+
+准备时校验相同训练/模型代码、数据清单哈希、权重哈希、同种子上游关系及已保存的完整复评结果。
+新目录中只保存对旧完成产物的引用，不修改旧实验目录。
+结果按 E1-E0、E2-E1、E3-E2 汇总；只论证逐步添加的贡献，不论证模块交互或多种子稳定性。
+新队列全部完成后自动生成四组表格和固定片段的可视化。
+
 ## 实验契约
 
 99 个训练文件、24 个验证文件；随机种子 37/73/101，CPU FP32、14 线程。

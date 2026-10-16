@@ -5,15 +5,26 @@ from __future__ import annotations
 import csv
 import io
 import json
+import shutil
 import statistics
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
+import torch
 import yaml
 
-from traceformer.config import TraceFormerConfig
+from traceformer.config import TraceFormerConfig, load_config
 from traceformer.experiments.ablation import AblationSpec
-from traceformer.training.engine import _atomic_write_text, _file_sha256, _serializable, _write_json
+from traceformer.training.engine import (
+    _atomic_write_text,
+    _dataset,
+    _dataset_manifest,
+    _file_sha256,
+    _manifest_identity_digest,
+    _serializable,
+    _validate_checkpoint_contract,
+    _write_json,
+)
 
 
 @dataclass(frozen=True)
@@ -54,7 +65,83 @@ def job_config(base: TraceFormerConfig, job: Job, seed: int, output: Path) -> Tr
     )).validate()
 
 
-def prepare_suite(base: TraceFormerConfig, root: Path, seeds: list[int]) -> dict:
+def simple_stage_jobs() -> list[Job]:
+    # E1/E2 复用，队列只补训固定窗口主干和完整网络精修。
+    return [
+        Job("B", "full", AblationSpec(sparse=False, refinement="none"), None, "E1"),
+        Job("BS", "sparse_mixture", AblationSpec(refinement="none"), "B", "E2"),
+        Job("window_B", "full", AblationSpec("window", False, "none"), None, "E0"),
+        Job("BSR", "refinement", AblationSpec(), "BS", "E3"),
+    ]
+
+
+def pooling_stage_jobs() -> list[Job]:
+    # 先用新运行时复评历史 attention 基线，再从头训练两组编码替代方案。
+    return [
+        Job("attention_B", "full", AblationSpec(sparse=False, refinement="none"), None, "T2"),
+        Job("statistics_B", "full", AblationSpec(sparse=False, refinement="none", pooling="statistics"), None, "T0"),
+        Job("mean_B", "full", AblationSpec(sparse=False, refinement="none", pooling="mean"), None, "T1"),
+    ]
+
+
+def prepare_pooling_suite(source: Path, root: Path) -> dict:
+    """锁定同协议 attention checkpoint；新队列必须重新复评才能完成基线。"""
+    source = source.resolve()
+    original = json.loads((source / "suite.json").read_text(encoding="utf-8"))
+    job = next(j for j in original["jobs"] if j["id"] == "seed37/B")
+    if _file_sha256(Path(job["config"])) != job["config_sha256"]:
+        raise ValueError("pooling baseline config hash mismatch")
+    base = load_config(job["config"])
+    expected = job_config(base, pooling_stage_jobs()[0], 37, base.training.output_root)
+    if base != expected or base.training.max_train_files is not None or base.training.max_val_files is not None:
+        raise ValueError("pooling baseline training protocol mismatch")
+    train, val = _dataset(base, "train"), _dataset(base, "val")
+    if len(train) != 99 or len(val) != 24:
+        raise ValueError("pooling ablation requires 99 train / 24 validation files")
+    done = json.loads((source / "seed37/B/done.json").read_text(encoding="utf-8"))
+    checkpoint = Path(done["checkpoint"])
+    if _file_sha256(checkpoint) != done["sha256"]:
+        raise ValueError("pooling baseline checkpoint changed")
+    saved = torch.load(checkpoint, map_location="cpu", weights_only=True)
+    _validate_checkpoint_contract(saved, base, ablation=pooling_stage_jobs()[0].spec)
+    if saved.get("training_seed") != 37 or saved.get("training_stage") != "full":
+        raise ValueError("pooling baseline seed/stage mismatch")
+    if saved["dataset_manifest_sha256"] != _manifest_identity_digest(_dataset_manifest(train, val)):
+        raise ValueError("pooling baseline dataset changed")
+    run = checkpoint.parent
+    history = json.loads((run / "history.json").read_text(encoding="utf-8"))
+    report = json.loads(Path(done["report"]).read_text(encoding="utf-8"))
+    metrics = json.loads((run / "metrics.json").read_text(encoding="utf-8"))
+    if len(history) != 18 or report["metrics"] != metrics or metrics != json.loads(
+        (run / "reproduced_metrics.json").read_text(encoding="utf-8")
+    ) or metrics["validation_files"] != 24:
+        raise ValueError("pooling baseline is not fully trained and independently verified")
+    manifest = prepare_suite(base, root, [37], definitions=pooling_stage_jobs())
+    manifest.update(
+        protocol="pooling_three_variants", reused_from=str(source),
+        comparisons=[["T1", "T0"], ["T2", "T1"], ["T2", "T0"]],
+        figure_variants=["T0", "T1", "T2"],
+        variant_labels={"T0": "七维统计 MLP 编码", "T1": "逐事件 MLP + 均值池化", "T2": "逐事件 MLP + 四查询 Attention pooling"},
+        pooling_protocol={
+            "shared": "7 block statistics, position, token mapping, cone backbone, decoder inputs, seed 37, 18 epochs",
+            "statistics_encoder": "7 -> 64 -> 64, LayerNorm and GELU",
+            "mean_encoder": "shared event MLP and value projection -> arithmetic mean -> 64 -> 192 -> 64 MLP",
+            "capacity_note": "mean 152010 vs attention 151882 parameters; statistics 122762; no dummy parameters",
+            "baseline_checkpoint": str(checkpoint), "baseline_sha256": done["sha256"],
+        },
+    )
+    attempt = root / "seed37/attention_B/attempt_001"
+    attempt.mkdir(parents=True)
+    # 不复制 done 标记，新队列会先重载基线并完整复评。
+    for name in ("best.pt", "metrics.json", "history.json", "config.yaml", "dataset_manifest.json", "ablation.json", "summary.json"):
+        shutil.copy2(run / name, attempt / name)
+    _write_json(root / "suite.json", manifest)
+    return manifest
+
+
+def prepare_suite(
+    base: TraceFormerConfig, root: Path, seeds: list[int], *, definitions: list[Job] | None = None
+) -> dict:
     if len(set(seeds)) != len(seeds) or not seeds:
         raise ValueError("seeds must be nonempty and unique")
     if root.exists():
@@ -62,7 +149,7 @@ def prepare_suite(base: TraceFormerConfig, root: Path, seeds: list[int]) -> dict
     root.mkdir(parents=True)
     jobs = []
     for seed in seeds:
-        for job in stage_jobs():
+        for job in definitions if definitions is not None else stage_jobs():
             identifier = f"seed{seed}/{job.name}"
             config = job_config(base, job, seed, root)
             config_path = root / "configs" / f"seed{seed}_{job.name}.yaml"
@@ -72,7 +159,7 @@ def prepare_suite(base: TraceFormerConfig, root: Path, seeds: list[int]) -> dict
             ))
             jobs.append({
                 "id": identifier, "seed": seed, "name": job.name, "stage": job.stage,
-                "spec": asdict(job.spec), "result_id": job.result_id,
+                "spec": job.spec.to_dict(), "result_id": job.result_id,
                 "config": str(config_path.resolve()),
                 "config_sha256": _file_sha256(config_path),
                 "parent": f"seed{seed}/{job.parent}" if job.parent else None,
@@ -82,6 +169,62 @@ def prepare_suite(base: TraceFormerConfig, root: Path, seeds: list[int]) -> dict
         "evaluation": "99 train / 24 validation; validation selects checkpoints and thresholds",
         "root": str(root.resolve()), "source_snapshot": str((root / "source").resolve()),
     }
+    _write_json(root / "suite.json", manifest)
+    return manifest
+
+
+def prepare_simple_suite(source: Path, root: Path) -> dict:
+    """核验完整训练和独立复评产物后，建立不影响原队列的四组实验。"""
+    source = source.resolve()
+    originals = json.loads((source / "suite.json").read_text(encoding="utf-8"))
+    by_id = {job["id"]: job for job in originals["jobs"]}
+    base = load_config(by_id["seed37/B"]["config"])
+    live_manifest = _manifest_identity_digest(_dataset_manifest(_dataset(base, "train"), _dataset(base, "val")))
+    reused = {}
+    for definition in simple_stage_jobs()[:2]:
+        identifier = f"seed37/{definition.name}"
+        job = by_id[identifier]
+        if _file_sha256(Path(job["config"])) != job["config_sha256"]:
+            raise ValueError("reuse source configuration changed")
+        done = json.loads((source / identifier / "done.json").read_text(encoding="utf-8"))
+        checkpoint_path = Path(done["checkpoint"])
+        if _file_sha256(checkpoint_path) != done["sha256"]:
+            raise ValueError("reuse checkpoint hash mismatch")
+        config = load_config(job["config"])
+        expected = job_config(base, definition, 37, Path(config.training.output_root))
+        if _serializable(asdict(config)) != _serializable(asdict(expected)):
+            raise ValueError("reuse configuration differs from paired training protocol")
+        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+        _validate_checkpoint_contract(checkpoint, config, ablation=definition.spec)
+        if checkpoint.get("training_seed") != 37 or checkpoint.get("training_stage") != definition.stage:
+            raise ValueError("reuse seed/stage mismatch")
+        if checkpoint.get("dataset_manifest_sha256") != live_manifest:
+            raise ValueError("reuse dataset changed")
+        run = checkpoint_path.parent
+        history = json.loads((run / "history.json").read_text(encoding="utf-8"))
+        if len(history) != expected.training.epochs:
+            raise ValueError("reuse training did not finish its full epoch budget")
+        report = json.loads(Path(done["report"]).read_text(encoding="utf-8"))
+        saved = json.loads((run / "metrics.json").read_text(encoding="utf-8"))
+        reproduced = json.loads((run / "reproduced_metrics.json").read_text(encoding="utf-8"))
+        if report["metrics"] != saved or reproduced != saved or saved["validation_files"] != 24:
+            raise ValueError("reuse independent 24-file evaluation mismatch")
+        if definition.name == "BS":
+            if checkpoint["full_initialization"]["sha256"] != reused["seed37/B"]["sha256"]:
+                raise ValueError("reuse Sparse checkpoint has a different base")
+        reused[identifier] = {**done, "reused_from": str(source / identifier),
+                              "report_sha256": _file_sha256(Path(done["report"]))}
+    manifest = prepare_suite(base, root, [37], definitions=simple_stage_jobs())
+    manifest.update(
+        protocol="simple_four_variants", reused_from=str(source),
+        comparisons=[["E1", "E0"], ["E2", "E1"], ["E3", "E2"]],
+        figure_variants=["E0", "E1", "E2", "E3"],
+        variant_labels={"E0": "固定窗口主干", "E1": "时空锥主干 B", "E2": "B + Sparse", "E3": "B + Sparse + 精修"},
+    )
+    for identifier, done in reused.items():
+        directory = root / identifier
+        directory.mkdir(parents=True)
+        _write_json(directory / "done.json", done)
     _write_json(root / "suite.json", manifest)
     return manifest
 
@@ -130,8 +273,10 @@ def summarize(root: Path) -> None:
                for metric in ("score", "iou", "seg_acc", "pd", "fa")},
         }
     paired = []
-    comparisons = [("A1", "A0"), ("A2", "A0"), ("A3", "A1"), ("A3", "A2"),
-                   ("A3", "A4"), ("A3", "A5"), ("A3", "A6"), ("A3", "A7")]
+    comparisons = suite.get("comparisons", [
+        ("A1", "A0"), ("A2", "A0"), ("A3", "A1"), ("A3", "A2"),
+        ("A3", "A4"), ("A3", "A5"), ("A3", "A6"), ("A3", "A7"),
+    ])
     for seed in suite["seeds"]:
         by_id = {row["variant"]: row for row in rows if row["seed"] == seed}
         for left, right in comparisons:
@@ -145,7 +290,8 @@ def summarize(root: Path) -> None:
                 for k in ("score", "iou", "pd", "fa")
             }})
     _write_json(root / "aggregate.json", {"aggregate": aggregate, "paired": paired})
-    lines = ["# TraceFormer CPU 核心消融", "", f"完成 {len(rows)}/{8 * len(suite['seeds'])} 份结果。",
+    total_results = sum(job["result_id"] is not None for job in suite["jobs"])
+    lines = ["# TraceFormer CPU 核心消融", "", f"完成 {len(rows)}/{total_results} 份结果。",
              "验证集参与 checkpoint 与阈值选择，结果不代表独立测试集。", "",
              "|配置|种子数|Score|IoU|SegAcc|Pd|Fa|", "|---|---:|---:|---:|---:|---:|---:|"]
     for variant, result in aggregate.items():
@@ -155,4 +301,15 @@ def summarize(root: Path) -> None:
             deviation = f" ± {item['std']:.6g}" if item["std"] is not None else " (单种子)"
             cells.append(f"{item['mean']:.6g}{deviation}")
         lines.append(f"|{variant}|{len(result['completed_seeds'])}|" + "|".join(cells) + "|")
+    if suite.get("variant_labels"):
+        lines.extend(["", "配置说明：", ""])
+        lines.extend(f"- {key}：{value}" for key, value in suite["variant_labels"].items())
+    if suite.get("protocol") == "pooling_three_variants":
+        lines.extend(["", "所有组关闭 Sparse 和精修；T1/T2 近似匹配参数量，T0 为较小统计基线。T2 复用完整训练后重新复评，T0/T1 从头训练。", "",
+                      "|配置|阈值|Score@0.5|参数量|秒/序列|", "|---|---:|---:|---:|---:|"])
+        for row in sorted(rows, key=lambda r: r["variant"]):
+            lines.append(f"|{row['variant']}|{row['threshold']:.4f}|{row['score_threshold_05']:.6f}|{row['parameters']}|{row['seconds_per_sequence']:.3f}|")
+        lines.extend(["", "同种子差值：", ""])
+        for row in paired:
+            lines.append(f"- {row['comparison']}：ΔScore={row['score']:+.6f}，ΔIoU={row['iou']:+.6f}，ΔPd={row['pd']:+.6f}，ΔFa={row['fa']:+.8g}")
     _atomic_write_text(root / "results.md", "\n".join(lines) + "\n")

@@ -33,13 +33,14 @@ def main() -> None:
     parser.add_argument("--config", default="configs/traceformer_score_optimized.yaml")
     parser.add_argument("--backbone", choices=["cone", "window", "past", "no_position"], default="cone")
     parser.add_argument("--stage", choices=["full", "sparse_mixture", "refinement"], default="full")
+    parser.add_argument("--pooling", choices=["attention", "mean", "statistics"], default="attention")
     parser.add_argument("--sequence", default="train_096.npz")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     config = load_config(args.config)
     config = replace(config, training=replace(config.training, stage=args.stage))
     spec = AblationSpec(args.backbone, args.stage != "full",
-                        "multiscale" if args.stage == "refinement" else "none")
+                        "multiscale" if args.stage == "refinement" else "none", pooling=args.pooling)
     prepare_device("cpu", num_threads=config.training.num_threads)
     torch.manual_seed(config.training.seed)
     model = build_model(config, ablation=spec)
@@ -87,7 +88,7 @@ def main() -> None:
         raise RuntimeError("original event universe was changed")
     memory = psutil.Process().memory_info()
     report = {
-        "status": "passed", "sequence": args.sequence, "stage": args.stage, "spec": asdict(spec),
+        "status": "passed", "sequence": args.sequence, "stage": args.stage, "spec": spec.to_dict(),
         "events": sequence.length, "tokens": len(output["token_features"]),
         "loss": float(total.detach()), "elapsed_seconds": time.perf_counter() - started,
         "peak_rss_bytes": getattr(memory, "peak_wset", memory.rss),

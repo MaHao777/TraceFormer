@@ -175,6 +175,32 @@ def test_explicit_batch_indices_stay_isolated() -> None:
     assert not set(first.tolist()) & set(second.tolist())
 
 
+def test_skipping_sparse_decoder_preserves_all_decision_outputs() -> None:
+    model = _model().eval()
+    events, batches = _events(), _batch_indices()
+    source_indices = torch.tensor([0, 1, 3, 4])
+    kwargs = {
+        "sparse_events": events[source_indices],
+        "sparse_batch_indices": batches[source_indices],
+        "sparse_source_indices": source_indices,
+    }
+    calls = []
+    hook = model.decoder.register_forward_hook(lambda *_: calls.append(1))
+    with torch.no_grad():
+        default = model(events, batches, **kwargs)
+        assert len(calls) == 3
+        calls.clear()
+        optimized = model(events, batches, compute_sparse_logits=False, **kwargs)
+    hook.remove()
+    # 默认辅助监督仍存在，推理只少执行一次稀疏 Decoder。
+    assert len(calls) == 2
+    assert default["sparse_event_logits"].shape == (len(source_indices),)
+    assert optimized["sparse_event_logits"].shape == (0,)
+    assert optimized.keys() == default.keys()
+    for key in default.keys() - {"sparse_event_logits"}:
+        assert torch.equal(default[key], optimized[key]), key
+
+
 def test_empty_event_sample_returns_empty_finite_outputs() -> None:
     output = _model()(torch.empty((0, 4)))
 

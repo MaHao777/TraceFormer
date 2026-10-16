@@ -10,7 +10,7 @@ from torch import nn
 
 from traceformer.config import ConeHeadConfig
 
-from .cone_neighbor_builder import ConeNeighborBuilder
+from .cone_neighbor_builder import ConeGeometryContext, ConeNeighborBuilder
 from .relative_position import RelativePositionEncoder
 
 
@@ -122,11 +122,15 @@ class BidirectionalConeAttention(nn.Module):
         tokens: torch.Tensor,
         token_coords: torch.Tensor,
         token_batch_indices: torch.Tensor,
+        *,
+        geometry: ConeGeometryContext | None = None,
     ) -> ConeAttentionOutput:
         if len(tokens) == 0:
             return ConeAttentionOutput(tokens)
 
-        neighborhoods = self.neighbor_builder(token_coords, token_batch_indices)
+        neighborhoods = self.neighbor_builder(
+            token_coords, token_batch_indices, geometry=geometry
+        )
         query = self._reshape_heads(self.query_projection(tokens))
         key = self._reshape_heads(self.key_projection(tokens))
         value = self._reshape_heads(self.value_projection(tokens))

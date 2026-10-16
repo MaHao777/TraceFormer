@@ -9,6 +9,7 @@ from typing import Any
 
 import numpy as np
 
+from traceformer.gpu.runtime import add_backend_arguments, validate_backends
 from traceformer.postprocessing.contracts import EventCache, density_group, sha256_file
 from traceformer.postprocessing.direct_verifier import (
     apply_direct_verifier,
@@ -16,7 +17,12 @@ from traceformer.postprocessing.direct_verifier import (
     event_branches,
     load_direct_verifier,
 )
-from traceformer.postprocessing.learning import load_event_models, predict_event_scores
+from traceformer.postprocessing.learning import (
+    load_event_models,
+    positive_prediction_threads,
+    predict_event_scores,
+    required_event_models,
+)
 from traceformer.postprocessing.submission import (
     evaluate_predictions,
     load_prediction,
@@ -74,7 +80,10 @@ def main() -> None:
     parser.add_argument("--dataset-root", required=True)
     parser.add_argument("--original-report", required=True)
     parser.add_argument("--output-dir", required=True)
+    parser.add_argument("--prediction-threads", type=positive_prediction_threads, default=8)
+    add_backend_arguments(parser, trees=True)
     arguments = parser.parse_args()
+    validate_backends(prediction_backend=arguments.prediction_backend, feature_backend=arguments.feature_backend)
 
     cache_dir = Path(arguments.cache_dir)
     training_dir = Path(arguments.training_dir)
@@ -104,8 +113,9 @@ def main() -> None:
     for name, expected_sha256 in release_report["event_model_sha256"].items():
         if sha256_file(model_dir / name) != expected_sha256:
             raise ValueError(f"event release model hash mismatch: {name}")
-    models = load_event_models(model_dir)
     event_contract = release_report["event_contract"]
+    models = load_event_models(model_dir, names=required_event_models(event_contract),
+                               backend=arguments.prediction_backend)
     verifier_model, verifier_report = load_direct_verifier(direct_verifier_dir)
     verifier_released = verifier_report["status"] == "released"
     if not verifier_released and not arguments.diagnostic_allow_rejected_verifier:
@@ -114,7 +124,8 @@ def main() -> None:
     records: dict[str, Any] = {}
     for cache_path in sorted(cache_dir.glob("*.npz")):
         cache = EventCache.load(cache_path, allow_labels=False)
-        scores = predict_event_scores(cache, models)
+        scores = predict_event_scores(cache, models, num_threads=arguments.prediction_threads,
+                                      feature_backend=arguments.feature_backend)
         group, density = density_group(cache.locations)
         _, direct_probability, tracked, direct = event_branches(
             cache, scores, event_contract
@@ -188,6 +199,10 @@ def main() -> None:
             "event_release_report": str(release_report_path.resolve()),
             "event_release_report_sha256": sha256_file(release_report_path),
             "event_model_sha256": release_report["event_model_sha256"],
+            "prediction_threads": arguments.prediction_threads,
+            "prediction_backend": arguments.prediction_backend,
+            "feature_backend": arguments.feature_backend,
+            "active_event_models": list(models),
             "direct_verifier_report": str(
                 (direct_verifier_dir / "training_report.json").resolve()
             ),

@@ -226,14 +226,14 @@ def event_branches(
     group, _ = density_group(cache.locations)
     track_probability = blend_scores(
         cache.base_probability,
-        scores["small"],
-        scores["large"],
+        scores.get("small"),
+        scores.get("large"),
         tuple(contract["track_weights"]),
     )
     direct_probability = blend_scores(
         cache.base_probability,
-        scores["small"],
-        scores["large"],
+        scores.get("small"),
+        scores.get("large"),
         tuple(contract["direct_weights"]),
     )
     tracked = track_prediction(

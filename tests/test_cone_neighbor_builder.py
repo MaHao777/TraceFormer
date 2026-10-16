@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import math
+
+import numpy as np
+import pytest
 import torch
+from scipy.spatial import cKDTree
 
 from traceformer.config import ConeHeadConfig
-from traceformer.models.cone_neighbor_builder import ConeNeighborBuilder
+from traceformer.models.cone_neighbor_builder import ConeNeighborBuilder, prepare_cone_geometry
+from traceformer.models.cone_transformer import ConeTransformerEncoder
 
 
 def test_past_and_future_cones_obey_time_direction_and_chebyshev_radius() -> None:
@@ -120,3 +126,94 @@ def test_empty_tokens_return_padded_empty_neighborhoods() -> None:
 
     assert neighbors.past_indices.shape == (0, 1, 2)
     assert neighbors.future_indices.shape == (0, 1, 2)
+
+
+def _original_neighbors(coords, batches, heads, scale, cap, direction):
+    """保留修改前每个 head/方向重新建树的查询逻辑，作为逐位对照。"""
+    output = np.full((len(coords), len(heads), cap), -1, dtype=np.int64)
+    for head_index, head in enumerate(heads):
+        horizon = max(1, math.ceil(head.max_time_distance * scale))
+        for batch_index in np.unique(batches):
+            indices = np.flatnonzero(batches == batch_index)
+            times = coords[indices, 2]
+            by_time = {int(t): indices[times == t] for t in np.unique(times)}
+            trees = {t: cKDTree(coords[rows, :2].astype(np.float64))
+                     for t, rows in by_time.items()}
+            for source_time, rows in by_time.items():
+                candidates, priorities = [], []
+                for lag in range(1, horizon + 1):
+                    target = by_time.get(source_time + direction * lag)
+                    if target is None:
+                        continue
+                    ranks = np.arange(1, min(cap, len(target)) + 1)
+                    distances, local = trees[source_time + direction * lag].query(
+                        coords[rows, :2].astype(np.float64), k=ranks, p=np.inf,
+                        distance_upper_bound=head.base_radius + head.slope * lag + 1e-9,
+                        workers=1,
+                    )
+                    distances, local = np.asarray(distances), np.asarray(local)
+                    if distances.ndim == 1:
+                        distances, local = distances[:, None], local[:, None]
+                    valid = np.isfinite(distances) & (local < len(target))
+                    selected = np.full(local.shape, -1, dtype=np.int64)
+                    selected[valid] = target[local[valid]]
+                    scores = np.full(distances.shape, np.inf)
+                    rank_priority = np.broadcast_to(ranks[None, :], distances.shape)
+                    scores[valid] = rank_priority[valid] * 1e6 + lag * 1e3 + distances[valid]
+                    candidates.append(selected)
+                    priorities.append(scores)
+                if candidates:
+                    joined, scores = np.concatenate(candidates, 1), np.concatenate(priorities, 1)
+                    order = np.argsort(scores, axis=1, kind="stable")[:, :cap]
+                    kept = np.take_along_axis(joined, order, axis=1)
+                    output[rows, head_index, :kept.shape[1]] = kept
+    return torch.from_numpy(output)
+
+
+@pytest.mark.parametrize("scale", [0.5, 0.75, 1.0, 1.5])
+@pytest.mark.parametrize("cap", [1, 3, 8])
+@pytest.mark.parametrize("empty", [False, True])
+def test_shared_geometry_matches_original_indices(scale, cap, empty):
+    # 多 batch、时间片缺失、等距离点和半径边界均保留原始输入顺序。
+    coords = torch.tensor([
+        [0, 0, 0], [1, 0, 1], [-1, 0, 1], [0, 1, 1], [0, -1, 1],
+        [2, 0, 3], [0, 0, 4], [8, 0, 4], [0, 0, 0], [1, 0, 3], [2, 0, 4],
+    ], dtype=torch.long)
+    batches = torch.tensor([0] * 8 + [2] * 3)
+    if empty:
+        coords, batches = coords[:0], batches[:0]
+    heads = (ConeHeadConfig(1.0, 0.0, 4), ConeHeadConfig(0.0, 1.0, 3))
+    builder = ConeNeighborBuilder(cone_heads=heads, max_neighbors_per_cone=cap,
+                                  layer_time_scale=scale)
+    geometry = prepare_cone_geometry(coords, batches)
+    shared, independent = builder(coords, batches, geometry=geometry), builder(coords, batches)
+    for name, direction in (("past_indices", -1), ("future_indices", 1)):
+        expected = _original_neighbors(coords.numpy(), batches.numpy(), heads, scale, cap, direction)
+        assert torch.equal(getattr(shared, name), expected)
+        assert torch.equal(getattr(independent, name), expected)
+
+
+def test_encoder_builds_each_time_tree_once_per_view(monkeypatch):
+    from traceformer.models import cone_neighbor_builder
+
+    builds = []
+
+    def count_tree(xy):
+        builds.append(xy.copy())
+        return cKDTree(xy)
+
+    monkeypatch.setattr(cone_neighbor_builder, "cKDTree", count_tree)
+    encoder = ConeTransformerEncoder(
+        token_dim=8, num_heads=2,
+        cone_heads=(ConeHeadConfig(1, 1, 3), ConeHeadConfig(2, 2, 3)),
+        layer_time_scales=(0.5, 0.75, 1.0), max_neighbors_per_cone=3,
+        mlp_ratio=2, dropout=0, direction_dropout=0,
+    ).eval()
+    coords = torch.tensor([[0, 0, 0], [1, 0, 1], [2, 0, 3], [0, 0, 0]])
+    batches = torch.tensor([0, 0, 0, 1])
+    with torch.no_grad():
+        encoder(torch.randn(4, 8), coords, batches)
+        assert len(builds) == 4
+        encoder(torch.randn(4, 8), coords, batches)
+    # 第二次前向重新准备，缓存不跨事件视图或前向保留。
+    assert len(builds) == 8

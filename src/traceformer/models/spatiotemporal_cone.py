@@ -151,6 +151,7 @@ class TraceFormer(nn.Module):
         sparse_batch_indices: torch.Tensor | None = None,
         sparse_source_indices: torch.Tensor | None = None,
         mixture_weight: float = 1.0,
+        compute_sparse_logits: bool = True,
     ) -> dict[str, Any]:
         tokenized = self.tokenizer(events, batch_indices)
         encoded = self.encoder(
@@ -222,11 +223,13 @@ class TraceFormer(nn.Module):
                 tokenized.event_token_indices,
                 tokenized.event_local_features,
             )
-            sparse_event_logits = self.decoder(
-                sparse_encoded.token_features,
-                sparse_tokenized.event_token_indices,
-                sparse_tokenized.event_local_features,
-            )
+            # 稀疏事件 logits 仅用于辅助监督，推理可保留空输出并跳过 Decoder。
+            if compute_sparse_logits:
+                sparse_event_logits = self.decoder(
+                    sparse_encoded.token_features,
+                    sparse_tokenized.event_token_indices,
+                    sparse_tokenized.event_local_features,
+                )
             returned_source_indices = sparse_source_indices
         base_event_logits = event_logits
         refinement = self.event_refinement_head(

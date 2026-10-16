@@ -43,14 +43,19 @@ def cache_split(
     split: str,
     device: str = "cpu",
     progress: bool = False,
+    neighbor_backend: str = "cpu",
 ) -> CacheManifest:
     """生成训练或盲推缓存；验证缓存从源头排除标签。"""
 
     if split not in {"train", "val"}:
         raise ValueError("split must be train or val")
+    from traceformer.gpu.runtime import validate_backends
+
+    validate_backends(device=device, neighbor_backend=neighbor_backend)
     torch_device = torch.device(device)
     checkpoint_path = Path(checkpoint_path).resolve()
-    model, checkpoint = load_inference_model(config, checkpoint_path, device=torch_device)
+    model, checkpoint = load_inference_model(config, checkpoint_path, device=torch_device,
+                                            neighbor_backend=neighbor_backend)
     threshold = float(checkpoint.get("decision_threshold", config.inference.sigmoid_threshold))
     dataset = NPZEventDataset(Path(config.dataset.root) / split)
     output_dir = Path(output_root) / split
@@ -69,6 +74,7 @@ def cache_split(
                 batch_indices,
                 config,
                 mixture_weight=1.0,
+                compute_sparse_logits=False,
             )
             source = _source_arrays(sequence.source_path, include_labels=include_labels)
             probability = torch.sigmoid(output["event_logits"]).cpu().numpy()
@@ -119,6 +125,7 @@ def cache_split(
                 "path": str(checkpoint_path),
                 "sha256": manifest.checkpoint_sha256,
                 "decision_threshold": threshold,
+                "neighbor_backend": neighbor_backend,
             },
             ensure_ascii=False,
             indent=2,

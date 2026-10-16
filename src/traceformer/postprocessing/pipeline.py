@@ -24,6 +24,7 @@ from .learning import (
     load_event_models,
     predict_event_scores,
     require_lightgbm,
+    required_event_models,
     train_event_models,
 )
 from .metrics import BinaryCounts, score_binary
@@ -713,30 +714,39 @@ def predict_pipeline(
     output_dir: str | Path,
     *,
     progress: Callable[[str], None] = print,
+    prediction_threads: int = 8,
+    prediction_backend: str = "cpu",
+    feature_backend: str = "cpu",
 ) -> dict[str, Any]:
     """冻结参数盲推；验证缓存契约禁止携带标签。"""
+    from traceformer.gpu.runtime import validate_backends
+
+    validate_backends(prediction_backend=prediction_backend, feature_backend=feature_backend)
 
     cache_dir = Path(cache_dir)
     model_dir = Path(model_dir)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=False)
     frozen = json.loads((model_dir / "frozen.json").read_text(encoding="utf-8"))
-    event_models = load_event_models(model_dir / "events")
+    event_models = load_event_models(model_dir / "events", names=required_event_models(frozen),
+                                     backend=prediction_backend)
     lgb = require_lightgbm()
     component_model = lgb.Booster(model_file=str(model_dir / "component.txt"))
     center_model = lgb.Booster(model_file=str(model_dir / "center.txt"))
     records: dict[str, Any] = {}
     for name in _cache_names(cache_dir):
         cache = EventCache.load(cache_dir / name, allow_labels=False)
-        scores = predict_event_scores(cache, event_models)
+        scores = predict_event_scores(cache, event_models, num_threads=prediction_threads,
+                                      feature_backend=feature_backend)
         group, density = density_group(cache.locations)
         track_probability = blend_scores(
-            cache.base_probability, scores["small"], scores["large"], tuple(frozen["track_weights"])
+            cache.base_probability, scores.get("small"), scores.get("large"),
+            tuple(frozen["track_weights"])
         )
         direct_probability = blend_scores(
             cache.base_probability,
-            scores["small"],
-            scores["large"],
+            scores.get("small"),
+            scores.get("large"),
             tuple(frozen["direct_weights"]),
         )
         prediction = track_prediction(
@@ -770,6 +780,10 @@ def predict_pipeline(
     report = {
         "validation_labels_accessed": False,
         "model_dir": str(model_dir.resolve()),
+        "prediction_threads": prediction_threads,
+        "prediction_backend": prediction_backend,
+        "feature_backend": feature_backend,
+        "active_event_models": list(event_models),
         "files": records,
     }
     (output_dir / "inference_report.json").write_text(

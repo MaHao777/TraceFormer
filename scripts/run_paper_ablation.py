@@ -19,7 +19,12 @@ from traceformer.config import load_config
 from traceformer.experiments.ablation import AblationSpec
 from traceformer.experiments.figures import render_figures, select_windows
 from traceformer.experiments.report import evaluate_ablation
-from traceformer.experiments.suite import prepare_suite, summarize
+from traceformer.experiments.suite import (
+    prepare_pooling_suite,
+    prepare_simple_suite,
+    prepare_suite,
+    summarize,
+)
 from traceformer.training.engine import _file_sha256, _write_json, run_training
 
 
@@ -57,6 +62,8 @@ def completed_job(root: Path, identifier: str) -> dict | None:
     record = read_json(path)
     if _file_sha256(Path(record["checkpoint"])) != record["sha256"]:
         raise ValueError(f"completed checkpoint changed: {identifier}")
+    if record.get("report_sha256") and _file_sha256(Path(record["report"])) != record["report_sha256"]:
+        raise ValueError(f"reused report changed: {identifier}")
     return record
 
 
@@ -169,6 +176,9 @@ def queue(root: Path) -> None:
         if job["name"] == "no_position_BSR":
             render_figures(root, job["seed"])
     summarize(root)
+    if suite.get("figure_variants"):
+        for seed in suite["seeds"]:
+            render_figures(root, seed)
     _write_json(root / "status.json", {"status": "complete", "completed_stages": len(suite["jobs"]),
                                        "updated_at": time.time()})
 
@@ -177,6 +187,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--suite", type=Path, required=True)
     parser.add_argument("--prepare", action="store_true")
+    parser.add_argument("--prepare-simple-from", type=Path)
+    parser.add_argument("--prepare-pooling-from", type=Path)
     parser.add_argument("--config", default="configs/traceformer_score_optimized.yaml")
     parser.add_argument("--seeds", nargs="+", type=int, default=[37, 73, 101])
     parser.add_argument("--worker")
@@ -185,7 +197,42 @@ def main() -> None:
     parser.add_argument("--summarize", action="store_true")
     args = parser.parse_args()
     root = args.suite.resolve()
-    if args.prepare:
+    if args.prepare_pooling_from:
+        # 仅允许此次已审计的聚合入口/实验契约改动，其余模型和训练实现必须相同。
+        repo = Path(__file__).resolve().parents[1]
+        allowed = {"src/traceformer/models/event_tokenizer.py", "src/traceformer/training/engine.py"}
+        hashes = read_json(args.prepare_pooling_from / "source_hashes.json")
+        for relative, digest in hashes.items():
+            normalized = relative.replace("\\", "/")
+            if normalized.startswith(("src/traceformer/models/", "src/traceformer/training/", "src/traceformer/data/")) or normalized == "src/traceformer/config.py":
+                if normalized not in allowed and _file_sha256(repo / relative) != digest:
+                    raise ValueError(f"pooling comparison runtime changed: {relative}")
+        prepare_pooling_suite(args.prepare_pooling_from, root)
+        shutil.copy2(args.prepare_pooling_from / "visualization_windows.json", root / "visualization_windows.json")
+        source_snapshot(root)
+        summarize(root)
+        _write_json(root / "status.json", {"status": "prepared", "pending_training_stages": 2,
+                                           "pending_baseline_reevaluation": True, "updated_at": time.time()})
+        print(root, flush=True)
+    elif args.prepare_simple_from:
+        # 只允许复用相同的模型、训练与数据处理实现；汇总/队列代码可更新。
+        repo = Path(__file__).resolve().parents[1]
+        hashes = read_json(args.prepare_simple_from / "source_hashes.json")
+        for relative, digest in hashes.items():
+            normalized = relative.replace("\\", "/")
+            if normalized.startswith(("src/traceformer/models/", "src/traceformer/training/", "src/traceformer/data/")) or normalized in {
+                "src/traceformer/config.py", "src/traceformer/experiments/ablation.py",
+            }:
+                if _file_sha256(repo / relative) != digest:
+                    raise ValueError(f"reuse runtime code changed: {relative}")
+        prepare_simple_suite(args.prepare_simple_from, root)
+        shutil.copy2(args.prepare_simple_from / "visualization_windows.json", root / "visualization_windows.json")
+        source_snapshot(root)
+        summarize(root)
+        _write_json(root / "status.json", {"status": "prepared", "reused_results": 2, "pending_training_stages": 2,
+                                           "updated_at": time.time()})
+        print(root, flush=True)
+    elif args.prepare:
         config = load_config(args.config)
         for split, expected in (("train", 99), ("val", 24)):
             files = list((Path(config.dataset.root) / split).glob("*.npz"))

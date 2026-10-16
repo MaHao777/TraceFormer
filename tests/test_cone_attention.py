@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import pytest
 import torch
 
 from traceformer.config import ConeHeadConfig
+from traceformer.experiments.ablation import PastOnlyAttention
 from traceformer.models.cone_attention import BidirectionalConeAttention
+from traceformer.models.cone_neighbor_builder import prepare_cone_geometry
 from traceformer.models.relative_position import RelativePositionEncoder
 
 
@@ -63,3 +66,18 @@ def test_attention_uses_shared_bidirectional_key_value_and_backpropagates() -> N
         parameter.grad is not None and torch.isfinite(parameter.grad).all()
         for parameter in attention.parameters()
     )
+
+
+@pytest.mark.parametrize("past_only", [False, True])
+def test_attention_accepts_shared_geometry_with_identical_outputs(past_only):
+    cls = PastOnlyAttention if past_only else BidirectionalConeAttention
+    attention = cls(token_dim=8, num_heads=2,
+                    cone_heads=(ConeHeadConfig(1, 1, 2), ConeHeadConfig(2, 2, 2)),
+                    max_neighbors_per_cone=3, dropout=0, direction_dropout=0).eval()
+    coords = torch.tensor([[0, 0, 0], [1, 0, 1], [2, 0, 2]])
+    batches, tokens = torch.zeros(3, dtype=torch.long), torch.randn(3, 8)
+    with torch.no_grad():
+        standalone = attention(tokens, coords, batches).features
+        shared = attention(tokens, coords, batches,
+                           geometry=prepare_cone_geometry(coords, batches)).features
+    assert torch.equal(standalone, shared)

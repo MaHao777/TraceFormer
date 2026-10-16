@@ -162,6 +162,18 @@ class EventTokenizer(nn.Module):
             raise ValueError("batch indices must be non-negative")
         return events, parsed_batches
 
+    def _encode_block_features(
+        self,
+        local_features: torch.Tensor,
+        inverse: torch.Tensor,
+        counts: torch.Tensor,
+        statistics: torch.Tensor,
+    ) -> torch.Tensor:
+        # 独立聚合入口供编码消融使用；正式模型保留原 attention 运算。
+        encoded = self.event_encoder(local_features)
+        pooled = self._attention_pool(encoded, inverse, token_count=len(counts))
+        return self.query_fusion(pooled.flatten(start_dim=1))
+
     def _empty(self, events: torch.Tensor) -> TokenizedEvents:
         device = events.device
         dtype = events.dtype
@@ -250,16 +262,6 @@ class EventTokenizer(nn.Module):
         token_batches = torch.div(
             unique_keys, cells_per_sample, rounding_mode="floor"
         )
-        encoded_events = self.event_encoder(local_features)
-        attention_output = self._attention_pool(
-            encoded_events,
-            inverse,
-            token_count=token_count,
-        )
-        attention_feature = self.query_fusion(
-            attention_output.flatten(start_dim=1)
-        )
-
         float_counts = counts.to(events.dtype)
         polarity_sum = torch.zeros(token_count, dtype=events.dtype, device=events.device)
         polarity_sum.scatter_add_(0, inverse, positive_indicator)
@@ -314,6 +316,7 @@ class EventTokenizer(nn.Module):
             dim=1,
         )
         encoded_position = self.position_encoder(position)
+        attention_feature = self._encode_block_features(local_features, inverse, counts, statistics)
         tokens = self.token_projection(
             torch.cat(
                 (attention_feature, statistics, encoded_position),

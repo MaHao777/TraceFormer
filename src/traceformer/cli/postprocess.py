@@ -8,9 +8,11 @@ import shutil
 from pathlib import Path
 
 from traceformer.config import load_config
+from traceformer.gpu.runtime import add_backend_arguments, validate_backends
 from traceformer.postprocessing.cache import cache_split
 from traceformer.postprocessing.contracts import PostprocessProtocol
 from traceformer.postprocessing.direct_verifier import train_direct_verifier
+from traceformer.postprocessing.learning import positive_prediction_threads
 from traceformer.postprocessing.pipeline import (
     predict_pipeline,
     release_event_models,
@@ -49,6 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
     cache.add_argument("--output-dir", required=True)
     cache.add_argument("--split", choices=("train", "val"), required=True)
     cache.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
+    add_backend_arguments(cache, neural=True)
     cache.add_argument("--quiet", action="store_true")
 
     train = commands.add_parser("train", help="按79/20协议训练并执行分阶段门槛")
@@ -78,6 +81,8 @@ def build_parser() -> argparse.ArgumentParser:
     predict.add_argument("--model-dir", required=True)
     predict.add_argument("--output-dir", required=True)
     predict.add_argument("--quiet", action="store_true")
+    predict.add_argument("--prediction-threads", type=positive_prediction_threads, default=8)
+    add_backend_arguments(predict, trees=True)
 
     evaluate = commands.add_parser("evaluate", help="从原始NPZ独立复评二值结果")
     evaluate.add_argument("--prediction-dir", required=True)
@@ -98,6 +103,7 @@ def main() -> None:
     arguments = parser.parse_args()
     try:
         if arguments.command == "cache":
+            validate_backends(device=arguments.device, neighbor_backend=arguments.neighbor_backend)
             output_root = Path(arguments.output_dir)
             output_root.mkdir(parents=True, exist_ok=True)
             copied_config = output_root / "config.yaml"
@@ -113,6 +119,7 @@ def main() -> None:
                 output_root,
                 split=arguments.split,
                 device=arguments.device,
+                neighbor_backend=arguments.neighbor_backend,
                 progress=not arguments.quiet,
             )
             payload = {"split": result.split, "files": len(result.files)}
@@ -145,6 +152,9 @@ def main() -> None:
                 arguments.model_dir,
                 arguments.output_dir,
                 progress=sink,
+                prediction_threads=arguments.prediction_threads,
+                prediction_backend=arguments.prediction_backend,
+                feature_backend=arguments.feature_backend,
             )
         elif arguments.command == "evaluate":
             payload = evaluate_predictions(arguments.prediction_dir, arguments.dataset_root)

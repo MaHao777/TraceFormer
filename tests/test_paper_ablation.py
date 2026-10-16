@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, replace
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -148,7 +148,7 @@ def test_all_stages_train_reload_and_reject_wrong_contract(small_config, tmp_pat
                     build_model(config, ablation=job.spec), wrong, job.spec, paths[job.parent],
                     manifest_digest=checkpoint["dataset_manifest_sha256"], device=torch.device("cpu"),
                 )
-        assert checkpoint["ablation"] == asdict(job.spec)
+        assert checkpoint["ablation"] == job.spec.to_dict()
         assert checkpoint["training_seed"] == 37
 
 
@@ -182,3 +182,58 @@ def test_independent_report_and_saved_predictions(small_config, tmp_path):
     assert report["per_file"]["val_000"]["refinement_count_delta"] == {"tp": 0, "fp": 0, "fn": 0}
     saved = torch.load(directory / "predictions" / "val_000.pt", weights_only=True)
     assert saved["event_logits"].shape == (4,)
+
+
+def test_simple_suite_only_has_four_paired_configs(small_config, tmp_path):
+    from traceformer.experiments.suite import prepare_suite, simple_stage_jobs
+
+    jobs = simple_stage_jobs()
+    assert [(job.name, job.result_id) for job in jobs] == [
+        ("B", "E1"), ("BS", "E2"), ("window_B", "E0"), ("BSR", "E3"),
+    ]
+    assert jobs[-1].parent == "BS"
+    assert jobs[2].parent is None
+    assert job_config(small_config, jobs[2], 37, tmp_path).training.epochs == 18
+    assert job_config(small_config, jobs[3], 37, tmp_path).training.epochs == 24
+    manifest = prepare_suite(small_config, tmp_path / "simple", [37], definitions=jobs)
+    assert len(manifest["jobs"]) == 4
+    assert all(job["seed"] == 37 for job in manifest["jobs"])
+
+
+def test_simple_summary_uses_four_results_and_adjacent_comparisons(small_config, tmp_path):
+    from traceformer.experiments.suite import prepare_suite, simple_stage_jobs, summarize
+    from traceformer.training.engine import _write_json
+
+    root = tmp_path / "summary_simple"
+    manifest = prepare_suite(small_config, root, [37], definitions=simple_stage_jobs())
+    manifest["comparisons"] = [["E1", "E0"], ["E2", "E1"], ["E3", "E2"]]
+    _write_json(root / "suite.json", manifest)
+    for job in manifest["jobs"]:
+        folder = root / job["id"]
+        folder.mkdir(parents=True)
+        score = .8 + int(job["result_id"][1]) * .01
+        report = {
+            "metrics": {"competition": {key: score for key in ("score", "iou", "seg_acc", "pd", "fa")}, "threshold": .5},
+            "fixed_threshold": {"competition": {"score": score}}, "groups": {},
+            "parameters": 100, "mean_seconds_per_sequence": 1., "process_peak_rss_bytes": 1000,
+        }
+        _write_json(folder / "report.json", report)
+        _write_json(folder / "done.json", {"report": str(folder / "report.json")})
+    summarize(root)
+    assert "完成 4/4" in (root / "results.md").read_text(encoding="utf-8")
+    aggregate = json.loads((root / "aggregate.json").read_text(encoding="utf-8"))
+    assert [row["comparison"] for row in aggregate["paired"]] == ["E1-E0", "E2-E1", "E3-E2"]
+    assert all(row["score"] == pytest.approx(.01) for row in aggregate["paired"])
+
+
+def test_simple_reuse_rejects_changed_source_config(small_config, tmp_path):
+    from traceformer.experiments.suite import prepare_simple_suite, prepare_suite
+
+    source = tmp_path / "prior"
+    manifest = prepare_suite(small_config, source, [37])
+    with Path(manifest["jobs"][0]["config"]).open("a", encoding="utf-8") as stream:
+        stream.write("\n# changed after source run\n")
+    destination = tmp_path / "simple_rejected"
+    with pytest.raises(ValueError, match="configuration changed"):
+        prepare_simple_suite(source, destination)
+    assert not destination.exists()
