@@ -6,11 +6,8 @@ import numpy as np
 import torch
 
 
-def add_backend_arguments(parser, *, neural: bool = False, trees: bool = False):
+def add_backend_arguments(parser, *, trees: bool = False):
     """各入口共用后端参数，默认 CPU 保持既有开发流程。"""
-    if neural:
-        parser.add_argument("--neighbor-backend", choices=("cpu", "cuda"), default="cpu",
-                            help="邻域查询后端；cuda 保留原 KD-tree 等距排序")
     if trees:
         parser.add_argument("--prediction-backend", choices=("cpu", "cuda"), default="cpu",
                             help="事件树推理后端")
@@ -18,17 +15,14 @@ def add_backend_arguments(parser, *, neural: bool = False, trees: bool = False):
                             help="事件上下文和特征展开后端；cuda 要求 CUDA 树")
 
 
-def validate_backends(*, device: str = "cpu", neighbor_backend: str = "cpu",
-                      prediction_backend: str = "cpu", feature_backend: str = "cpu"):
-    for backend in (neighbor_backend, prediction_backend, feature_backend):
+def validate_backends(*, prediction_backend: str = "cpu", feature_backend: str = "cpu"):
+    for backend in (prediction_backend, feature_backend):
         if backend not in {"cpu", "cuda"}:
             raise ValueError("inference backend must be cpu or cuda")
-    if neighbor_backend == "cuda" and torch.device(device).type != "cuda":
-        raise ValueError("CUDA neighbors require --device cuda")
     if feature_backend == "cuda" and prediction_backend != "cuda":
         raise ValueError("CUDA features require --prediction-backend cuda")
-    if "cuda" in (neighbor_backend, prediction_backend, feature_backend):
-        require_cuda(device if neighbor_backend == "cuda" else "cuda")
+    if "cuda" in (prediction_backend, feature_backend):
+        require_cuda()
 
 
 def require_cuda(device: str | torch.device = "cuda"):

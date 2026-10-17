@@ -8,7 +8,7 @@ import shutil
 from pathlib import Path
 
 from traceformer.config import load_config
-from traceformer.gpu.runtime import add_backend_arguments, validate_backends
+from traceformer.gpu.runtime import add_backend_arguments
 from traceformer.postprocessing.cache import cache_split
 from traceformer.postprocessing.contracts import PostprocessProtocol
 from traceformer.postprocessing.direct_verifier import train_direct_verifier
@@ -51,7 +51,6 @@ def build_parser() -> argparse.ArgumentParser:
     cache.add_argument("--output-dir", required=True)
     cache.add_argument("--split", choices=("train", "val"), required=True)
     cache.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
-    add_backend_arguments(cache, neural=True)
     cache.add_argument("--quiet", action="store_true")
 
     train = commands.add_parser("train", help="按79/20协议训练并执行分阶段门槛")
@@ -103,7 +102,6 @@ def main() -> None:
     arguments = parser.parse_args()
     try:
         if arguments.command == "cache":
-            validate_backends(device=arguments.device, neighbor_backend=arguments.neighbor_backend)
             output_root = Path(arguments.output_dir)
             output_root.mkdir(parents=True, exist_ok=True)
             copied_config = output_root / "config.yaml"
@@ -119,7 +117,6 @@ def main() -> None:
                 output_root,
                 split=arguments.split,
                 device=arguments.device,
-                neighbor_backend=arguments.neighbor_backend,
                 progress=not arguments.quiet,
             )
             payload = {"split": result.split, "files": len(result.files)}

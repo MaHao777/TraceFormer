@@ -24,24 +24,28 @@ CONFIG_PATHS = (
 )
 
 
-def test_only_fixed_schema7_configs_are_shipped() -> None:
-    assert tuple(sorted((ROOT / "configs").glob("*.yaml"))) == tuple(
-        sorted(CONFIG_PATHS)
-    )
-    for path in CONFIG_PATHS:
+def test_shipped_model_configs_validate() -> None:
+    # 所有入口均使用同一个三锥结构。
+    shipped = CONFIG_PATHS + (ROOT / "configs/traceformer_prefix_cone.yaml",)
+    assert tuple(sorted((ROOT / "configs").glob("*.yaml"))) == tuple(sorted(shipped))
+    for path in shipped:
         assert load_config(path).validate()
 
 
 def test_score_config_fixes_model_modules_and_refinement_stage() -> None:
     config = load_config(ROOT / "configs/traceformer_score_optimized.yaml")
 
-    assert config.training.stage == "refinement"
+    assert config.training.stage == "full"
     assert config.model.token_dim == 64
     assert config.model.event_embed_dim == 64
     assert config.model.num_pool_queries == 4
     assert config.model.num_layers == 3
-    assert config.model.layer_time_scales == (0.5, 0.75, 1.0)
-    assert config.model.max_neighbors_per_cone == 8
+    assert config.model.architecture == "prefix_cone"
+    assert [(w.spatial_radius, w.time_horizon) for w in config.model.cone_windows] == [
+        (8, 2),
+        (4, 4),
+        (2, 8),
+    ]
     assert config.sparse_mixture == SparseMixtureConfig(
         min_events=300000,
         max_polarity_fraction=0.65,
@@ -84,7 +88,7 @@ def test_runtime_variants_keep_one_model_contract() -> None:
         assert config.loss == reference.loss
         assert config.sparse_mixture == reference.sparse_mixture
         assert config.frame_refinement == reference.frame_refinement
-        assert config.training.stage == "refinement"
+        assert config.training.stage == "full"
 
     cpu, cpu_smoke, cuda, cuda_smoke = configs
     assert cpu.training.device == cpu_smoke.training.device == "cpu"
@@ -100,7 +104,9 @@ def test_runtime_variants_keep_one_model_contract() -> None:
 
 @pytest.mark.parametrize("stage", ["full", "sparse_mixture", "refinement"])
 def test_training_stage_accepts_only_explicit_fixed_model_phases(stage: str) -> None:
-    TraceFormerConfig(training=replace(TraceFormerConfig.default().training, stage=stage)).validate()
+    TraceFormerConfig(
+        training=replace(TraceFormerConfig.default().training, stage=stage)
+    ).validate()
 
 
 def test_training_stage_rejects_boolean_or_unknown_values() -> None:
@@ -166,6 +172,10 @@ def test_model_config_contains_structure_not_optional_module_flags() -> None:
         "debug_attention_stats",
         "sparse_mixture_enabled",
         "frame_refinement_enabled",
+        "cone_heads",
+        "layer_time_scales",
+        "max_neighbors_per_cone",
+        "direction_dropout",
     ):
         assert name not in fields
     for name in (
@@ -174,8 +184,7 @@ def test_model_config_contains_structure_not_optional_module_flags() -> None:
         "num_pool_queries",
         "num_layers",
         "num_heads",
-        "cone_heads",
-        "layer_time_scales",
+        "cone_windows",
     ):
         assert name in fields
 

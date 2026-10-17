@@ -24,7 +24,7 @@ from traceformer.artifacts import (
     record_run_finished,
     record_run_started,
 )
-from traceformer.config import TraceFormerConfig
+from traceformer.config import TraceFormerConfig, normalize_model_config
 from traceformer.data import (
     EventSequence,
     HighThresholdView,
@@ -60,7 +60,7 @@ from .runtime import prepare_device
 from .sampling import sample_event_indices
 
 CHECKPOINT_SCHEMA_VERSION = 7
-REFINEMENT_SOURCE_SCHEMA_VERSION = 5
+REFINEMENT_SOURCE_SCHEMA_VERSION = CHECKPOINT_SCHEMA_VERSION
 TRAINING_STATE_SCHEMA_VERSION = 3
 
 SPARSE_INFERENCE_FIELDS = (
@@ -69,10 +69,7 @@ SPARSE_INFERENCE_FIELDS = (
     "threshold_ratio",
 )
 REFINEMENT_MODEL_FIELDS = ("context_dim", "scales")
-LEGACY_FIXED_MODEL_FIELDS = {
-    "causal_mode": False,
-    "debug_attention_stats": False,
-}
+
 
 
 def _update_training_curves(
@@ -96,6 +93,7 @@ def build_model(
     config: TraceFormerConfig, *, ablation: AblationSpec | None = None
 ) -> TraceFormer:
     model = TraceFormer(
+        cone_windows=tuple(config.model.cone_windows),
         width=config.resolution.width,
         height=config.resolution.height,
         spatial_block_size_x=config.model.spatial_block_size_x,
@@ -108,10 +106,6 @@ def build_model(
         num_heads=config.model.num_heads,
         mlp_ratio=config.model.mlp_ratio,
         dropout=config.model.dropout,
-        cone_heads=tuple(config.model.cone_heads),
-        layer_time_scales=tuple(config.model.layer_time_scales),
-        max_neighbors_per_cone=config.model.max_neighbors_per_cone,
-        direction_dropout=config.model.direction_dropout,
         sparse_mixture_router_bias=config.sparse_mixture.initial_router_bias,
         sparse_mixture_residual_scale=(
             config.sparse_mixture.initial_residual_scale
@@ -140,15 +134,13 @@ def _config_subset(value: dict[str, Any], fields: tuple[str, ...]) -> dict[str, 
 
 
 def _fixed_model_config(value: Any) -> dict[str, Any] | None:
-    """移除历史上固定为关闭状态的模型开关，再比较真实结构。"""
+    """校验唯一三锥架构，并规范化已训练权重的结构元数据。"""
 
     if not isinstance(value, dict):
         return None
-    result = dict(value)
-    for name, fixed_value in LEGACY_FIXED_MODEL_FIELDS.items():
-        if name in result and result.pop(name) != fixed_value:
-            return None
-    return result
+    if value.get("architecture") != "prefix_cone":
+        return None
+    return normalize_model_config(value)
 
 
 def _initialize_full_path(
@@ -211,12 +203,12 @@ def _initialize_refinement_head(
     *,
     device: torch.device,
 ) -> dict[str, Any]:
-    """严格加载 schema-5 基线，只保留事件精修头为可训练。"""
+    """严格加载当前三锥主干，只保留事件精修头为可训练。"""
 
     path = Path(checkpoint_path).resolve()
     checkpoint = torch.load(path, map_location=device, weights_only=True)
     if checkpoint.get("schema_version") != REFINEMENT_SOURCE_SCHEMA_VERSION:
-        raise ValueError("refinement initialization requires a schema-5 checkpoint")
+        raise ValueError("refinement initialization requires a current-schema checkpoint")
     if _fixed_model_config(checkpoint.get("model_config")) != _serializable(
         asdict(config.model)
     ):
@@ -237,6 +229,9 @@ def _initialize_refinement_head(
         for name in model.state_dict()
         if not name.startswith("event_refinement_head.")
     }
+    # 当前权重可带精修头；初始化时只加载需要冻结的主干参数。
+    source_state = {name: value for name, value in source_state.items()
+                    if not name.startswith("event_refinement_head.")}
     if set(source_state) != expected_base:
         missing = sorted(expected_base - set(source_state))
         extra = sorted(set(source_state) - expected_base)
@@ -305,7 +300,7 @@ def _initialize_ablation_stage(
         raise ValueError("ablation upstream seed mismatch")
     if source.get("dataset_manifest_sha256") != manifest_digest:
         raise ValueError("ablation upstream dataset mismatch")
-    if source.get("model_config") != _serializable(asdict(config.model)):
+    if _fixed_model_config(source.get("model_config")) != _serializable(asdict(config.model)):
         raise ValueError("ablation upstream model configuration mismatch")
     if source.get("resolution") != _serializable(asdict(config.resolution)):
         raise ValueError("ablation upstream resolution mismatch")
@@ -621,7 +616,6 @@ def load_inference_model(
     checkpoint_path: str | Path,
     *,
     device: torch.device,
-    neighbor_backend: str = "cpu",
 ) -> tuple[TraceFormer, dict[str, Any]]:
     """严格校验检查点契约并构建只读推理模型。"""
 
@@ -633,9 +627,7 @@ def load_inference_model(
     model = build_model(config).to(device)
     model.load_state_dict(checkpoint["model_state"], strict=True)
     model.eval()
-    from traceformer.models.gpu_neighbors import configure_neighbor_backend
 
-    configure_neighbor_backend(model, neighbor_backend)
     return model, checkpoint
 
 def _sparse_mixture_auxiliary_losses(
@@ -1128,6 +1120,7 @@ def _manifest_identity_digest(manifest: dict[str, Any]) -> str:
 def _branch_contract(configuration: dict[str, Any]) -> dict[str, Any]:
     """Return fields that must remain identical across an exact-state branch."""
     contract = json.loads(json.dumps(configuration))
+    contract["model"] = normalize_model_config(contract["model"])
     training = contract["training"]
     for name in (
         "device",
@@ -1359,7 +1352,7 @@ def _run_training_impl(
         )
         if state.get("training_state_schema_version") != TRAINING_STATE_SCHEMA_VERSION:
             raise ValueError("unsupported training state schema version")
-        if state.get("branch_contract") != _branch_contract(configuration):
+        if _branch_contract(state["branch_contract"]) != _branch_contract(configuration):
             raise ValueError("training state branch contract does not match configuration")
         if state.get("dataset_manifest_sha256") != manifest_digest:
             raise ValueError("training state dataset manifest does not match current data")
@@ -1823,12 +1816,7 @@ def evaluate_checkpoint(
     device: str = "cpu",
     progress: bool = False,
     ablation: AblationSpec | None = None,
-    neighbor_backend: str = "cpu",
 ) -> dict[str, Any]:
-    from traceformer.gpu.runtime import validate_backends
-    from traceformer.models.gpu_neighbors import configure_neighbor_backend
-
-    validate_backends(device=device, neighbor_backend=neighbor_backend)
     config.validate()
     runtime = prepare_device(device, num_threads=config.training.num_threads)
     torch_device = runtime.device
@@ -1843,7 +1831,7 @@ def evaluate_checkpoint(
     if checkpoint.get("validation_manifest_sha256") != actual_validation_digest:
         raise ValueError("checkpoint validation dataset manifest does not match current data")
     model = build_model(config, ablation=ablation).to(torch_device)
-    configure_neighbor_backend(model, neighbor_backend)
+
     model.load_state_dict(checkpoint["model_state"])
     threshold = checkpoint.get("decision_threshold")
     return evaluate_model(
@@ -1879,7 +1867,6 @@ def generate_submission_package(
     *,
     device: str = "cpu",
     progress: bool = False,
-    neighbor_backend: str = "cpu",
 ) -> Path:
     """Load a trained checkpoint and produce a competition-ready submission ZIP.
 
@@ -1893,10 +1880,6 @@ def generate_submission_package(
 
     Returns the path of the created ZIP archive.
     """
-    from traceformer.gpu.runtime import validate_backends
-    from traceformer.models.gpu_neighbors import configure_neighbor_backend
-
-    validate_backends(device=device, neighbor_backend=neighbor_backend)
     config.validate()
     runtime = prepare_device(device, num_threads=config.training.num_threads)
     torch_device = runtime.device
@@ -1912,7 +1895,7 @@ def generate_submission_package(
         raise ValueError("checkpoint validation dataset manifest does not match current data")
     model = build_model(config).to(torch_device)
     model.load_state_dict(checkpoint["model_state"])
-    configure_neighbor_backend(model, neighbor_backend)
+
     threshold = float(checkpoint.get("decision_threshold", config.inference.sigmoid_threshold))
     model.eval()
 

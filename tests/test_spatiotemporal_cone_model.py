@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import torch
 
-from traceformer.config import ConeHeadConfig, RefinementScaleConfig
+from traceformer.config import RefinementScaleConfig
 from traceformer.models import TraceFormer
 
 
@@ -19,15 +19,9 @@ def _model() -> TraceFormer:
         num_heads=4,
         mlp_ratio=2.0,
         dropout=0.0,
-        cone_heads=(
-            ConeHeadConfig(1.0, 0.5, 2),
-            ConeHeadConfig(1.0, 1.0, 2),
-            ConeHeadConfig(2.0, 1.5, 3),
-            ConeHeadConfig(2.0, 2.0, 3),
-        ),
-        layer_time_scales=(0.5, 0.75, 1.0),
-        max_neighbors_per_cone=3,
-        direction_dropout=0.0,
+
+
+
         sparse_mixture_router_bias=-2.0,
         sparse_mixture_residual_scale=0.01,
         frame_refinement_context_dim=4,

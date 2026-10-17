@@ -15,7 +15,6 @@ import torch
 from traceformer.config import load_config
 from traceformer.data import NPZEventDataset
 from traceformer.gpu.runtime import add_backend_arguments, validate_backends
-from traceformer.models.gpu_neighbors import configure_neighbor_backend
 from traceformer.postprocessing.contracts import EventCache, density_group, sha256_file
 from traceformer.postprocessing.direct_verifier import (
     apply_direct_verifier,
@@ -31,7 +30,11 @@ from traceformer.postprocessing.learning import (
 )
 from traceformer.postprocessing.submission import load_prediction
 from traceformer.postprocessing.tracking import rescue_reference_tracks
-from traceformer.training.engine import build_model, forward_with_sparse_mixture
+from traceformer.training.engine import (
+    _fixed_model_config,
+    build_model,
+    forward_with_sparse_mixture,
+)
 
 
 def _serializable(value: Any) -> Any:
@@ -149,26 +152,26 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--prediction-threads", type=positive_prediction_threads, default=8)
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
-    add_backend_arguments(parser, neural=True, trees=True)
+    add_backend_arguments(parser, trees=True)
     return parser
 
 
 def main() -> None:
     parser = build_parser()
     arguments = parser.parse_args()
-    validate_backends(device=arguments.device, neighbor_backend=arguments.neighbor_backend,
-        prediction_backend=arguments.prediction_backend, feature_backend=arguments.feature_backend)
+    validate_backends(prediction_backend=arguments.prediction_backend, feature_backend=arguments.feature_backend)
 
     config = load_config(arguments.config)
     checkpoint = torch.load(arguments.checkpoint, map_location="cpu", weights_only=False)
-    if checkpoint.get("schema_version") not in {5, 7}:
-        raise ValueError("event-postprocess submission requires schema 5 or 7")
+    if checkpoint.get("schema_version") != 7:
+        raise ValueError("event-postprocess submission requires schema 7")
     for name, expected in (
         ("model_config", _serializable(asdict(config.model))),
         ("sparse_mixture_config", _serializable(asdict(config.sparse_mixture))),
         ("resolution", asdict(config.resolution)),
     ):
-        if checkpoint.get(name) != expected:
+        actual = _fixed_model_config(checkpoint.get(name)) if name == "model_config" else checkpoint.get(name)
+        if actual != expected:
             raise ValueError(f"checkpoint {name} does not match config")
 
     cache_manifest = json.loads(
@@ -252,7 +255,7 @@ def main() -> None:
     if load_result.missing_keys or load_result.unexpected_keys:
         raise RuntimeError("checkpoint did not strict-load")
     model.eval()
-    configure_neighbor_backend(model, arguments.neighbor_backend)
+
     event_models = load_event_models(model_dir, names=required_event_models(event_contract),
                                     backend=arguments.prediction_backend)
     dataset = NPZEventDataset(
@@ -400,7 +403,7 @@ def main() -> None:
         "event_model_sha256": release_report["event_model_sha256"],
         "prediction_threads": arguments.prediction_threads,
         "device": arguments.device,
-        "neighbor_backend": arguments.neighbor_backend,
+
         "prediction_backend": arguments.prediction_backend,
         "feature_backend": arguments.feature_backend,
         "active_event_models": list(event_models),

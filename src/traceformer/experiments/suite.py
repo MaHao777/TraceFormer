@@ -45,14 +45,6 @@ def stage_jobs() -> list[Job]:
         Job("BSR", "refinement", AblationSpec(), "BS", "A3"),
         Job("same_scale", "refinement", AblationSpec(refinement="same_scale"), "BS", "A7"),
     ]
-    for backbone, result_id in (("window", "A4"), ("past", "A5"), ("no_position", "A6")):
-        jobs.extend([
-            Job(f"{backbone}_B", "full", AblationSpec(backbone, False, "none"), None, None),
-            Job(f"{backbone}_BS", "sparse_mixture", AblationSpec(backbone, True, "none"),
-                f"{backbone}_B", None),
-            Job(f"{backbone}_BSR", "refinement", AblationSpec(backbone),
-                f"{backbone}_BS", result_id),
-        ])
     return jobs
 
 
@@ -66,11 +58,10 @@ def job_config(base: TraceFormerConfig, job: Job, seed: int, output: Path) -> Tr
 
 
 def simple_stage_jobs() -> list[Job]:
-    # E1/E2 复用，队列只补训固定窗口主干和完整网络精修。
+    # E1/E2 复用，队列只补训新三锥完整网络精修。
     return [
         Job("B", "full", AblationSpec(sparse=False, refinement="none"), None, "E1"),
         Job("BS", "sparse_mixture", AblationSpec(refinement="none"), "B", "E2"),
-        Job("window_B", "full", AblationSpec("window", False, "none"), None, "E0"),
         Job("BSR", "refinement", AblationSpec(), "BS", "E3"),
     ]
 
@@ -216,10 +207,10 @@ def prepare_simple_suite(source: Path, root: Path) -> dict:
                               "report_sha256": _file_sha256(Path(done["report"]))}
     manifest = prepare_suite(base, root, [37], definitions=simple_stage_jobs())
     manifest.update(
-        protocol="simple_four_variants", reused_from=str(source),
-        comparisons=[["E1", "E0"], ["E2", "E1"], ["E3", "E2"]],
-        figure_variants=["E0", "E1", "E2", "E3"],
-        variant_labels={"E0": "固定窗口主干", "E1": "时空锥主干 B", "E2": "B + Sparse", "E3": "B + Sparse + 精修"},
+        protocol="simple_three_variants", reused_from=str(source),
+        comparisons=[["E2", "E1"], ["E3", "E2"]],
+        figure_variants=["E1", "E2", "E3"],
+        variant_labels={"E1": "时空锥主干 B", "E2": "B + Sparse", "E3": "B + Sparse + 精修"},
     )
     for identifier, done in reused.items():
         directory = root / identifier
@@ -275,7 +266,7 @@ def summarize(root: Path) -> None:
     paired = []
     comparisons = suite.get("comparisons", [
         ("A1", "A0"), ("A2", "A0"), ("A3", "A1"), ("A3", "A2"),
-        ("A3", "A4"), ("A3", "A5"), ("A3", "A6"), ("A3", "A7"),
+        ("A3", "A7"),
     ])
     for seed in suite["seeds"]:
         by_id = {row["variant"]: row for row in rows if row["seed"] == seed}

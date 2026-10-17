@@ -12,7 +12,6 @@ import pytest
 import torch
 
 from traceformer.config import (
-    ConeHeadConfig,
     DatasetConfig,
     FrameRefinementConfig,
     ModelConfig,
@@ -116,10 +115,7 @@ def _config(data_root: Path, output_root: Path) -> TraceFormerConfig:
             token_dim=8,
             event_embed_dim=4,
             num_heads=2,
-            cone_heads=(
-                ConeHeadConfig(1.0, 0.5, 2),
-                ConeHeadConfig(1.0, 1.0, 3),
-            ),
+
             mlp_ratio=2.0,
             dropout=0.0,
         ),
@@ -228,20 +224,8 @@ def test_cpu_training_writes_reproducible_metrics_and_checkpoint() -> None:
         checkpoint["model_config"]["causal_mode"] = False
         checkpoint["model_config"]["debug_attention_stats"] = False
         torch.save(checkpoint, legacy_metadata_checkpoint)
-        legacy_reproduced = evaluate_checkpoint(
-            changed_config,
-            legacy_metadata_checkpoint,
-            device="cpu",
-        )
-        assert legacy_reproduced["event"] == metrics["event"]
-        checkpoint["model_config"]["causal_mode"] = True
-        torch.save(checkpoint, legacy_metadata_checkpoint)
         with pytest.raises(ValueError, match="model configuration"):
-            evaluate_checkpoint(
-                changed_config,
-                legacy_metadata_checkpoint,
-                device="cpu",
-            )
+            evaluate_checkpoint(changed_config, legacy_metadata_checkpoint, device="cpu")
         checkpoint["model_config"].pop("causal_mode")
         checkpoint["model_config"].pop("debug_attention_stats")
         incompatible_config = replace(
@@ -266,7 +250,7 @@ def test_cpu_training_writes_reproducible_metrics_and_checkpoint() -> None:
             run_training(_config(data_root, output_root), output_dir=run_dir)
 
 
-def test_refinement_initialization_loads_schema5_base_and_trains_only_new_head() -> None:
+def test_refinement_initialization_loads_matching_base_and_trains_only_new_head() -> None:
     with TemporaryDirectory(dir=Path.cwd()) as directory:
         temporary_root = Path(directory)
         data_root = temporary_root / "data"
@@ -279,10 +263,10 @@ def test_refinement_initialization_loads_schema5_base_and_trains_only_new_head()
         output_root = temporary_root / "outputs"
         source_config = _config(data_root, output_root)
         source_model = build_model(source_config)
-        source_path = temporary_root / "schema5.pt"
+        source_path = temporary_root / "base.pt"
         torch.save(
             {
-                "schema_version": 5,
+                "schema_version": 7,
                 "model_state": {
                     name: value
                     for name, value in source_model.state_dict().items()

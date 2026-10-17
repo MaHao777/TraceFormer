@@ -1,0 +1,146 @@
+"""直接评估当前神经网络，保存逐事件概率和掩码；测试集使用验证阈值。"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import time
+from dataclasses import replace
+from pathlib import Path
+
+import numpy as np
+import torch
+
+from traceformer.config import load_config
+from traceformer.data import NPZEventDataset
+from traceformer.training.engine import (
+    _dataset,
+    _dataset_manifest,
+    _file_sha256,
+    _manifest_identity_digest,
+    _metrics_at_threshold,
+    _write_json,
+    forward_with_sparse_mixture,
+    load_inference_model,
+)
+
+
+def evaluate(args):
+    config = load_config(args.config)
+    torch.set_num_threads(args.num_threads or config.training.num_threads)
+    model, checkpoint = load_inference_model(
+        config, args.checkpoint, device=torch.device(args.device)
+    )
+    identity = _manifest_identity_digest(_dataset_manifest(_dataset(config, "val")))
+    if identity != checkpoint["validation_manifest_sha256"]:
+        raise ValueError("checkpoint validation data identity differs")
+    threshold = float(checkpoint["decision_threshold"])
+    dataset = NPZEventDataset(
+        args.dataset_root / args.split,
+        width=config.resolution.width,
+        height=config.resolution.height,
+        duration_ms=config.dataset.duration_ms,
+    )
+    output = args.output
+    output.mkdir(parents=True, exist_ok=True)
+    probabilities = output / "probabilities"
+    masks = output / "predictions"
+    probabilities.mkdir(exist_ok=True)
+    masks.mkdir(exist_ok=True)
+    results, records = [], {}
+    if args.rescore_only:
+        expected = {p.stem for p in dataset.files}
+        if {p.stem for p in probabilities.glob("*.pt")} != expected:
+            raise ValueError("saved prediction file set differs from dataset")
+    with torch.inference_mode():
+        for sequence in dataset:
+            name = sequence.source_path.name
+            path = probabilities / f"{sequence.source_path.stem}.pt"
+            source_hash = _file_sha256(sequence.source_path)
+            started = time.perf_counter()
+            if args.rescore_only:
+                saved = torch.load(path, map_location="cpu", weights_only=True)
+                if saved["source_sha256"] != source_hash:
+                    raise ValueError("prediction source hash differs")
+                probability = saved["event_probabilities"]
+            else:
+                events = sequence.events.to(args.device)
+                batches = torch.zeros(len(events), dtype=torch.long, device=args.device)
+                # 标签与目标 ID 只送入评分器；网络推理显式使用清零的副本。
+                inference_sequence = replace(
+                    sequence,
+                    labels=torch.zeros_like(sequence.labels),
+                    object_ids=torch.zeros_like(sequence.object_ids),
+                )
+                prediction, _ = forward_with_sparse_mixture(
+                    model,
+                    inference_sequence,
+                    events,
+                    batches,
+                    config,
+                    compute_sparse_logits=False,
+                )
+                probability = prediction["event_logits"].sigmoid().cpu()
+                torch.save({"event_probabilities": probability, "source_sha256": source_hash}, path)
+            if probability.shape != (sequence.length,) or not torch.isfinite(probability).all():
+                raise ValueError("invalid aligned probabilities")
+            if bool(((probability < 0) | (probability > 1)).any()):
+                raise ValueError("probabilities must be in [0,1]")
+            prediction = probability >= threshold
+            mask_path = masks / name
+            if args.rescore_only:
+                with np.load(mask_path, allow_pickle=False) as saved_mask:
+                    if not np.array_equal(saved_mask["prediction"], prediction.numpy()):
+                        raise ValueError("saved mask differs from frozen-threshold probabilities")
+            else:
+                np.savez_compressed(mask_path, prediction=prediction.numpy())
+            # 二值 logits 避免概率转回 logits 后的阈值舍入误差。
+            results.append((torch.where(prediction, 20.0, -20.0), sequence))
+            records[name] = {
+                "events": sequence.length,
+                "source_sha256": source_hash,
+                "prediction_sha256": _file_sha256(mask_path),
+                "seconds": time.perf_counter() - started,
+            }
+            print(f"{args.split} {name}: {sequence.length:,} events", flush=True)
+    report = _metrics_at_threshold(results, config, 0.5)
+    report.update(
+        threshold=threshold,
+        split=args.split,
+        sequences=len(dataset),
+        postprocessing=False,
+        test_threshold_selection=False,
+        checkpoint_sha256=_file_sha256(args.checkpoint),
+        architecture=config.model.architecture,
+        parameters=sum(p.numel() for p in model.parameters()),
+        files=records,
+        validation_identity=identity,
+    )
+    report["per_sequence"] = {
+        sequence.source_path.name: _metrics_at_threshold([(logits, sequence)], config, 0.5)[
+            "competition"
+        ]
+        for logits, sequence in results
+    }
+    report.pop("validation_files")
+    destination = output / ("independent_report.json" if args.rescore_only else "report.json")
+    if args.rescore_only:
+        before = json.loads((output / "report.json").read_text(encoding="utf-8"))
+        if (
+            before["competition"] != report["competition"]
+            or before["checkpoint_sha256"] != report["checkpoint_sha256"]
+        ):
+            raise ValueError("independent scoring differs from original report")
+    _write_json(destination, report)
+    print(json.dumps(report["competition"], indent=2), flush=True)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    for name in ("config", "checkpoint", "dataset-root", "output"):
+        parser.add_argument(f"--{name}", type=Path, required=True)
+    parser.add_argument("--split", choices=("val", "test"), default="test")
+    parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
+    parser.add_argument("--num-threads", type=int)
+    parser.add_argument("--rescore-only", action="store_true")
+    evaluate(parser.parse_args())

@@ -15,7 +15,6 @@ import numpy as np
 import torch
 
 from traceformer.gpu.runtime import add_backend_arguments, validate_backends
-from traceformer.models.gpu_neighbors import configure_neighbor_backend
 from traceformer.postprocessing.contracts import EventCache, density_group, sha256_file
 from traceformer.postprocessing.direct_verifier import event_branches
 from traceformer.postprocessing.learning import (
@@ -199,11 +198,9 @@ def infer(
 
 
 def benchmark(args):
-    neighbor_backend = getattr(args, "neighbor_backend", "cpu")
     prediction_backend = getattr(args, "prediction_backend", "cpu")
     feature_backend = getattr(args, "feature_backend", "cpu")
-    validate_backends(device=args.device, neighbor_backend=neighbor_backend,
-        prediction_backend=prediction_backend, feature_backend=feature_backend)
+    validate_backends(prediction_backend=prediction_backend, feature_backend=feature_backend)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     if args.output.exists():
         raise FileExistsError(args.output)
@@ -218,8 +215,8 @@ def benchmark(args):
     reference = load_detector("reference", args.frozen, device)
     main = load_detector("main", args.frozen, device)
     reuse_reference_logits = can_reuse_reference_logits(main, reference)
-    configure_neighbor_backend(main[0], neighbor_backend)
-    configure_neighbor_backend(reference[0], neighbor_backend)
+
+
     release_path = ARCHIVE / "artifacts/event_release"
     release = read(release_path / "release_report.json")
     for name, expected in release["event_model_sha256"].items():
@@ -310,7 +307,7 @@ def benchmark(args):
             "lightgbm_prediction_threads": args.prediction_threads if prediction_backend == "cpu" else None,
             "cuda_event_tree_block_threads": 128 if prediction_backend == "cuda" else None},
         "active_event_models": list(boosters),
-        "neighbor_backend": neighbor_backend,
+
         "prediction_backend": prediction_backend,
         "feature_backend": feature_backend,
         "reference_logits_path": (
@@ -355,7 +352,7 @@ def build_parser():
     parser.add_argument("--repeats", type=int, choices=range(1, 11), default=1)
     parser.add_argument("--processor", required=True)
     parser.add_argument("--prediction-threads", type=positive_prediction_threads, default=8)
-    add_backend_arguments(parser, neural=True, trees=True)
+    add_backend_arguments(parser, trees=True)
     return parser
 
 

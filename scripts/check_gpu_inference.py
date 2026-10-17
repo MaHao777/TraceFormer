@@ -1,4 +1,4 @@
-"""检查 GPU 邻居、特征、树分数及当前模型输出，不训练或搜索阈值。"""
+"""检查当前三锥的 CUDA 重复前向、特征和树分数，不训练或搜索阈值。"""
 
 from __future__ import annotations
 
@@ -16,8 +16,6 @@ import torch
 from traceformer.config import load_config
 from traceformer.data.dataset import LoadedEventSequence, NPZEventDataset
 from traceformer.gpu.runtime import require_cuda
-from traceformer.models.cone_neighbor_builder import ConeNeighborBuilder
-from traceformer.models.gpu_neighbors import configure_neighbor_backend
 from traceformer.postprocessing.contracts import EventCache, sha256_file
 from traceformer.postprocessing.features import build_event_features, make_context
 from traceformer.postprocessing.gpu import CudaEventFeatures
@@ -60,7 +58,7 @@ def check(arguments, *, assets=None):
         assets = load_assets(arguments, device)
     config, model, checkpoint, cpu_trees, gpu_trees = assets
     # 全集核验复用只读权重，但每条序列重新准备几何并先恢复 CPU 查询。
-    configure_neighbor_backend(model, "cpu")
+
     if arguments.sequence:
         dataset = NPZEventDataset(arguments.sequence.parent, width=config.resolution.width,
             height=config.resolution.height, duration_ms=config.dataset.duration_ms)
@@ -85,32 +83,22 @@ def check(arguments, *, assets=None):
         source_path=original.source_path)
     events = sequence.events.to(device)
     batches = torch.zeros(len(events), dtype=torch.int64, device=device)
-    tokenized = model.tokenizer(events, batches)
     report = {"status": "checking", "gpu": torch.cuda.get_device_name(device), "torch": torch.__version__,
-        "model_comparison": "same CUDA network; CPU neighbor queries versus CUDA neighbor queries",
+        "model_comparison": "repeat CUDA network forward; exact output reproducibility",
         "checkpoint_sha256": sha256_file(arguments.checkpoint), "sequence": str(original.source_path),
         "source_sha256": sha256_file(original.source_path) if arguments.sequence else None,
-        "events": original.length, "neighbors": {}, "model_outputs": {}, "tree_scores": {}}
-    for index, layer in enumerate(model.encoder.layers):
-        builder = layer.attention.neighbor_builder
-        expected = builder(tokenized.token_coords, tokenized.token_batch_indices)
-        other = ConeNeighborBuilder(cone_heads=builder.cone_heads,
-            max_neighbors_per_cone=builder.max_neighbors_per_cone,
-            layer_time_scale=builder.layer_time_scale, backend="cuda")
-        actual = other(tokenized.token_coords, tokenized.token_batch_indices)
-        report["neighbors"][str(index)] = {name: difference(getattr(expected, name).cpu().numpy(),
-            getattr(actual, name).cpu().numpy()) for name in ("past_indices", "future_indices")}
-    cpu_query, _ = forward_with_sparse_mixture(model, sequence, events, batches, config, compute_sparse_logits=False)
-    configure_neighbor_backend(model, "cuda")
-    gpu_query, _ = forward_with_sparse_mixture(model, sequence, events, batches, config, compute_sparse_logits=False)
-    for name, expected in cpu_query.items():
+        "events": original.length, "model_outputs": {}, "tree_scores": {}}
+    first_forward, _ = forward_with_sparse_mixture(model, sequence, events, batches, config, compute_sparse_logits=False)
+
+    second_forward, _ = forward_with_sparse_mixture(model, sequence, events, batches, config, compute_sparse_logits=False)
+    for name, expected in first_forward.items():
         if isinstance(expected, torch.Tensor):
-            report["model_outputs"][name] = difference(expected.cpu().numpy(), gpu_query[name].cpu().numpy())
-    probability = torch.sigmoid(gpu_query["event_logits"]).cpu().numpy()
+            report["model_outputs"][name] = difference(expected.cpu().numpy(), second_forward[name].cpu().numpy())
+    probability = torch.sigmoid(second_forward["event_logits"]).cpu().numpy()
     cache = EventCache(name=original.source_path.name, locations=locations, raw_features=raw,
         base_probability=probability,
-        token_features=gpu_query["token_features"].cpu().numpy().astype(np.float16).astype(np.float32),
-        event_token_indices=gpu_query["event_token_indices"].cpu().numpy(),
+        token_features=second_forward["token_features"].cpu().numpy().astype(np.float16).astype(np.float32),
+        event_token_indices=second_forward["event_token_indices"].cpu().numpy(),
         prediction=probability >= float(checkpoint["decision_threshold"]))
     names = tuple(arguments.model_names)
     expected = predict_event_scores(cache, cpu_trees, num_threads=arguments.prediction_threads)
@@ -131,13 +119,12 @@ def check(arguments, *, assets=None):
         feature_error = max(feature_error, row["maximum_absolute_difference"])
     report["features"] = {"different": feature_differences, "maximum_absolute_difference": feature_error}
     threshold = float(checkpoint["decision_threshold"])
-    cpu_mask = torch.sigmoid(cpu_query["event_logits"]).cpu().numpy() >= threshold
-    gpu_mask = probability >= threshold
-    report["decision_mask"] = difference(cpu_mask, gpu_mask)
+    first_mask = torch.sigmoid(first_forward["event_logits"]).cpu().numpy() >= threshold
+    second_mask = probability >= threshold
+    report["decision_mask"] = difference(first_mask, second_mask)
     if getattr(arguments, "prediction_dir", None):
-        write_prediction_npz(arguments.prediction_dir / original.source_path.name, gpu_mask)
+        write_prediction_npz(arguments.prediction_dir / original.source_path.name, second_mask)
     rows = [*report["model_outputs"].values(), report["features"], report["decision_mask"]]
-    rows.extend(row for layers in report["neighbors"].values() for row in layers.values())
     rows.extend(row for mode in report["tree_scores"].values() for row in mode.values())
     report["status"] = "verified" if all(row["different"] == 0 for row in rows) else "mismatch"
     report["real_cuda_verified"] = report["status"] == "verified"

@@ -7,12 +7,17 @@ from typing import Any
 import torch
 from torch import nn
 
-from traceformer.config import DEFAULT_REFINEMENT_SCALES, ConeHeadConfig, RefinementScaleConfig
+from traceformer.config import (
+    DEFAULT_CONE_WINDOWS,
+    DEFAULT_REFINEMENT_SCALES,
+    ConeWindowConfig,
+    RefinementScaleConfig,
+)
 
-from .cone_transformer import ConeTransformerEncoder
 from .event_decoder import EventDecoder
 from .event_refinement import MultiScaleEventRefinementHead
 from .event_tokenizer import EventTokenizer
+from .prefix_cone import PrefixConeEncoder
 from .sparse_mixture import SparseTokenMixture
 
 
@@ -50,18 +55,13 @@ class TraceFormer(nn.Module):
         num_heads: int,
         mlp_ratio: float,
         dropout: float,
-        cone_heads: tuple[ConeHeadConfig, ...],
-        layer_time_scales: tuple[float, ...],
-        max_neighbors_per_cone: int,
-        direction_dropout: float,
         num_pool_queries: int = 4,
         sparse_mixture_router_bias: float = -2.0,
         sparse_mixture_residual_scale: float = 0.01,
         frame_refinement_context_dim: int = 16,
-        frame_refinement_scales: tuple[
-            RefinementScaleConfig, ...
-        ] = DEFAULT_REFINEMENT_SCALES,
+        frame_refinement_scales: tuple[RefinementScaleConfig, ...] = DEFAULT_REFINEMENT_SCALES,
         duration_ms: float = 8000.0,
+        cone_windows: tuple[ConeWindowConfig, ...] = DEFAULT_CONE_WINDOWS,
     ) -> None:
         super().__init__()
         self.token_dim = int(token_dim)
@@ -76,15 +76,13 @@ class TraceFormer(nn.Module):
             token_dim=token_dim,
             num_pool_queries=num_pool_queries,
         )
-        self.encoder = ConeTransformerEncoder(
+        self.encoder = PrefixConeEncoder(
             token_dim=token_dim,
             num_heads=num_heads,
-            cone_heads=cone_heads,
-            layer_time_scales=layer_time_scales,
-            max_neighbors_per_cone=max_neighbors_per_cone,
+            num_layers=num_layers,
+            windows=cone_windows,
             mlp_ratio=mlp_ratio,
             dropout=dropout,
-            direction_dropout=direction_dropout,
         )
         self.decoder = EventDecoder(token_dim=token_dim, dropout=dropout)
         self.sparse_mixture = SparseTokenMixture(
@@ -167,9 +165,7 @@ class TraceFormer(nn.Module):
         event_logits = full_event_logits
         token_features = encoded.token_features
         sparse_event_logits = full_event_logits.new_empty((0,))
-        returned_source_indices = torch.empty(
-            0, dtype=torch.long, device=events.device
-        )
+        returned_source_indices = torch.empty(0, dtype=torch.long, device=events.device)
         mixture_gate = full_event_logits.new_zeros(len(encoded.token_features))
         sparse_token_present = torch.zeros(
             len(encoded.token_features), dtype=torch.bool, device=events.device
@@ -179,26 +175,20 @@ class TraceFormer(nn.Module):
             sparse_source_indices is not None,
         )
         if any(paired_arguments) and not all(paired_arguments):
-            raise ValueError(
-                "sparse_events and sparse_source_indices must be provided together"
-            )
+            raise ValueError("sparse_events and sparse_source_indices must be provided together")
         if sparse_events is not None and sparse_source_indices is not None:
             if (
                 sparse_source_indices.ndim != 1
                 or sparse_source_indices.dtype != torch.long
                 or len(sparse_source_indices) != len(sparse_events)
             ):
-                raise ValueError(
-                    "sparse_source_indices must be int64 and align with sparse_events"
-                )
+                raise ValueError("sparse_source_indices must be int64 and align with sparse_events")
             if len(sparse_source_indices) and (
                 bool(torch.any(sparse_source_indices < 0))
                 or bool(torch.any(sparse_source_indices >= len(events)))
             ):
                 raise ValueError("sparse_source_indices are outside the full event view")
-            sparse_tokenized = self.tokenizer(
-                sparse_events, sparse_batch_indices
-            )
+            sparse_tokenized = self.tokenizer(sparse_events, sparse_batch_indices)
             sparse_encoded = self.encoder(
                 sparse_tokenized.tokens,
                 sparse_tokenized.token_coords,

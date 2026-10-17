@@ -83,7 +83,7 @@ class MultiScaleEventRefinementHead(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, 1),
         )
-        # 零初始化两个残差出口，确保加载 schema-5 后首个前向完全不变。
+        # 零初始化两个残差出口，确保加载匹配主干权重后首个前向完全不变。
         nn.init.zeros_(self.cell_classifier[-1].weight)
         nn.init.zeros_(self.cell_classifier[-1].bias)
         nn.init.zeros_(self.event_classifier[-1].weight)

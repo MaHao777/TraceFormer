@@ -34,11 +34,11 @@ def small_config(tmp_path):
     ))
 
 
-def test_dag_has_eight_results_and_fourteen_stages():
+def test_dag_has_five_current_structure_stages():
     jobs = stage_jobs()
     seen = set()
-    assert len(jobs) == 14
-    assert {job.result_id for job in jobs if job.result_id} == {f"A{i}" for i in range(8)}
+    assert len(jobs) == 5
+    assert {job.result_id for job in jobs if job.result_id} == {"A0", "A1", "A2", "A3", "A7"}
     for job in jobs:
         assert job.parent is None or job.parent in seen
         job.spec.validate_stage(job.stage)
@@ -62,7 +62,7 @@ def test_full_ablation_matches_production_exactly(small_config):
             assert all(torch.equal(left[key], right[key]) for key in left)
 
 
-@pytest.mark.parametrize("backbone", ["cone", "window", "past", "no_position"])
+@pytest.mark.parametrize("backbone", ["cone"])
 def test_base_removes_modules_and_preserves_event_universe(small_config, backbone):
     model = build_model(small_config, ablation=AblationSpec(backbone, False, "none"))
     assert isinstance(model.sparse_mixture, NoSparse)
@@ -85,36 +85,6 @@ def test_same_scale_matches_parameter_count_and_supervision(small_config):
     same = build_model(small_config, ablation=AblationSpec(refinement="same_scale"))
     assert sum(p.numel() for p in full.parameters()) == sum(p.numel() for p in same.parameters())
     assert same.event_refinement_head.scales == (small_config.frame_refinement.scales[-1],) * 3
-
-
-def test_window_preserves_horizon_cap_and_mean_area(small_config):
-    model = build_model(small_config, ablation=AblationSpec("window", False, "none"))
-    import math
-    for layer in model.encoder.layers:
-        builder = layer.attention.neighbor_builder
-        assert builder.max_neighbors_per_cone == small_config.model.max_neighbors_per_cone
-        for original, window in zip(small_config.model.cone_heads, builder.cone_heads, strict=True):
-            h = math.ceil(original.max_time_distance * builder.layer_time_scale)
-            assert window.max_time_distance == original.max_time_distance
-            assert window.slope == 0
-            assert window.base_radius**2 == pytest.approx(
-                sum((original.base_radius + original.slope*d)**2 for d in range(1, h+1)) / h
-            )
-
-
-def test_past_attention_ignores_future_and_other_batches(small_config):
-    model = build_model(small_config, ablation=AblationSpec("past", False, "none"))
-    attention = model.encoder.layers[-1].attention.eval()
-    tokens = torch.randn(4, small_config.model.token_dim)
-    coords = torch.tensor([[0, 0, 0], [0, 0, 1], [0, 0, 2], [0, 0, 0]])
-    batches = torch.tensor([0, 0, 0, 1])
-    expected = attention(tokens, coords, batches).features
-    changed = tokens.clone()
-    changed[2:] += 100
-    actual = attention(changed, coords, batches).features
-    assert torch.equal(expected[1], actual[1])
-    assert not hasattr(attention, "direction_gate")
-    assert attention.direction_embeddings.shape[0] == 1
 
 
 def test_all_stages_train_reload_and_reject_wrong_contract(small_config, tmp_path):
@@ -184,29 +154,29 @@ def test_independent_report_and_saved_predictions(small_config, tmp_path):
     assert saved["event_logits"].shape == (4,)
 
 
-def test_simple_suite_only_has_four_paired_configs(small_config, tmp_path):
+def test_simple_suite_only_has_three_paired_configs(small_config, tmp_path):
     from traceformer.experiments.suite import prepare_suite, simple_stage_jobs
 
     jobs = simple_stage_jobs()
     assert [(job.name, job.result_id) for job in jobs] == [
-        ("B", "E1"), ("BS", "E2"), ("window_B", "E0"), ("BSR", "E3"),
+        ("B", "E1"), ("BS", "E2"), ("BSR", "E3"),
     ]
     assert jobs[-1].parent == "BS"
-    assert jobs[2].parent is None
-    assert job_config(small_config, jobs[2], 37, tmp_path).training.epochs == 18
-    assert job_config(small_config, jobs[3], 37, tmp_path).training.epochs == 24
+    assert jobs[2].parent == "BS"
+    assert job_config(small_config, jobs[0], 37, tmp_path).training.epochs == 18
+    assert job_config(small_config, jobs[2], 37, tmp_path).training.epochs == 24
     manifest = prepare_suite(small_config, tmp_path / "simple", [37], definitions=jobs)
-    assert len(manifest["jobs"]) == 4
+    assert len(manifest["jobs"]) == 3
     assert all(job["seed"] == 37 for job in manifest["jobs"])
 
 
-def test_simple_summary_uses_four_results_and_adjacent_comparisons(small_config, tmp_path):
+def test_simple_summary_uses_three_results_and_adjacent_comparisons(small_config, tmp_path):
     from traceformer.experiments.suite import prepare_suite, simple_stage_jobs, summarize
     from traceformer.training.engine import _write_json
 
     root = tmp_path / "summary_simple"
     manifest = prepare_suite(small_config, root, [37], definitions=simple_stage_jobs())
-    manifest["comparisons"] = [["E1", "E0"], ["E2", "E1"], ["E3", "E2"]]
+    manifest["comparisons"] = [["E2", "E1"], ["E3", "E2"]]
     _write_json(root / "suite.json", manifest)
     for job in manifest["jobs"]:
         folder = root / job["id"]
@@ -220,9 +190,9 @@ def test_simple_summary_uses_four_results_and_adjacent_comparisons(small_config,
         _write_json(folder / "report.json", report)
         _write_json(folder / "done.json", {"report": str(folder / "report.json")})
     summarize(root)
-    assert "完成 4/4" in (root / "results.md").read_text(encoding="utf-8")
+    assert "完成 3/3" in (root / "results.md").read_text(encoding="utf-8")
     aggregate = json.loads((root / "aggregate.json").read_text(encoding="utf-8"))
-    assert [row["comparison"] for row in aggregate["paired"]] == ["E1-E0", "E2-E1", "E3-E2"]
+    assert [row["comparison"] for row in aggregate["paired"]] == ["E2-E1", "E3-E2"]
     assert all(row["score"] == pytest.approx(.01) for row in aggregate["paired"])
 
 

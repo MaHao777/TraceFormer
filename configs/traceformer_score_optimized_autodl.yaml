@@ -1,3 +1,4 @@
+# 唯一三锥结构：全量池化与中心注意力。
 resolution:
   width: 346
   height: 260
@@ -12,32 +13,21 @@ model:
   num_heads: 4
   mlp_ratio: 2.0
   dropout: 0.1
-  cone_heads:
-  - base_radius: 1.0
-    slope: 0.5
-    max_time_distance: 4
-  - base_radius: 1.0
-    slope: 1.0
-    max_time_distance: 4
-  - base_radius: 2.0
-    slope: 1.5
-    max_time_distance: 6
-  - base_radius: 2.0
-    slope: 2.0
-    max_time_distance: 8
-  layer_time_scales:
-  - 0.5
-  - 0.75
-  - 1.0
-  max_neighbors_per_cone: 8
-  direction_dropout: 0.1
+  architecture: prefix_cone
+  cone_windows:
+  - spatial_radius: 8
+    time_horizon: 2
+  - spatial_radius: 4
+    time_horizon: 4
+  - spatial_radius: 2
+    time_horizon: 8
 inference:
   sigmoid_threshold: 0.5
 dataset:
   root: ../data/ev-uav
   duration_ms: 8000
 training:
-  stage: refinement
+  stage: full
   device: cuda
   epochs: 24
   learning_rate: 0.0007
@@ -55,8 +45,8 @@ training:
   gradient_clip_norm: 1.0
   mixed_precision: true
   mixed_precision_dtype: bfloat16
-  max_train_files:
-  max_val_files:
+  max_train_files: null
+  max_val_files: null
 loss:
   focal_alpha: 0.75
   focal_gamma: 2.0

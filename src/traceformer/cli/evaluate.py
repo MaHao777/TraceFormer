@@ -12,7 +12,6 @@ from traceformer.artifacts import (
     resolve_evaluation_output,
 )
 from traceformer.config import load_config
-from traceformer.gpu.runtime import add_backend_arguments
 from traceformer.training.engine import evaluate_checkpoint
 
 
@@ -33,7 +32,6 @@ def main() -> None:
     parser.add_argument(
         "--quiet", action="store_true", help="hide per-file progress messages"
     )
-    add_backend_arguments(parser, neural=True)
     arguments = parser.parse_args()
     try:
         config = load_config(arguments.config)
@@ -42,8 +40,7 @@ def main() -> None:
             arguments.checkpoint,
             device=arguments.device,
             progress=not arguments.quiet,
-            neighbor_backend=arguments.neighbor_backend,
-        )
+            )
     except (OSError, RuntimeError, ValueError) as error:
         parser.error(str(error))
     try:

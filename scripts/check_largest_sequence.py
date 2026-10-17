@@ -56,7 +56,7 @@ def main() -> None:
     )
     initialization.add_argument(
         "--initialize-refinement",
-        help="schema 5 best.pt；只训练多尺度事件精修头",
+        help="当前三锥 best.pt；只训练多尺度事件精修头",
     )
     arguments = parser.parse_args()
 

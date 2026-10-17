@@ -13,8 +13,6 @@ import numpy as np
 import torch
 
 from traceformer.gpu.runtime import validate_backends
-from traceformer.models import cone_neighbor_builder
-from traceformer.models.gpu_neighbors import configure_neighbor_backend
 from traceformer.postprocessing import learning
 from traceformer.postprocessing.gpu import CudaEventFeatures
 from traceformer.postprocessing.learning import load_event_models, required_event_models
@@ -45,8 +43,7 @@ class Timers:
 
 
 def profile(args):
-    validate_backends(device=args.device, neighbor_backend=args.neighbor_backend,
-                      prediction_backend=args.prediction_backend, feature_backend=args.feature_backend)
+    validate_backends(prediction_backend=args.prediction_backend, feature_backend=args.feature_backend)
     torch.set_num_threads(args.num_threads)
     torch.use_deterministic_algorithms(args.device == "cuda")
     torch.backends.cuda.matmul.allow_tf32 = False
@@ -68,17 +65,14 @@ def profile(args):
     with ExitStack() as stack:
         classes = {type(layer.attention.neighbor_builder)
                    for bundle in (main, reference) for layer in bundle[0].encoder.layers}
-        classes.add(cone_neighbor_builder.ConeNeighborBuilder)
         for cls in classes:
             stack.enter_context(patch.object(cls, "__call__", timers.wrap("neighbors", cls.__call__)))
-        stack.enter_context(patch.object(cone_neighbor_builder, "prepare_cone_geometry",
-            timers.wrap("geometry", cone_neighbor_builder.prepare_cone_geometry)))
         for name, bundle in (("main", main), ("reference", reference)):
             for field in ("tokenizer", "encoder", "decoder", "sparse_mixture"):
                 module = getattr(bundle[0], field, None)
                 if module is not None:
                     stack.enter_context(patch.object(module, "forward", timers.wrap(f"{name}_{field}", module.forward)))
-            configure_neighbor_backend(bundle[0], args.neighbor_backend)
+
         for owner, field, label in ((learning, "make_context", "feature_context"),
                                    (learning, "build_event_features", "feature_rows"),
                                    (CudaEventFeatures, "__init__", "feature_context"),
@@ -110,7 +104,7 @@ def profile(args):
     keys = set().union(*(row["components_seconds"] for row in records.values()))
     report = {"status": "verified", "sequences": len(records),
         "scope": "Synchronized instrumented wall times; nested phases overlap. Use the separate uninstrumented benchmark for speed comparisons.",
-        "neighbor_backend": args.neighbor_backend, "prediction_backend": args.prediction_backend,
+         "prediction_backend": args.prediction_backend,
         "feature_backend": args.feature_backend,
         "component_mean_ms": {key: float(np.mean([row["components_seconds"].get(key, 0) for row in records.values()])*1000) for key in sorted(keys)},
         "files": records, "script_sha256": benchmark.sha256_file(__file__)}

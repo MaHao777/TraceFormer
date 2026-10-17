@@ -52,7 +52,7 @@ def main() -> None:
         type=str,
         default=None,
         metavar="BEST_PT",
-        help="initialize schema-5 base weights and train only event refinement",
+        help="initialize matching three-cone base weights and train only event refinement",
     )
     arguments = parser.parse_args()
     try:
