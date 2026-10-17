@@ -1,4 +1,4 @@
-"""盲推并独立复评 99 序列事件发布模型与 dense 长轨迹救回。"""
+"""盲推并独立复评 99 序列事件发布模型与直接验证。"""
 
 from __future__ import annotations
 
@@ -25,10 +25,8 @@ from traceformer.postprocessing.learning import (
 )
 from traceformer.postprocessing.submission import (
     evaluate_predictions,
-    load_prediction,
     write_prediction_npz,
 )
-from traceformer.postprocessing.tracking import rescue_reference_tracks
 
 
 def _metric_delta(after: dict[str, Any], before: dict[str, Any]) -> dict[str, float]:
@@ -55,17 +53,9 @@ def _load_original(path: Path) -> dict[str, Any]:
     return original
 
 
-def _load_named_prediction(directory: Path, name: str) -> np.ndarray:
-    stem = Path(name).stem
-    for candidate in (directory / name, directory / f"{stem}.txt"):
-        if candidate.is_file():
-            return load_prediction(candidate)
-    raise FileNotFoundError(f"missing reference prediction for {name}")
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="盲推并独立比较 99 序列事件发布模型与 dense 长轨迹救回"
+        description="盲推并独立比较 99 序列事件发布模型与直接验证"
     )
     parser.add_argument("--cache-dir", required=True)
     parser.add_argument("--training-dir", required=True)
@@ -76,7 +66,6 @@ def main() -> None:
         action="store_true",
         help="仅诊断开发门槛失败的门控器，结果不得用于正式提交",
     )
-    parser.add_argument("--reference-prediction-dir", required=True)
     parser.add_argument("--dataset-root", required=True)
     parser.add_argument("--original-report", required=True)
     parser.add_argument("--output-dir", required=True)
@@ -89,13 +78,10 @@ def main() -> None:
     training_dir = Path(arguments.training_dir)
     event_release_dir = Path(arguments.event_release_dir)
     direct_verifier_dir = Path(arguments.direct_verifier_dir)
-    reference_dir = Path(arguments.reference_prediction_dir)
     output_dir = Path(arguments.output_dir)
     output_dir.mkdir(parents=True, exist_ok=False)
     event_dir = output_dir / "event_release"
-    event_rescue_dir = output_dir / "event_release_dense_rescue"
     gate_dir = output_dir / "event_release_direct_gate"
-    rescue_dir = output_dir / "event_release_direct_gate_dense_rescue"
     base_dir = output_dir / "objectness"
     report = json.loads(
         (training_dir / "training_report.json").read_text(encoding="utf-8")
@@ -146,41 +132,21 @@ def main() -> None:
             verifier_threshold,
             density_group=group,
         )
-        reference_prediction = _load_named_prediction(reference_dir, cache_path.name)
-        # 先对正式事件发布结果做救回，保持与历史最佳相同的比较口径。
-        event_rescue_prediction, event_rescue_report = rescue_reference_tracks(
-            cache.locations,
-            event_prediction,
-            reference_prediction,
-            density_group=group,
-        )
-        rescue_prediction, rescue_report = rescue_reference_tracks(
-            cache.locations,
-            gate_prediction,
-            reference_prediction,
-            density_group=group,
-        )
         write_prediction_npz(base_dir / cache_path.name, cache.prediction)
         write_prediction_npz(event_dir / cache_path.name, event_prediction)
-        write_prediction_npz(event_rescue_dir / cache_path.name, event_rescue_prediction)
         write_prediction_npz(gate_dir / cache_path.name, gate_prediction)
-        write_prediction_npz(rescue_dir / cache_path.name, rescue_prediction)
         records[cache_path.name] = {
             "events": len(cache.prediction),
             "density_group": group,
             "events_per_frame": density,
             "objectness_positive": int(cache.prediction.sum()),
             "event_positive": int(event_prediction.sum()),
-            "event_rescue_positive": int(event_rescue_prediction.sum()),
-            "event_rescue": event_rescue_report,
             "gate_positive": int(gate_prediction.sum()),
             "gate": {
                 "candidate_components": int(len(candidate_batch.features)),
                 "candidate_events": int(np.sum(direct & ~tracked)),
                 "deleted_events": int(np.sum(event_prediction & ~gate_prediction)),
             },
-            "rescue_positive": int(rescue_prediction.sum()),
-            "rescue": rescue_report,
         }
         print(f"{cache_path.name}: {len(cache.prediction):,} events", flush=True)
 
@@ -188,9 +154,7 @@ def main() -> None:
     original = _load_original(Path(arguments.original_report))
     objectness = evaluate_predictions(base_dir, dataset_root)
     event_stage = evaluate_predictions(event_dir, dataset_root)
-    event_rescue_stage = evaluate_predictions(event_rescue_dir, dataset_root)
     gate_stage = evaluate_predictions(gate_dir, dataset_root)
-    rescue_stage = evaluate_predictions(rescue_dir, dataset_root)
     comparison = {
         "protocol": {
             "source_training_report": str(
@@ -215,7 +179,6 @@ def main() -> None:
             "diagnostic_allow_rejected_verifier": bool(
                 arguments.diagnostic_allow_rejected_verifier
             ),
-            "reference_prediction_dir": str(reference_dir.resolve()),
             "validation_labels_accessed_during_inference": False,
             "development_training_files": len(report["training_names"]),
             "development_holdout_files": len(report["holdout_names"]),
@@ -224,43 +187,27 @@ def main() -> None:
         "original": original,
         "objectness": objectness,
         "event_release": event_stage,
-        "event_release_dense_rescue": event_rescue_stage,
         "event_release_direct_gate": gate_stage,
-        "event_release_direct_gate_dense_rescue": rescue_stage,
         "objectness_vs_original_delta": _metric_delta(
             objectness["aggregate"], original["aggregate"]
         ),
         "event_release_vs_objectness_delta": _metric_delta(
             event_stage["aggregate"], objectness["aggregate"]
         ),
-        "dense_rescue_vs_event_release_delta": _metric_delta(
-            event_rescue_stage["aggregate"], event_stage["aggregate"]
-        ),
         "direct_gate_vs_event_release_delta": _metric_delta(
             gate_stage["aggregate"], event_stage["aggregate"]
-        ),
-        "dense_rescue_vs_direct_gate_delta": _metric_delta(
-            rescue_stage["aggregate"], gate_stage["aggregate"]
         ),
         "val_015": {
             "original": original["files"]["val_015.npz"],
             "objectness": objectness["files"]["val_015.npz"],
             "event_release": event_stage["files"]["val_015.npz"],
-            "event_release_dense_rescue": event_rescue_stage["files"]["val_015.npz"],
             "event_release_direct_gate": gate_stage["files"]["val_015.npz"],
-            "event_release_direct_gate_dense_rescue": rescue_stage["files"][
-                "val_015.npz"
-            ],
         },
         "val_023": {
             "original": original["files"]["val_023.npz"],
             "objectness": objectness["files"]["val_023.npz"],
             "event_release": event_stage["files"]["val_023.npz"],
-            "event_release_dense_rescue": event_rescue_stage["files"]["val_023.npz"],
             "event_release_direct_gate": gate_stage["files"]["val_023.npz"],
-            "event_release_direct_gate_dense_rescue": rescue_stage["files"][
-                "val_023.npz"
-            ],
         },
         "inference": records,
     }

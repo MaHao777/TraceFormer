@@ -28,14 +28,14 @@ def main():
     status = {"status": "running", "pid": os.getpid(), "started_at": time.time(), "stages": {}}
     _write_json(root / "status.json", status)
     commands = []
-    for name, schema in (("TraceFormer-main", 5), ("TraceFormer-reference", 4)):
-        artifact = "main" if schema == 5 else "reference"
+    for name, schema in (("TraceFormer-main", 5),):
+        artifact = "main"
         commands.append((name, [python, "scripts/evaluate_frozen_neural.py", "--source", f"legacy_schema{schema}",
             "--config", f"artifacts/{artifact}/config.yaml", "--checkpoint", f"artifacts/{artifact}/best.pt",
             "--dataset-root", str(root / "data/ev-uav"), "--scoring-config", "configs/comparison.yaml",
             "--output", str(output / name)]))
     commands.append(("TraceFormer-complete", [python, "scripts/evaluate_frozen_system.py",
-        "--cache", str(output / "TraceFormer-main/cache"), "--reference", str(output / "TraceFormer-reference/predictions"),
+        "--cache", str(output / "TraceFormer-main/cache"),
         "--release", "artifacts/event_release", "--dataset-root", str(root / "data/ev-uav"),
         "--output", str(output / "TraceFormer-complete")]))
     for name in ("PACT", "EV-SpSegNet"):
@@ -48,6 +48,10 @@ def main():
         log = root / "logs" / f"{name}.log"
         if (output / name / "report.json").exists():
             report = json.loads((output / name / "report.json").read_text(encoding="utf-8"))
+            # 旧 complete 包含已删除分支，不能被断点续跑误认为当前输出。
+            if name == "TraceFormer-complete" and any(
+                    "rescue" in row for row in report.get("files", {}).values()):
+                raise ValueError("existing complete output uses an older pipeline; use a fresh output root")
             if report["status"] == "complete" and (output / name / "independent_report.json").exists():
                 status["stages"][name] = {"status": "verified_existing"}
                 continue

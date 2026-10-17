@@ -1,3 +1,5 @@
+> 历史评测：包含已于 2026-10-16 删除的 reference recovery。当前实现与复评见 [删除验证报告](reference_recovery_removal_20261016.md)；本页数值保留作历史对照。
+
 # 发布 EV-UAV 测试集本地评测
 
 本次直接复用论文选定的完整发布系统，不重新训练、不调整测试阈值。评测覆盖 `D:/VS_project/TinyObjDetection/EV-UAV-dataset/test` 的全部 24 个带标签序列，共 2,074,586 个事件和 71,407 个目标事件。

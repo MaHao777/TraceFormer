@@ -59,7 +59,7 @@ def verify(root: Path) -> dict:
 
     audit = read(root / "postflight_audit.json")
     result = {"status": "verified", "input_sha256": checked_inputs, "stages": {}}
-    for name in ("TraceFormer-main", "TraceFormer-reference", "PACT", "TraceFormer-complete"):
+    for name in ("TraceFormer-main", "PACT", "TraceFormer-complete"):
         folder = root / "results" / name
         record = audit["stages"][name]
         if record["status"] != "verified":
@@ -84,12 +84,11 @@ def verify(root: Path) -> dict:
                 evidence = report["files"][source.name]
                 for path, key in ((source, "source_sha256"),
                     (root / "results/TraceFormer-main/cache" / source.name, "cache_sha256"),
-                    (root / "results/TraceFormer-reference/predictions" / source.name, "reference_sha256"),
                     (folder / "complete" / source.name, "final_sha256")):
                     if sha256(path) != evidence[key]:
                         raise ValueError(f"complete-system input/output differs: {path}")
             # 比较掩码本身，避免只靠相同全局分数声称与旧发布完全一致。
-            archived = repo / "outputs/postprocess_event_release_dense_rescue_20260829/validation_release99_dense_rescue/event_release_dense_rescue"
+            archived = repo / "outputs/postprocess_event_release_dense_rescue_20260829/validation_release99_dense_rescue/event_release"
             differences = {p.name: int(np.count_nonzero(
                 load_prediction(folder / "complete" / p.name) != load_prediction(archived / p.name)))
                 for p in sources}

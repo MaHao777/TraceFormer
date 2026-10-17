@@ -69,3 +69,7 @@ event_logit = base_event_logit + refinement_delta[event]
 训练阶段、loss 权重、warmup/ramp 和冻结策略不参与推理兼容性判断。历史 schema-7 元数据中固定关闭的 `causal_mode`、`debug_attention_stats`，以及旧的 `enabled/freeze` 字段只在加载时做受限归一化；它们不再是配置项或代码分支。
 
 `best.pt` 用于推理或明确的分阶段初始化；精确续训统一使用 training-state，以恢复优化器、学习率控制器和随机数状态。
+
+## 外部事件后处理
+
+最终掩码为直接验证与主轨迹恢复的并集；不加载独立参考模型或参考预测。神经模型结构不因此改变。删除后的 val/test 对照见 [复评报告](reference_recovery_removal_20261016.md)。

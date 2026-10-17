@@ -28,7 +28,6 @@ from traceformer.postprocessing.submission import (
     load_prediction,
     write_prediction_npz,
 )
-from traceformer.postprocessing.tracking import rescue_reference_tracks
 
 REPO = Path(__file__).resolve().parents[1]
 ARCHIVE = REPO / "outputs/paper_cuda_20260928/copyback_20260929"
@@ -39,7 +38,7 @@ def read(path):
 
 
 def load_detector(name, frozen, device):
-    """分开导入两套归档源码，保留各自函数的模块引用。"""
+    """加载主检测器归档源码并验证权重、配置与源码哈希。"""
     report = read(frozen / name / "report.json")
     schema = report["schema"]
     source = ARCHIVE / f"legacy_schema{schema}/src"
@@ -77,48 +76,10 @@ def load_detector(name, frozen, device):
     return model, config, engine, report
 
 
-def can_reuse_reference_logits(main, reference):
-    """只有已验证的 schema 5/4 主干完全一致时才复用混合前 logits。"""
-    model, config, engine, report = main
-    ref_model, ref_config, ref_engine, ref_report = reference
-    if report["schema"] != 5 or ref_report["schema"] != 4:
-        return False
-    if model.training or ref_model.training:
-        return False
-    for field in ("model", "resolution"):
-        if asdict(getattr(config, field)) != asdict(getattr(ref_config, field)):
-            return False
-    if config.dataset.duration_ms != ref_config.dataset.duration_ms:
-        return False
-    # 参考模型的全部权重必须对应主模型的 tokenizer/encoder/decoder。
-    state, ref_state = model.state_dict(), ref_model.state_dict()
-    backbone = {key for key in state if key.startswith(("tokenizer.", "encoder.", "decoder."))}
-    if not backbone or backbone != set(ref_state):
-        return False
-    for key in ref_state:
-        value, ref_value = state[key], ref_state[key]
-        if value.dtype != ref_value.dtype or value.shape != ref_value.shape:
-            return False
-        if not torch.equal(value, ref_value):
-            return False
-    # 对应主干源码也须一致；缺失源码时保守回退独立前向。
-    filenames = (
-        "event_tokenizer.py", "cone_transformer.py", "cone_attention.py",
-        "cone_neighbor_builder.py", "event_decoder.py", "relative_position.py",
-    )
-    try:
-        main_root = Path(engine.__file__).resolve().parents[1] / "models"
-        ref_root = Path(ref_engine.__file__).resolve().parents[1] / "models"
-        return all(sha256_file(main_root / name) == sha256_file(ref_root / name)
-                   for name in filenames)
-    except OSError:
-        return False
-
-
 @torch.no_grad()
 def infer(
-    source, raw_features, locations, path, main, reference, boosters, release, *,
-    prediction_threads=8, reuse_reference_logits=False,
+    source, raw_features, locations, path, main, boosters, release, *,
+    prediction_threads=8,
     feature_backend="cpu",
 ):
     """计时从内存输入的归一化开始，到最终布尔掩码结束。"""
@@ -165,35 +126,16 @@ def infer(
     # 单独记录事件树及特征耗时，保留原后处理合计字段。
     scores_done = time.perf_counter()
     _, _, tracked, direct = event_branches(cache, scores, release["event_contract"])
-    verified = time.perf_counter()
-    reference_mask = np.zeros(len(events), dtype=bool)
-    # 参考恢复只在密集组生效；其他组不执行无用的参考前向。
-    if group == "dense":
-        ref_model, _, _, ref_report = reference
-        if reuse_reference_logits:
-            # 混合前 full logits 与参考主干等价，参考阈值和恢复规则保持原样。
-            reference_tensor = torch.sigmoid(prediction["full_event_logits"])
-        else:
-            ref_prediction = ref_model(events, batch)
-            reference_tensor = torch.sigmoid(ref_prediction["event_logits"])
-        if device.type == "cuda":
-            torch.cuda.synchronize(device)
-    reference_done = time.perf_counter()
-    if group == "dense":
-        reference_mask = reference_tensor.cpu().numpy() >= ref_report["release_threshold"]["threshold"]
-    reference_copied = time.perf_counter()
-    final, _ = rescue_reference_tracks(locations, direct | tracked, reference_mask,
-                                      density_group=group)
+    # 合并掩码也计入主轨迹阶段，不再加载第二套检测器。
+    final = direct | tracked
     ended = time.perf_counter()
     timings = {"input_seconds": prepared-started, "main_seconds": neural_done-prepared,
-        "device_to_host_seconds": copied-neural_done+reference_copied-reference_done,
-        "verification_tracking_seconds": verified-copied,
+        "device_to_host_seconds": copied-neural_done,
+        "verification_tracking_seconds": ended-copied,
         "event_scores_seconds": scores_done-copied,
-        "tracking_seconds": verified-scores_done,
-        "reference_seconds": reference_done-verified,
-        "reference_recovery_seconds": ended-reference_copied, "total_seconds": ended-started}
-    masks = {"complete": final, "neural": cache.prediction, "reference": reference_mask,
-             "direct": direct, "event_track": direct | tracked}
+        "tracking_seconds": ended-scores_done, "total_seconds": ended-started}
+    masks = {"complete": final, "neural": cache.prediction,
+             "direct": direct, "event_track": final}
     return masks, group, sparse is not None, timings
 
 
@@ -212,10 +154,7 @@ def benchmark(args):
     torch.use_deterministic_algorithms(device.type == "cuda")
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA unavailable")
-    reference = load_detector("reference", args.frozen, device)
     main = load_detector("main", args.frozen, device)
-    reuse_reference_logits = can_reuse_reference_logits(main, reference)
-
 
     release_path = ARCHIVE / "artifacts/event_release"
     release = read(release_path / "release_report.json")
@@ -245,21 +184,15 @@ def benchmark(args):
             locations = data["ev_loc"].astype(np.int64)
             features = data["evs_norm"][:, :4].astype(np.float32)
         masks, group, sparse, timings = infer(
-            source, features, locations, path, main, reference, boosters, release,
+            source, features, locations, path, main, boosters, release,
             prediction_threads=args.prediction_threads,
-            feature_backend=feature_backend,
-            reuse_reference_logits=reuse_reference_logits)
+            feature_backend=feature_backend)
         differences = {}
         for stage in ("complete", "neural", "direct", "event_track"):
             differences[stage] = int(np.count_nonzero(
-                masks[stage] != load_prediction(args.frozen / "complete" / stage / path.name)))
+                masks[stage] != load_prediction(args.frozen / "complete" / ("event_track" if stage == "complete" else stage) / path.name)))
             if differences[stage]:
                 raise ValueError(f"frozen {stage} mask differs: {path.name}")
-        if group == "dense":
-            differences["reference"] = int(np.count_nonzero(masks["reference"] != load_prediction(
-                args.frozen / "reference/predictions" / path.name)))
-            if differences["reference"]:
-                raise ValueError("frozen dense reference mask differs")
         # CUDA 浮点差异如实计数；重复运行必须得到相同的最终决策。
         if pass_index >= 0:
             for stage in ("complete", "neural", "direct", "event_track"):
@@ -273,7 +206,7 @@ def benchmark(args):
                 "cpu_mask_differences": differences,
                 "frozen_masks_exact": not any(differences.values())}
 
-    # 固定最大序列预热一次，覆盖主网络、稀疏视图、树模型及参考分支。
+    # 固定最大序列预热一次，覆盖主网络、稀疏视图、树模型。
     warmup = max(paths, key=lambda p: audit[p.name]["events"])
     print(f"warmup {warmup.name}", flush=True)
     warmup_record = run(warmup, -1)
@@ -307,20 +240,14 @@ def benchmark(args):
             "lightgbm_prediction_threads": args.prediction_threads if prediction_backend == "cpu" else None,
             "cuda_event_tree_block_threads": 128 if prediction_backend == "cuda" else None},
         "active_event_models": list(boosters),
-
         "prediction_backend": prediction_backend,
         "feature_backend": feature_backend,
-        "reference_logits_path": (
-            "main_full_event_logits" if reuse_reference_logits else "independent_reference_forward"
-        ),
         "scope": "In-memory input normalization through final mask; includes main full/sparse "
-                 "forward, quantized feature construction, active tree ensembles, tracking, and "
-                 "conditional dense-reference logits/recovery. Excludes model loading, disk "
+                 "forward, quantized feature construction, active tree ensembles, tracking. Excludes model loading, disk "
                  "I/O, scoring, and correctness checks. CUDA synchronized at timing boundaries; "
                  "device transfers included in total and recorded separately. All repeated passes "
                  "after one full-system warmup are averaged; repeat masks must match exactly.",
-        "neural_parameters": {"main": main[3]["parameters"], "reference": reference[3]["parameters"],
-                              "total": main[3]["parameters"]+reference[3]["parameters"]},
+        "neural_parameters": {"main": main[3]["parameters"], "total": main[3]["parameters"]},
         "tree_models": tree_counts, "mean_ms_per_sequence": float(totals.mean()*1000),
         "median_ms_per_sequence": float(np.median(totals)*1000),
         "min_ms_per_sequence": float(totals.min()*1000), "max_ms_per_sequence": float(totals.max()*1000),
@@ -334,7 +261,7 @@ def benchmark(args):
             sorted((prediction_root / stage).glob("*.npz"))}
             for stage in ("neural", "direct", "event_track", "complete")},
         "checkpoint_sha256": {name: value[3]["checkpoint_sha256"]
-                              for name, value in (("main", main), ("reference", reference))},
+                              for name, value in (("main", main),)},
         "tree_model_sha256": release["event_model_sha256"]}
     args.output.write_text(json.dumps(result, indent=2)+"\n", encoding="utf-8")
     print(f"verified all 24 sequences; mean {result['mean_ms_per_sequence']:.2f} ms/sequence; "

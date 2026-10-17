@@ -33,7 +33,7 @@ from traceformer.postprocessing.submission import (
     evaluate_predictions,
     write_prediction_npz,
 )
-from traceformer.postprocessing.tracking import rescue_reference_tracks, track_prediction
+from traceformer.postprocessing.tracking import track_prediction
 
 
 def _cache(*, labels: bool = True) -> EventCache:
@@ -121,48 +121,6 @@ def test_tracking_recovers_only_events_near_a_stable_track() -> None:
     )
     assert prediction[::2].all()
     assert not prediction[1::2].any()
-
-
-def test_reference_track_rescue_only_adds_dense_long_tracks() -> None:
-    rows = []
-    for frame in range(8):
-        rows.append([20 + frame, 30, frame * 50 + 1])
-    for frame in range(7):
-        rows.append([120 + frame, 130, frame * 50 + 2])
-    locations = np.asarray(rows, dtype=np.int64)
-    current = np.zeros(len(locations), dtype=bool)
-    reference = np.ones(len(locations), dtype=bool)
-
-    rescued, report = rescue_reference_tracks(
-        locations,
-        current,
-        reference,
-        density_group="dense",
-    )
-
-    assert rescued[:8].all()
-    assert not rescued[8:].any()
-    assert report == {"candidate_events": 15, "selected_tracks": 1, "added_events": 8}
-
-
-def test_reference_track_rescue_preserves_sparse_prediction() -> None:
-    locations = np.asarray(
-        [[20 + frame, 30, frame * 50 + 1] for frame in range(8)],
-        dtype=np.int64,
-    )
-    current = np.zeros(8, dtype=bool)
-    current[0] = True
-    reference = np.ones(8, dtype=bool)
-
-    rescued, report = rescue_reference_tracks(
-        locations,
-        current,
-        reference,
-        density_group="sparse",
-    )
-
-    assert np.array_equal(rescued, current)
-    assert report == {"candidate_events": 7, "selected_tracks": 0, "added_events": 0}
 
 
 class _KeepFirstCandidate:

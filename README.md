@@ -1,5 +1,7 @@
 # TraceFormer 固定 schema-7 事件检测模型
 
+当前后处理已删除 reference recovery，最终使用直接验证与主轨迹并集；[48 序列独立复评与变更说明](docs/reference_recovery_removal_20261016.md)。论文冻结 schema-5 系统与下述当前 schema-7 模型分开计分。
+
 项目地址：https://github.com/MaHao777/TraceFormer
 
 Python 包为 `traceformer`，模型入口为 `from traceformer import TraceFormer`，配置类为 `TraceFormerConfig`。命令统一使用 `traceformer-` 前缀。更名前的本地目录名与历史实验记录可继续保留；checkpoint 的张量键和数值结构不因名称变更而改变。

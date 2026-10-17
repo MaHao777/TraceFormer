@@ -50,8 +50,6 @@ def profile(args):
     torch.backends.cudnn.allow_tf32 = False
     device = torch.device(args.device)
     main = benchmark.load_detector("main", args.frozen, device)
-    reference = benchmark.load_detector("reference", args.frozen, device)
-    reuse = benchmark.can_reuse_reference_logits(main, reference)
     release_path = benchmark.ARCHIVE / "artifacts/event_release"
     release = benchmark.read(release_path / "release_report.json")
     boosters = load_event_models(release_path / "events", names=required_event_models(release["event_contract"]),
@@ -64,10 +62,10 @@ def profile(args):
     records = {}
     with ExitStack() as stack:
         classes = {type(layer.attention.neighbor_builder)
-                   for bundle in (main, reference) for layer in bundle[0].encoder.layers}
+                   for bundle in (main,) for layer in bundle[0].encoder.layers}
         for cls in classes:
             stack.enter_context(patch.object(cls, "__call__", timers.wrap("neighbors", cls.__call__)))
-        for name, bundle in (("main", main), ("reference", reference)):
+        for name, bundle in (("main", main),):
             for field in ("tokenizer", "encoder", "decoder", "sparse_mixture"):
                 module = getattr(bundle[0], field, None)
                 if module is not None:
@@ -89,11 +87,11 @@ def profile(args):
                 raw = data["evs_norm"][:, :4].astype(np.float32)
                 locations = data["ev_loc"].astype(np.int64)
             timers.values.clear()
-            masks, _, _, timings = benchmark.infer(source, raw, locations, path, main, reference,
+            masks, _, _, timings = benchmark.infer(source, raw, locations, path, main,
                 boosters, release, prediction_threads=args.prediction_threads,
-                reuse_reference_logits=reuse, feature_backend=args.feature_backend)
+                feature_backend=args.feature_backend)
             for stage in ("complete", "neural", "direct", "event_track"):
-                if not np.array_equal(masks[stage], load_prediction(args.frozen / "complete" / stage / path.name)):
+                if not np.array_equal(masks[stage], load_prediction(args.frozen / "complete" / ("event_track" if stage == "complete" else stage) / path.name)):
                     raise ValueError(f"frozen {stage} mask differs: {path.name}")
             return {"components_seconds": dict(timers.values), "timings": timings}
 
@@ -104,7 +102,7 @@ def profile(args):
     keys = set().union(*(row["components_seconds"] for row in records.values()))
     report = {"status": "verified", "sequences": len(records),
         "scope": "Synchronized instrumented wall times; nested phases overlap. Use the separate uninstrumented benchmark for speed comparisons.",
-         "prediction_backend": args.prediction_backend,
+        "prediction_backend": args.prediction_backend,
         "feature_backend": args.feature_backend,
         "component_mean_ms": {key: float(np.mean([row["components_seconds"].get(key, 0) for row in records.values()])*1000) for key in sorted(keys)},
         "files": records, "script_sha256": benchmark.sha256_file(__file__)}

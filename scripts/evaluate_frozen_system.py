@@ -18,10 +18,8 @@ from traceformer.postprocessing.learning import (
 )
 from traceformer.postprocessing.submission import (
     evaluate_predictions,
-    load_prediction,
     write_prediction_npz,
 )
-from traceformer.postprocessing.tracking import rescue_reference_tracks
 from traceformer.training.engine import _file_sha256, _write_json
 
 
@@ -39,8 +37,6 @@ def evaluate(args):
     names = {p.name for p in paths}
     if names != {p.name for p in source.glob("*.npz")} or len(paths) != 24:
         raise ValueError("requires exactly the 24 selected partition files")
-    if names != {p.name for p in args.reference.glob("*.npz")}:
-        raise ValueError("reference predictions differ from selected partition")
     records = {}
     for path in paths:
         cache = EventCache.load(path, allow_labels=False)
@@ -50,14 +46,14 @@ def evaluate(args):
         scores = predict_event_scores(cache, models, num_threads=args.prediction_threads)
         _, _, tracked, direct = event_branches(cache, scores, release["event_contract"])
         group, _ = density_group(cache.locations)
-        reference = load_prediction(args.reference / path.name)
-        final, rescue = rescue_reference_tracks(cache.locations, direct | tracked, reference, density_group=group)
+        # 最终输出只合并直接验证与主轨迹分支。
+        final = direct | tracked
         for stage, mask in {"neural": cache.prediction, "direct": direct,
                             "event_track": direct | tracked, "complete": final}.items():
             write_prediction_npz(args.output / stage / path.name, mask)
-        records[path.name] = {"rescue": rescue, "density_group": group,
+        records[path.name] = {"density_group": group,
             "source_sha256": _file_sha256(source / path.name),
-            "cache_sha256": _file_sha256(path), "reference_sha256": _file_sha256(args.reference / path.name),
+            "cache_sha256": _file_sha256(path),
             "final_sha256": _file_sha256(args.output / "complete" / path.name)}
         print(f"complete system {path.name}", flush=True)
     report = {"status": "complete", "labels_accessed_during_inference": False,
@@ -73,7 +69,7 @@ def evaluate(args):
 def build_parser():
     """共用正整数校验，便于检查入口默认值。"""
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ("cache", "reference", "release", "dataset-root", "output"):
+    for name in ("cache", "release", "dataset-root", "output"):
         parser.add_argument(f"--{name}", type=Path, required=True)
     parser.add_argument("--split", choices=("val", "test"), default="val")
     parser.add_argument("--prediction-threads", type=positive_prediction_threads, default=8)

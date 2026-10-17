@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import copy
 import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,11 +9,9 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 import torch
-from torch import nn
 
 from traceformer.cli.postprocess import build_parser
 from traceformer.config import TraceFormerConfig
-from traceformer.data.dataset import NPZEventDataset
 from traceformer.postprocessing import learning
 from traceformer.postprocessing.contracts import EventCache
 from traceformer.postprocessing.direct_verifier import event_branches
@@ -171,110 +168,6 @@ def test_cli_prediction_threads_default_single_and_invalid(entry):
             parser.parse_args(command + ["--prediction-threads", invalid])
 
 
-def _detectors(tmp_path):
-    config = TraceFormerConfig()
-    reference = nn.Module()
-    for name in ("tokenizer", "encoder", "decoder"):
-        reference.add_module(name, nn.Linear(1, 1))
-    main = copy.deepcopy(reference)
-    main.add_module("sparse_mixture", nn.Linear(1, 1))
-    engines = []
-    for name in ("main", "reference"):
-        root = tmp_path / name / "huav"
-        (root / "models").mkdir(parents=True)
-        for filename in ("event_tokenizer", "cone_transformer", "cone_attention",
-                         "cone_neighbor_builder", "event_decoder", "relative_position"):
-            (root / "models" / f"{filename}.py").write_text("# 相同的归档主干\n", encoding="utf-8")
-        engines.append(SimpleNamespace(__file__=str(root / "training/engine.py")))
-    return ((main.eval(), config, engines[0], {"schema": 5}),
-            (reference.eval(), copy.deepcopy(config), engines[1], {"schema": 4}))
-
-
-@pytest.mark.parametrize("mismatch", [None, "weight", "normalization", "config", "source", "schema"])
-def test_reference_reuse_requires_matching_backbone_and_normalization(tmp_path, mismatch):
-    script = _script("benchmark_frozen_system")
-    main, reference = _detectors(tmp_path)
-    if mismatch == "weight":
-        with torch.no_grad():
-            reference[0].decoder.weight.add_(1)
-    elif mismatch == "normalization":
-        from dataclasses import replace
-        reference = (reference[0], replace(reference[1], dataset=replace(
-            reference[1].dataset, duration_ms=100)), *reference[2:])
-    elif mismatch == "config":
-        from dataclasses import replace
-        reference = (reference[0], replace(reference[1], resolution=replace(
-            reference[1].resolution, width=123)), *reference[2:])
-    elif mismatch == "source":
-        source = Path(reference[2].__file__).parents[1] / "models/event_decoder.py"
-        source.write_text("# 不同的主干\n", encoding="utf-8")
-    elif mismatch == "schema":
-        main[3]["schema"] = 7
-    assert script.can_reuse_reference_logits(main, reference) is (mismatch is None)
-
-
-@pytest.mark.parametrize("reuse", [True, False])
-def test_dense_reference_reuse_skips_forward_and_preserves_recovery(monkeypatch, reuse):
-    script = _script("benchmark_frozen_system")
-    # 八帧长轨迹应被救回，七帧短轨迹仍应排除。
-    locations = np.array([[20 + frame, 30, frame * 50 + 1] for frame in range(8)]
-                         + [[120 + frame, 130, frame * 50 + 2] for frame in range(7)])
-    count = len(locations)
-    logits = torch.full((count,), 2.0)
-    calls = []
-
-    class Reference(nn.Module):
-        def forward(self, events, batch):
-            calls.append("reference")
-            return {"event_logits": logits}
-
-    model = nn.Linear(1, 1)
-    engine = SimpleNamespace(NPZEventDataset=NPZEventDataset,
-                             _forward_with_sparse_mixture=lambda *args, **kwargs: ({
-                                 "event_logits": logits + 1,
-                                 "full_event_logits": logits,
-                                 "token_features": torch.zeros(1, 64),
-                                 "event_token_indices": torch.zeros(count, dtype=torch.long),
-                             }, None))
-    monkeypatch.setattr(script, "density_group", lambda _: ("dense", 1000))
-    monkeypatch.setattr(script, "event_branches", lambda *args:
-                        (None, None, np.zeros(count, dtype=bool), np.zeros(count, dtype=bool)))
-    source = np.zeros(count, dtype=[("x", "f4"), ("y", "f4"), ("t", "f8"), ("p", "f4")])
-    masks, group, sparse, timings = script.infer(
-        source, np.zeros((count, 4), dtype=np.float32), locations, Path("tiny.npz"),
-        (model, TraceFormerConfig(), engine, {"release_threshold": {"threshold": 0.8}}),
-        (Reference(), None, None, {"release_threshold": {"threshold": 0.6}}),
-        {}, {"event_contract": {}}, reuse_reference_logits=reuse,
-    )
-    expected = torch.sigmoid(logits).numpy() >= 0.6
-    assert calls == ([] if reuse else ["reference"])
-    assert np.array_equal(masks["reference"], expected)
-    original, _ = script.rescue_reference_tracks(locations, masks["event_track"],
-                                                expected, density_group="dense")
-    assert np.array_equal(masks["complete"], original)
-    assert masks["complete"][:8].all() and not masks["complete"][8:].any()
-    assert group == "dense" and not sparse
-    assert timings["total_seconds"] >= 0
-
-
-@pytest.mark.parametrize("compute_sparse_logits", [True, False])
-def test_sparse_forward_wrapper_passes_auxiliary_flag(monkeypatch, compute_sparse_logits):
-    from traceformer.training import engine
-
-    calls = []
-    events = torch.zeros(4, 4)
-    view = SimpleNamespace(events=events[:2], source_indices=torch.tensor([0, 1]))
-    monkeypatch.setattr(engine, "is_dense_balanced_event_stream", lambda *args, **kwargs: True)
-    monkeypatch.setattr(engine, "simulate_high_threshold_events", lambda *args, **kwargs: view)
-    output, returned_view = engine.forward_with_sparse_mixture(
-        lambda *args, **kwargs: calls.append(kwargs) or {},
-        SimpleNamespace(events=events), events, torch.zeros(4, dtype=torch.long),
-        TraceFormerConfig(), compute_sparse_logits=compute_sparse_logits,
-    )
-    assert calls[0]["compute_sparse_logits"] is compute_sparse_logits
-    assert returned_view is view and output == {}
-
-
 @pytest.mark.parametrize("prediction_backend,feature_backend", [("cpu", "cpu"), ("cuda", "cpu"), ("cuda", "cuda")])
 def test_prediction_pipeline_selects_models_passes_threads_and_reports(monkeypatch, tmp_path,
                                                                      prediction_backend, feature_backend):
@@ -346,3 +239,39 @@ def test_cache_entry_skips_sparse_logits_and_preserves_format(monkeypatch, tmp_p
     with np.load(tmp_path / "output/val/tiny.npz") as saved:
         assert saved["token_features"].dtype == np.float16
         assert "labels" not in saved.files
+
+
+@pytest.mark.parametrize("group", ["sparse", "dense"])
+def test_complete_mask_uses_only_direct_and_main_tracks(monkeypatch, group):
+    from torch import nn
+
+    from traceformer.data import NPZEventDataset
+
+    script = _script("benchmark_frozen_system")
+    # 高神经响应不能绕过验证与主轨迹规则，密集组也没有额外恢复分支。
+    count = 16
+    locations = np.array([[20 + frame, 30, frame * 50 + 1] for frame in range(count)])
+    logits = torch.full((count,), 3.0)
+    model = nn.Linear(1, 1)
+    engine = SimpleNamespace(NPZEventDataset=NPZEventDataset,
+        _forward_with_sparse_mixture=lambda *args, **kwargs: ({
+            "event_logits": logits, "token_features": torch.zeros(1, 64),
+            "event_token_indices": torch.zeros(count, dtype=torch.long),
+        }, None))
+    direct = np.zeros(count, dtype=bool)
+    tracked = direct.copy()
+    direct[0], tracked[1] = True, True
+    monkeypatch.setattr(script, "density_group", lambda _: (group, 1000))
+    monkeypatch.setattr(script, "predict_event_scores", lambda *args, **kwargs: {})
+    monkeypatch.setattr(script, "event_branches", lambda *args: (None, None, tracked, direct))
+    source = np.zeros(count, dtype=[("x", "f4"), ("y", "f4"), ("t", "f8"), ("p", "f4")])
+    masks, _, _, timings = script.infer(
+        source, np.zeros((count, 4), dtype=np.float32), locations, Path("tiny.npz"),
+        (model, TraceFormerConfig(), engine, {"release_threshold": {"threshold": 0.8}}),
+        {}, {"event_contract": {}},
+    )
+    assert np.array_equal(masks["complete"], direct | tracked)
+    assert masks["neural"].all()
+    assert set(masks) == {"complete", "neural", "direct", "event_track"}
+    assert sum(timings[key] for key in ("input_seconds", "main_seconds",
+        "device_to_host_seconds", "event_scores_seconds", "tracking_seconds")) == pytest.approx(timings["total_seconds"])

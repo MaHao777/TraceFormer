@@ -28,8 +28,6 @@ from traceformer.postprocessing.learning import (
     predict_event_scores,
     required_event_models,
 )
-from traceformer.postprocessing.submission import load_prediction
-from traceformer.postprocessing.tracking import rescue_reference_tracks
 from traceformer.training.engine import (
     _fixed_model_config,
     build_model,
@@ -77,21 +75,13 @@ def _write_track2_txt(
     )
 
 
-def _load_named_prediction(directory: Path, name: str) -> np.ndarray:
-    stem = Path(name).stem
-    for candidate in (directory / name, directory / f"{stem}.txt"):
-        if candidate.is_file():
-            return load_prediction(candidate)
-    raise FileNotFoundError(f"missing reference prediction for {name}")
-
-
 def _validation_gate(
     validation_report: dict[str, Any],
     baseline_report: dict[str, Any],
 ) -> dict[str, Any]:
     candidate = validation_report.get(
-        "event_release_direct_gate_dense_rescue",
-        validation_report.get("event_release_dense_rescue"),
+        "event_release_direct_gate",
+        validation_report.get("event_release"),
     )
     if candidate is None:
         raise ValueError("validation report has no final event release stage")
@@ -145,7 +135,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="仅使用已通过门槛的事件模型，不加载直接验证器",
     )
     parser.add_argument("--training-cache-manifest", type=Path, required=True)
-    parser.add_argument("--reference-prediction-dir", type=Path, required=True)
     parser.add_argument("--validation-report", type=Path, required=True)
     parser.add_argument("--baseline-validation-report", type=Path, required=True)
     parser.add_argument("--test-dir", type=Path, required=True)
@@ -216,7 +205,7 @@ def main() -> None:
         arguments.baseline_validation_report.read_text(encoding="utf-8")
     )
     if arguments.event_only:
-        candidate = validation_report["event_release_dense_rescue"]
+        candidate = validation_report["event_release"]
         baseline = validation_report["original"]
         validation_gate = {
             "score_gain": float(candidate["aggregate"]["score"])
@@ -323,16 +312,6 @@ def main() -> None:
                 cache, direct_probability, tracked, direct, verifier_model, verifier_threshold,
                 group=group, event_only=arguments.event_only,
             )
-            reference_prediction = _load_named_prediction(
-                arguments.reference_prediction_dir,
-                sequence.source_path.name,
-            )
-            prediction, rescue_report = rescue_reference_tracks(
-                cache.locations,
-                prediction,
-                reference_prediction,
-                density_group=group,
-            )
             np.savez_compressed(
                 prediction_dir / sequence.source_path.name,
                 prediction=prediction.astype(np.uint8),
@@ -358,7 +337,6 @@ def main() -> None:
                         "candidate_events": int(np.sum(direct & ~tracked)),
                         "deleted_events": int(np.sum(event_prediction & ~prediction)),
                     },
-                    "rescue": rescue_report,
                     "txt_sha256": sha256_file(txt_path),
                 }
             )
@@ -374,14 +352,14 @@ def main() -> None:
             archive.write(txt_path, arcname=txt_path.name)
     manifest = {
         "scheme": (
-            f"schema{checkpoint['schema_version']}_event_release99_dense_rescue"
+            f"schema{checkpoint['schema_version']}_event_release99"
             if arguments.event_only
-            else "schema5_event_release99_direct_temporal_gate_dense_rescue"
+            else "schema5_event_release99_direct_temporal_gate"
         ),
         "validation": validation_report[
-            "event_release_dense_rescue"
+            "event_release"
             if arguments.event_only
-            else "event_release_direct_gate_dense_rescue"
+            else "event_release_direct_gate"
         ]["aggregate"],
         "validation_gate": validation_gate,
         "validation_report": str(arguments.validation_report.resolve()),
@@ -403,7 +381,6 @@ def main() -> None:
         "event_model_sha256": release_report["event_model_sha256"],
         "prediction_threads": arguments.prediction_threads,
         "device": arguments.device,
-
         "prediction_backend": arguments.prediction_backend,
         "feature_backend": arguments.feature_backend,
         "active_event_models": list(event_models),
@@ -418,18 +395,6 @@ def main() -> None:
             verifier_report["release_model"]["sha256"] if verifier_report else None
         ),
         "direct_verifier_threshold": verifier_threshold,
-        "reference_prediction_dir": str(arguments.reference_prediction_dir.resolve()),
-        "dense_rescue_contract": {
-            "enabled_group": "dense",
-            "minimum_track_frames": 8,
-            "cluster_radius": 1,
-            "max_component_span": 12,
-            "max_gap": 2,
-            "max_distance": 4.0,
-            "half_width": 2,
-            "half_height": 2,
-            "extension_frames": 0,
-        },
         "test_dir": str(arguments.test_dir.resolve()),
         "timestamp_format": "%.9f",
         "file_count": len(files),
