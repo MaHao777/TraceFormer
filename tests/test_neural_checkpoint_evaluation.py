@@ -13,13 +13,18 @@ from traceformer.config import TraceFormerConfig
 from traceformer.training.engine import _dataset, _dataset_manifest, _manifest_identity_digest
 
 
-def test_neural_test_prediction_is_annotation_isolated_and_rescorable(tmp_path, monkeypatch):
-    from dataclasses import replace
-
+def load_evaluator():
     source = Path(__file__).parents[1] / "scripts/evaluate_neural_checkpoint.py"
     spec = importlib.util.spec_from_file_location("evaluate_neural_checkpoint", source)
     evaluator = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(evaluator)
+    return evaluator
+
+
+def test_neural_test_prediction_is_annotation_isolated_and_rescorable(tmp_path, monkeypatch):
+    from dataclasses import replace
+
+    evaluator = load_evaluator()
     dtype = [("x", "i2"), ("y", "i2"), ("t", "f8"), ("p", "i1"), ("label", "i1"), ("name", "i1")]
     events = np.array([(1, 1, 0.0, 1, 1, 1), (2, 2, 2.0, 0, 0, 0)], dtype=dtype)
     for split in ("val", "test"):
@@ -47,8 +52,10 @@ def test_neural_test_prediction_is_annotation_isolated_and_rescorable(tmp_path, 
     monkeypatch.setattr(evaluator, "forward_with_sparse_mixture", infer)
     checkpoint_path = tmp_path / "best.pt"
     checkpoint_path.write_bytes(b"checkpoint test identity")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("configuration identity", encoding="utf-8")
     args = SimpleNamespace(
-        config=None,
+        config=config_path,
         checkpoint=checkpoint_path,
         dataset_root=tmp_path,
         output=tmp_path / "result",

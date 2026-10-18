@@ -13,13 +13,16 @@ import torch
 
 from traceformer.config import load_config
 from traceformer.data import NPZEventDataset
+from traceformer.experiments.ablation import AblationSpec
 from traceformer.training.engine import (
     _dataset,
     _dataset_manifest,
     _file_sha256,
     _manifest_identity_digest,
     _metrics_at_threshold,
+    _validate_checkpoint_contract,
     _write_json,
+    build_model,
     forward_with_sparse_mixture,
     load_inference_model,
 )
@@ -28,9 +31,18 @@ from traceformer.training.engine import (
 def evaluate(args):
     config = load_config(args.config)
     torch.set_num_threads(args.num_threads or config.training.num_threads)
-    model, checkpoint = load_inference_model(
-        config, args.checkpoint, device=torch.device(args.device)
-    )
+    ablation_path = getattr(args, "ablation", None)
+    if ablation_path is None:
+        model, checkpoint = load_inference_model(
+            config, args.checkpoint, device=torch.device(args.device)
+        )
+    else:
+        # 实验入口要求显式契约；正式模型加载器仍拒绝所有消融权重。
+        ablation = AblationSpec(**json.loads(ablation_path.read_text(encoding="utf-8")))
+        checkpoint = torch.load(args.checkpoint, map_location=args.device, weights_only=True)
+        _validate_checkpoint_contract(checkpoint, config, ablation=ablation)
+        model = build_model(config, ablation=ablation).to(args.device).eval()
+        model.load_state_dict(checkpoint["model_state"], strict=True)
     identity = _manifest_identity_digest(_dataset_manifest(_dataset(config, "val")))
     if identity != checkpoint["validation_manifest_sha256"]:
         raise ValueError("checkpoint validation data identity differs")
@@ -111,6 +123,10 @@ def evaluate(args):
         postprocessing=False,
         test_threshold_selection=False,
         checkpoint_sha256=_file_sha256(args.checkpoint),
+        config_sha256=_file_sha256(args.config),
+        adapter_sha256=_file_sha256(Path(__file__)),
+        ablation=checkpoint.get("ablation"),
+        inference_annotations="zeroed labels and object IDs",
         architecture=config.model.architecture,
         parameters=sum(p.numel() for p in model.parameters()),
         files=records,
@@ -129,6 +145,9 @@ def evaluate(args):
         if (
             before["competition"] != report["competition"]
             or before["checkpoint_sha256"] != report["checkpoint_sha256"]
+            or before["threshold"] != report["threshold"]
+            or before["ablation"] != report["ablation"]
+            or before["split"] != report["split"]
         ):
             raise ValueError("independent scoring differs from original report")
     _write_json(destination, report)
@@ -143,4 +162,5 @@ if __name__ == "__main__":
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
     parser.add_argument("--num-threads", type=int)
     parser.add_argument("--rescore-only", action="store_true")
+    parser.add_argument("--ablation", type=Path, help="显式消融契约 ablation.json")
     evaluate(parser.parse_args())

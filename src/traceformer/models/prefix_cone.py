@@ -22,13 +22,16 @@ class PrefixSample:
 
 
 def _rectangle_indices(
-    sample: PrefixSample, window: ConeWindowConfig, direction: int, start: int, end: int
+    sample: PrefixSample, window: ConeWindowConfig, direction: int, start: int, end: int,
+    fixed_radius: bool = False,
 ) -> torch.Tensor:
     """生成四角索引；越过时间边界时四角均置零，使求和贡献为零。"""
     times, height, width = sample.shape
     xyz = sample.coords[start:end]
     distance = torch.arange(1, window.time_horizon + 1, device=xyz.device)
-    radius = window.spatial_radius * distance // window.time_horizon
+    # 固定窗口消融仅替换截面，时间边界和求和路径与正式锥一致。
+    radius = (torch.full_like(distance, window.spatial_radius) if fixed_radius
+              else window.spatial_radius * distance // window.time_horizon)
     time = xyz[:, 2:3] + direction * distance
     valid = (time >= 0) & (time < times)
     time = time.clamp(0, times - 1)
@@ -53,7 +56,7 @@ class _ConeSums(torch.autograd.Function):
     """固定几何下的线性区域求和；反向只分配一张前缀表梯度。"""
 
     @staticmethod
-    def forward(ctx, features, sample, windows, chunk_size):
+    def forward(ctx, features, sample, windows, chunk_size, fixed_radius):
         times, height, width = sample.shape
         grid = features.new_zeros((times * height * width, features.shape[-1]))
         grid.index_add_(0, sample.flat_indices, features)
@@ -72,7 +75,9 @@ class _ConeSums(torch.autograd.Function):
             end = min(start + chunk_size, len(features))
             for index, window in enumerate(windows):
                 for direction_index, direction in enumerate((-1, 1)):
-                    corners = _rectangle_indices(sample, window, direction, start, end)
+                    corners = _rectangle_indices(
+                        sample, window, direction, start, end, fixed_radius
+                    )
                     slot = 2 * index + direction_index
                     # 顺序相减减少峰值临时张量，不保留逐邻居特征。
                     rectangle = (
@@ -84,6 +89,7 @@ class _ConeSums(torch.autograd.Function):
                     total[start:end, slot] = rectangle.sum(1)
                     counts[start:end, slot] = (occupied[corners] * signs.long()).sum((1, 2))
         ctx.sample, ctx.windows, ctx.chunk_size = sample, windows, chunk_size
+        ctx.fixed_radius = fixed_radius
         ctx.feature_dim = features.shape[-1]
         ctx.mark_non_differentiable(counts)
         return total, counts
@@ -97,7 +103,9 @@ class _ConeSums(torch.autograd.Function):
             end = min(start + ctx.chunk_size, len(sample.indices))
             for index, window in enumerate(ctx.windows):
                 for direction_index, direction in enumerate((-1, 1)):
-                    corners = _rectangle_indices(sample, window, direction, start, end)
+                    corners = _rectangle_indices(
+                        sample, window, direction, start, end, ctx.fixed_radius
+                    )
                     grad = grad_total[start:end, 2 * index + direction_index]
                     grad = (
                         grad[:, None]
@@ -110,7 +118,7 @@ class _ConeSums(torch.autograd.Function):
         grad_grid = grad_integral.reshape(times, height + 1, width + 1, -1)
         grad_grid = grad_grid.flip((1, 2)).cumsum(1).cumsum(2).flip((1, 2))
         grad_grid = grad_grid[:, 1:, 1:].reshape(-1, ctx.feature_dim)
-        return grad_grid[sample.flat_indices], None, None, None
+        return grad_grid[sample.flat_indices], None, None, None, None
 
 
 def prepare_prefix_geometry(coords: torch.Tensor, batches: torch.Tensor) -> list[PrefixSample]:
@@ -133,6 +141,8 @@ def prefix_cone_pool(
     geometry: list[PrefixSample],
     windows: tuple[ConeWindowConfig, ...],
     chunk_size: int = 1024,
+    *,
+    fixed_radius: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """返回 [N, 6, D] 摘要和 [N, 6] 成员数；不创建邻居列表。"""
     if chunk_size <= 0:
@@ -145,7 +155,7 @@ def prefix_cone_pool(
         selected = sample.indices
         w = weights[selected].float().reshape(-1, 1)
         features = torch.cat((values[selected].float() * w, w), dim=-1)
-        total, count = _ConeSums.apply(features, sample, windows, chunk_size)
+        total, count = _ConeSums.apply(features, sample, windows, chunk_size, fixed_radius)
         mean = total[..., :-1] / total[..., -1:].clamp_min(1e-8)
         summaries[selected] = torch.where(count[..., None] > 0, mean, 0.0)
         counts[selected] = count
@@ -158,6 +168,7 @@ class PrefixConeAttention(nn.Module):
     ) -> None:
         super().__init__()
         self.windows = windows
+        self.fixed_radius = False
         self.pool_value = nn.Linear(token_dim, token_dim)
         self.pool_weight = nn.Linear(token_dim, 1)
         self.shape_embedding = nn.Parameter(torch.empty(len(windows), token_dim))
@@ -175,7 +186,9 @@ class PrefixConeAttention(nn.Module):
             geometry = prepare_prefix_geometry(token_coords, token_batch_indices)
         values = self.pool_value(tokens)
         weights = torch.sigmoid(self.pool_weight(tokens).float()) + 1e-4
-        summaries, counts = prefix_cone_pool(values, weights, geometry, self.windows)
+        summaries, counts = prefix_cone_pool(
+            values, weights, geometry, self.windows, fixed_radius=self.fixed_radius
+        )
         embeddings = (self.shape_embedding[:, None] + self.direction_embedding[None]).flatten(0, 1)
         summaries = summaries.to(tokens.dtype) + embeddings
         available = counts > 0

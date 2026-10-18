@@ -12,6 +12,12 @@ import torch
 from traceformer.config import TraceFormerConfig
 from traceformer.data import is_dense_balanced_event_stream
 from traceformer.experiments.ablation import AblationSpec
+from traceformer.experiments.attention import neighbor_count_summary
+from traceformer.models.prefix_cone import (
+    PrefixConeEncoder,
+    prefix_cone_pool,
+    prepare_prefix_geometry,
+)
 from traceformer.training.engine import (
     _atomic_torch_save,
     _dataset,
@@ -29,7 +35,8 @@ from traceformer.training.runtime import prepare_device
 
 @torch.no_grad()
 def evaluate_ablation(
-    config: TraceFormerConfig, checkpoint_path: Path, spec: AblationSpec, *, save_predictions: bool
+    config: TraceFormerConfig, checkpoint_path: Path, spec: AblationSpec, *, save_predictions: bool,
+    neighbor_diagnostics: bool = False,
 ) -> dict:
     device = prepare_device("cpu", num_threads=config.training.num_threads).device
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
@@ -41,6 +48,7 @@ def evaluate_ablation(
     model.load_state_dict(checkpoint["model_state"], strict=True)
     threshold = float(checkpoint["decision_threshold"])
     results, groups, details, elapsed = [], {"sparse_eligible": [], "ordinary": []}, {}, []
+    neighbor_counts = []
     prediction_dir = checkpoint_path.parent / "predictions"
     if save_predictions:
         prediction_dir.mkdir(exist_ok=True)
@@ -84,6 +92,18 @@ def evaluate_ablation(
             "sparse_view": _sparse_view_statistics(sequence, view, frame_ms=config.evaluation.frame_ms)
             if view is not None else None,
         }
+        if neighbor_diagnostics and isinstance(model.encoder, PrefixConeEncoder) and len(output["token_coords"]):
+            # 几何统计放在计时区间外；三层使用相同区域，只需统计一次。
+            attention = model.encoder.layers[0].attention
+            geometry = prepare_prefix_geometry(output["token_coords"], output["token_batch_indices"])
+            ones = logits.new_ones((len(output["token_coords"]), 1))
+            _, counts = prefix_cone_pool(
+                ones, ones, geometry, attention.windows, fixed_radius=attention.fixed_radius,
+            )
+            neighbor_counts.append(counts)
+            details[sequence.source_path.stem]["neighbor_counts"] = neighbor_count_summary(
+                counts, attention.windows,
+            )
         if save_predictions:
             _atomic_torch_save({
                 "source_path": str(sequence.source_path), "event_logits": logits,
@@ -104,6 +124,10 @@ def evaluate_ablation(
         "process_peak_rss_bytes": getattr(memory, "peak_wset", memory.rss),
         "memory_note": "process peak RSS includes model, evaluation data and diagnostic caches; CPU has no CUDA VRAM",
         "ablation": checkpoint["ablation"],
+        "neighbor_counts": neighbor_count_summary(
+            torch.cat(neighbor_counts), model.encoder.layers[0].attention.windows,
+        ) if neighbor_counts else [],
+        "neighbor_count_note": "actual occupied tokens per region; geometric diagnostics excluded from forward timing",
     }
     _write_json(checkpoint_path.parent / "reproduced_metrics.json", report["metrics"])
     _write_json(checkpoint_path.parent / "ablation_report.json", report)

@@ -31,7 +31,7 @@ from traceformer.training.sampling import sample_event_indices
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="configs/traceformer_score_optimized.yaml")
-    parser.add_argument("--backbone", choices=["cone"], default="cone")
+    parser.add_argument("--backbone", choices=["cone", "box", "pointwise"], default="cone")
     parser.add_argument("--stage", choices=["full", "sparse_mixture", "refinement"], default="full")
     parser.add_argument("--pooling", choices=["attention", "mean", "statistics"], default="attention")
     parser.add_argument("--sequence", default="train_096.npz")

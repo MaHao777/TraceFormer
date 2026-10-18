@@ -9,6 +9,7 @@ import torch
 from torch import nn
 
 from traceformer.config import TraceFormerConfig
+from traceformer.experiments.attention import PointwiseEncoder, matched_box_windows
 from traceformer.experiments.pooling import PoolingTokenizer
 from traceformer.models.event_refinement import EventRefinementOutput
 from traceformer.models.spatiotemporal_cone import TraceFormer
@@ -30,7 +31,7 @@ class AblationSpec:
         return result
 
     def validate(self) -> AblationSpec:
-        if self.backbone != "cone":
+        if self.backbone not in {"cone", "box", "pointwise"}:
             raise ValueError("unknown ablation backbone")
         if self.refinement not in {"none", "multiscale", "same_scale"}:
             raise ValueError("unknown ablation refinement")
@@ -38,6 +39,8 @@ class AblationSpec:
             raise ValueError("unsupported ablation contract")
         if self.pooling not in {"attention", "mean", "statistics"}:
             raise ValueError("unknown token pooling")
+        if self.backbone != "cone" and (self.sparse or self.refinement != "none"):
+            raise ValueError("attention ablation requires backbone without Sparse/refinement")
         if self.pooling != "attention" and (self.backbone != "cone" or self.sparse or self.refinement != "none"):
             raise ValueError("pooling ablation requires cone backbone without Sparse/refinement")
         return self
@@ -71,6 +74,13 @@ class NoSparse(nn.Module):
 def apply_ablation(model: TraceFormer, config: TraceFormerConfig, spec: AblationSpec) -> TraceFormer:
     spec.validate()
     model.ablation_spec = spec.to_dict()
+    if spec.backbone == "box":
+        # 不重新构造注意力，确保 C1/C2 所有可学习参数具有相同初值。
+        for layer in model.encoder.layers:
+            layer.attention.windows = matched_box_windows(config.model.cone_windows)
+            layer.attention.fixed_radius = True
+    elif spec.backbone == "pointwise":
+        model.encoder = PointwiseEncoder(model.encoder, config.model.dropout)
     if spec.pooling != "attention":
         model.tokenizer = PoolingTokenizer.from_attention(model.tokenizer, spec.pooling)
     if not spec.sparse:

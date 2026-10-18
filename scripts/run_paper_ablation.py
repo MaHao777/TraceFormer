@@ -20,12 +20,20 @@ from traceformer.experiments.ablation import AblationSpec
 from traceformer.experiments.figures import render_figures, select_windows
 from traceformer.experiments.report import evaluate_ablation
 from traceformer.experiments.suite import (
+    prepare_attention_suite,
     prepare_pooling_suite,
     prepare_simple_suite,
     prepare_suite,
     summarize,
 )
-from traceformer.training.engine import _file_sha256, _write_json, run_training
+from traceformer.training.engine import (
+    _dataset,
+    _dataset_manifest,
+    _file_sha256,
+    _manifest_identity_digest,
+    _write_json,
+    run_training,
+)
 
 
 def read_json(path: Path) -> dict:
@@ -73,6 +81,10 @@ def worker(root: Path, identifier: str) -> None:
     if _file_sha256(Path(job["config"])) != job["config_sha256"]:
         raise ValueError("ablation stage configuration changed")
     config = load_config(job["config"])
+    if suite.get("dataset_manifest_sha256"):
+        current = _dataset_manifest(_dataset(config, "train"), _dataset(config, "val"))
+        if _manifest_identity_digest(current) != suite["dataset_manifest_sha256"]:
+            raise ValueError("attention suite dataset changed after preparation")
     spec = AblationSpec(**job["spec"])
     folder = root / identifier
     folder.mkdir(parents=True, exist_ok=True)
@@ -107,9 +119,11 @@ def worker(root: Path, identifier: str) -> None:
 
 
 def evaluate_worker(root: Path, identifier: str, attempt: Path) -> None:
-    job = next(item for item in read_json(root / "suite.json")["jobs"] if item["id"] == identifier)
+    suite = read_json(root / "suite.json")
+    job = next(item for item in suite["jobs"] if item["id"] == identifier)
     report = evaluate_ablation(load_config(job["config"]), attempt / "best.pt",
-                               AblationSpec(**job["spec"]), save_predictions=bool(job["result_id"]))
+                               AblationSpec(**job["spec"]), save_predictions=bool(job["result_id"]),
+                               neighbor_diagnostics=suite.get("protocol") == "attention_three_variants")
     if report["metrics"] != read_json(attempt / "metrics.json"):
         raise RuntimeError("independent FP32 metrics do not exactly reproduce saved best metrics")
 
@@ -187,10 +201,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--suite", type=Path, required=True)
     parser.add_argument("--prepare", action="store_true")
+    parser.add_argument("--prepare-attention", action="store_true")
     parser.add_argument("--prepare-simple-from", type=Path)
     parser.add_argument("--prepare-pooling-from", type=Path)
     parser.add_argument("--config", default="configs/traceformer_score_optimized.yaml")
-    parser.add_argument("--seeds", nargs="+", type=int, default=[37, 73, 101])
+    parser.add_argument("--seeds", nargs="+", type=int)
     parser.add_argument("--worker")
     parser.add_argument("--evaluate")
     parser.add_argument("--attempt", type=Path)
@@ -232,7 +247,7 @@ def main() -> None:
         _write_json(root / "status.json", {"status": "prepared", "reused_results": 2, "pending_training_stages": 2,
                                            "updated_at": time.time()})
         print(root, flush=True)
-    elif args.prepare:
+    elif args.prepare or args.prepare_attention:
         config = load_config(args.config)
         for split, expected in (("train", 99), ("val", 24)):
             files = list((Path(config.dataset.root) / split).glob("*.npz"))
@@ -240,7 +255,10 @@ def main() -> None:
                 raise ValueError(f"expected {expected} {split} files, found {len(files)}")
         if config.training.max_train_files is not None or config.training.max_val_files is not None:
             raise ValueError("formal ablation must use every file")
-        prepare_suite(config, root, args.seeds)
+        if args.prepare_attention:
+            prepare_attention_suite(config, root, args.seeds or [37])
+        else:
+            prepare_suite(config, root, args.seeds or [37, 73, 101])
         select_windows(config, root)
         source_snapshot(root)
         summarize(root)

@@ -13,7 +13,7 @@ from pathlib import Path
 import torch
 import yaml
 
-from traceformer.config import TraceFormerConfig, load_config
+from traceformer.config import ModelConfig, TraceFormerConfig, load_config
 from traceformer.experiments.ablation import AblationSpec
 from traceformer.training.engine import (
     _atomic_write_text,
@@ -48,11 +48,15 @@ def stage_jobs() -> list[Job]:
     return jobs
 
 
-def job_config(base: TraceFormerConfig, job: Job, seed: int, output: Path) -> TraceFormerConfig:
+def job_config(
+    base: TraceFormerConfig, job: Job, seed: int, output: Path, *,
+    epochs: int | None = None, save_training_state_interval: int = 10000,
+) -> TraceFormerConfig:
     job.spec.validate_stage(job.stage)
     return replace(base, training=replace(
         base.training, stage=job.stage, seed=seed, device="cpu", mixed_precision=False,
-        epochs=18 if job.stage == "full" else 24, save_training_state_interval=10000,
+        epochs=epochs if epochs is not None else (18 if job.stage == "full" else 24),
+        save_training_state_interval=save_training_state_interval,
         output_root=output,
     )).validate()
 
@@ -73,6 +77,45 @@ def pooling_stage_jobs() -> list[Job]:
         Job("statistics_B", "full", AblationSpec(sparse=False, refinement="none", pooling="statistics"), None, "T0"),
         Job("mean_B", "full", AblationSpec(sparse=False, refinement="none", pooling="mean"), None, "T1"),
     ]
+
+
+def attention_stage_jobs() -> list[Job]:
+    # 三组均从相同种子随机初始化，不复用含 Sparse/精修梯度的旧主干。
+    return [
+        Job(f"{backbone}_B", "full", AblationSpec(backbone, False, "none"), None, f"C{i}")
+        for i, backbone in enumerate(("pointwise", "box", "cone"))
+    ]
+
+
+def prepare_attention_suite(base: TraceFormerConfig, root: Path, seeds: list[int]) -> dict:
+    if base.model != ModelConfig():
+        raise ValueError("attention suite requires the registered tokenizer and three-cone model")
+    # 准备时锁定数据；每个训练进程开始前再次核对，防止三组使用不同文件。
+    dataset_manifest = _dataset_manifest(_dataset(base, "train"), _dataset(base, "val"))
+    manifest = prepare_suite(
+        base, root, seeds, definitions=attention_stage_jobs(), epochs=24,
+        save_training_state_interval=1,
+    )
+    manifest.update(
+        protocol="attention_three_variants",
+        dataset_manifest_sha256=_manifest_identity_digest(dataset_manifest),
+        comparisons=[["C1", "C0"], ["C2", "C1"], ["C2", "C0"]],
+        figure_variants=["C0", "C1", "C2"],
+        variant_labels={"C0": "逐 Token MLP", "C1": "三尺度固定窗口注意力",
+                        "C2": "三锥注意力"},
+        attention_protocol={
+            "epochs": 24, "initialization": "random, paired common weights and RNG",
+            "cone_windows": [[8, 2], [4, 4], [2, 8]],
+            "box_windows": [[6, 2], [3, 4], [1, 8]],
+            "box_volume_relative_difference": [338 / 370 - 1, 196 / 164 - 1, 72 / 64 - 1],
+            "parameters": {"C0": 164077, "C1": 163972, "C2": 163972},
+            "pointwise_hidden_dim": 164,
+            "limitations": "approximate volume match; validation selects checkpoint/threshold; single-seed evidence",
+        },
+    )
+    _write_json(root / "dataset_manifest.json", dataset_manifest)
+    _write_json(root / "suite.json", manifest)
+    return manifest
 
 
 def prepare_pooling_suite(source: Path, root: Path) -> dict:
@@ -131,7 +174,8 @@ def prepare_pooling_suite(source: Path, root: Path) -> dict:
 
 
 def prepare_suite(
-    base: TraceFormerConfig, root: Path, seeds: list[int], *, definitions: list[Job] | None = None
+    base: TraceFormerConfig, root: Path, seeds: list[int], *, definitions: list[Job] | None = None,
+    epochs: int | None = None, save_training_state_interval: int = 10000,
 ) -> dict:
     if len(set(seeds)) != len(seeds) or not seeds:
         raise ValueError("seeds must be nonempty and unique")
@@ -142,7 +186,8 @@ def prepare_suite(
     for seed in seeds:
         for job in definitions if definitions is not None else stage_jobs():
             identifier = f"seed{seed}/{job.name}"
-            config = job_config(base, job, seed, root)
+            config = job_config(base, job, seed, root, epochs=epochs,
+                                save_training_state_interval=save_training_state_interval)
             config_path = root / "configs" / f"seed{seed}_{job.name}.yaml"
             config_path.parent.mkdir(exist_ok=True)
             _atomic_write_text(config_path, yaml.safe_dump(
@@ -295,11 +340,16 @@ def summarize(root: Path) -> None:
     if suite.get("variant_labels"):
         lines.extend(["", "配置说明：", ""])
         lines.extend(f"- {key}：{value}" for key, value in suite["variant_labels"].items())
-    if suite.get("protocol") == "pooling_three_variants":
-        lines.extend(["", "所有组关闭 Sparse 和精修；T1/T2 近似匹配参数量，T0 为较小统计基线。T2 复用完整训练后重新复评，T0/T1 从头训练。", "",
-                      "|配置|阈值|Score@0.5|参数量|秒/序列|", "|---|---:|---:|---:|---:|"])
+    if suite.get("protocol") in {"pooling_three_variants", "attention_three_variants"}:
+        note = ("所有组关闭 Sparse 和精修；三组从头训练24轮，C0/C1/C2近似匹配参数量。"
+                "固定窗口仅近似等体积，实际邻居数见各组 ablation_report.json。"
+                if suite["protocol"] == "attention_three_variants" else
+                "所有组关闭 Sparse 和精修；T1/T2 近似匹配参数量，T0 为较小统计基线。"
+                "T2 复用完整训练后重新复评，T0/T1 从头训练。")
+        lines.extend(["", note, "", "|配置|阈值|Score@0.5|参数量|秒/序列|峰值RSS MiB|",
+                      "|---|---:|---:|---:|---:|---:|"])
         for row in sorted(rows, key=lambda r: r["variant"]):
-            lines.append(f"|{row['variant']}|{row['threshold']:.4f}|{row['score_threshold_05']:.6f}|{row['parameters']}|{row['seconds_per_sequence']:.3f}|")
+            lines.append(f"|{row['variant']}|{row['threshold']:.4f}|{row['score_threshold_05']:.6f}|{row['parameters']}|{row['seconds_per_sequence']:.3f}|{row['process_peak_rss_bytes'] / 2**20:.1f}|")
         lines.extend(["", "同种子差值：", ""])
         for row in paired:
             lines.append(f"- {row['comparison']}：ΔScore={row['score']:+.6f}，ΔIoU={row['iou']:+.6f}，ΔPd={row['pd']:+.6f}，ΔFa={row['fa']:+.8g}")

@@ -1,5 +1,45 @@
 # TraceFormer 核心消融（CPU）
 
+## 2026-10-17 三锥注意力最小对照
+
+使用当前 prefix-cone 实现，三组均关闭 Sparse、精修与外部后处理，从头训练24轮，seed37，CPU FP32、8线程，99训练/24验证。
+
+|ID|编码器交互分支|参数量|
+|---|---|---:|
+|C0|逐 Token 64→164→64 MLP，保留归一化、残差与原FFN|164077|
+|C1|三尺度固定窗口，半径6/3/1、时间跨度2/4/8，六摘要中心注意力|163972|
+|C2|三锥 (R,H)=(8,2)/(4,4)/(2,8)，六摘要中心注意力|163972|
+
+C1/C2 共享完全相同的初始参数，仅邻域形状不同；三组公共参数和训练 RNG 起点相同。
+窗口半径通过最接近锥平均离散截面积确定，内部网格体积差为 -8.6%/+19.5%/+12.5%；报告实际占用邻居的均值、分位数和空区域比例，不宣称严格等体积或等 FLOPs。
+过去/未来各三个槽，排除同时间片，无邻居截断。C0 仅表示编码器不跨 Token 传递，公共 Tokenizer 统计输入保留。
+
+```powershell
+python scripts/run_paper_ablation.py --prepare-attention --config configs/traceformer_prefix_cone.yaml --suite outputs/cone_attention_cpu_YYYYMMDD_HHMMSS
+python scripts/run_paper_ablation.py --suite outputs/cone_attention_cpu_YYYYMMDD_HHMMSS
+```
+
+三组训练完成后，使用发布的24文件带标签测试集比较：
+
+```powershell
+python scripts/evaluate_attention_test.py --suite outputs/cone_attention_cpu_YYYYMMDD_HHMMSS --dataset-root D:/VS_project/TinyObjDetection/EV-UAV-dataset --output outputs/cone_attention_test_YYYYMMDD_HHMMSS
+```
+
+该入口复用各组 `best.pt`、保存配置和验证阈值；推理标签与目标 ID 清零，不使用测试标签调整阈值，也不调用外部后处理。
+模型源码使用训练套件冻结副本，适配器单独保存；每组在另一进程读取概率重算，并由原始事件二值计数实现逐文件交叉核验。
+保存测试数据哈希、概率、掩码、逐文件计数和完整对照表。
+
+2026-10-18 实测完成：24测试序列、2,074,586事件，验证阈值 C0/C1/C2=0.8375/0.95/0.90。
+测试 Score 分别为 0.851466157330 / 0.895621084427 / 0.906258845580，C2-C1=+0.010637761153。
+三锥相对固定窗口的 IoU/Pd 提高、Fa也增加；召回收益主要集中于 test_022/test_023，两文件合计检出目标帧142→235（共388）。其余22文件的合计Score为0.940502→0.941001。
+完整24文件主结果及独立报告保存在 `outputs/cone_attention_cpu_20261017_235917/test_20261018_094317/`；分组仅作诊断，不替代主结果。
+可随 Git 提交保存的[完整验证/测试指标、实验协议及权重哈希归档](experiments/cone_attention_20261018.json)。
+
+每组启动前核对准备时的数据清单哈希，使用冻结源码，各组独立复评后才能完成。
+比较 C1-C0、C2-C1、C2-C0；统一报告最优阈值与0.5阈值、完整24文件全局指标、逐文件结果、参数量、耗时、峰值进程RSS及固定GT片段图。
+验证集用于选择epoch与阈值；单种子结果不支持多种子稳定性或统计显著性结论。
+下述旧主干实验仅作历史记录，不能作为当前三锥消融的已训练基线。
+
 ## 2026-09-18 Pool attention 编码消融
 
 固定时空锥主干，关闭 Sparse 和精修，使用 seed 37、99/24 文件、18 轮 CPU FP32、14 线程。
