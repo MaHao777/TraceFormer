@@ -57,27 +57,6 @@ loss:
   lambda_false_alarm: 0.05
   false_alarm_logit_margin: 0.0
   false_alarm_topk_per_frame: 32
-sparse_mixture:
-  min_events: 300000
-  max_polarity_fraction: 0.65
-  threshold_ratio: 1.5
-  warmup_epochs: 3
-  ramp_epochs: 3
-  initial_router_bias: -2.0
-  initial_residual_scale: 0.01
-  full_aux_loss_weight: 0.0
-  sparse_loss_weight: 0.05
-  object_frame_consistency_weight: 0.0
-  positive_preservation_weight: 0.2
-  positive_preservation_margin: 0.0
-  background_consistency_weight: 0.01
-  background_consistency_margin: 0.0
-  sparse_false_peak_weight: 0.01
-  sparse_false_peak_logit_margin: 0.0
-  sparse_false_peak_topk_per_frame: 8
-  sparse_false_peak_block_size_x: 8
-  sparse_false_peak_block_size_y: 8
-  gate_regularization_weight: 0.001
 frame_refinement:
   context_dim: 16
   scales:

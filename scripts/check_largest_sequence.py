@@ -11,16 +11,11 @@ import torch
 from traceformer.config import load_config
 from traceformer.data import NPZEventDataset
 from traceformer.training.engine import (
-    _add_sparse_mixture_losses,
     _amp_is_enabled,
     _autocast_dtype,
     _dense_sequence_loss_weight,
     _event_refinement_loss,
-    _forward_with_sparse_mixture,
-    _initialize_full_path,
     _initialize_refinement_head,
-    _sparse_mixture_auxiliary_losses,
-    _sparse_mixture_weight,
     build_model,
 )
 from traceformer.training.losses import EventFocalDiceLoss
@@ -46,14 +41,10 @@ def main() -> None:
         "--epoch",
         type=int,
         default=7,
-        help="one-based epoch used for sparse-mixture scheduling",
+        help="one-based epoch recorded for the resource check",
     )
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cuda")
     initialization = parser.add_mutually_exclusive_group()
-    initialization.add_argument(
-        "--initialize-full",
-        help="历史最佳 best.pt；冻结 Full 配置必须提供",
-    )
     initialization.add_argument(
         "--initialize-refinement",
         help="当前三锥 best.pt；只训练多尺度事件精修头",
@@ -98,15 +89,6 @@ def main() -> None:
             arguments.initialize_refinement,
             device=device,
         )
-    elif config.training.stage == "sparse_mixture":
-        if arguments.initialize_full is None:
-            parser.error("frozen Full resource check requires --initialize-full")
-        _initialize_full_path(
-            model,
-            config,
-            arguments.initialize_full,
-            device=device,
-        )
     model.train()
     pool_input_counts: list[int] = []
     pool_hook = model.tokenizer.key_projection.register_forward_pre_hook(
@@ -140,15 +122,7 @@ def main() -> None:
         dtype=amp_dtype,
         enabled=amp_enabled,
     ):
-        mixture_weight = _sparse_mixture_weight(config, arguments.epoch)
-        output, mixture_view = _forward_with_sparse_mixture(
-            model,
-            sequence,
-            events,
-            batch_indices,
-            config,
-            mixture_weight=mixture_weight,
-        )
+        output = model(events, batch_indices)
         query_indices = sample_event_indices(
             labels,
             logits=output["event_logits"],
@@ -178,30 +152,10 @@ def main() -> None:
             criterion,
             config,
         )
-        if config.training.stage == "sparse_mixture":
-            refinement_loss = refinement_loss * 0.0
         combined_total = (
             full_losses["total"]
             + config.frame_refinement.loss_weight * refinement_loss
         ) * _dense_sequence_loss_weight(events, labels, config)
-        mixture_losses = _sparse_mixture_auxiliary_losses(
-            output,
-            labels,
-            object_ids,
-            timestamps_ms,
-            events,
-            batch_indices,
-            query_indices,
-            criterion,
-            config,
-            sampling_generator=sampling_generator,
-        )
-        if mixture_view is not None:
-            combined_total = _add_sparse_mixture_losses(
-                combined_total,
-                mixture_losses,
-                config,
-            )
     combined_total.backward()
     pool_hook.remove()
     if device.type == "cuda":
@@ -228,25 +182,6 @@ def main() -> None:
         "object_frame": float(
             full_losses["object_frame"].detach().float().item()
         ),
-        "sparse_mixture": {
-            "weight": mixture_weight,
-            "ratio": (
-                mixture_view.threshold_ratio if mixture_view is not None else None
-            ),
-            "retained_events": (
-                int(len(mixture_view.events)) if mixture_view is not None else 0
-            ),
-            "sparse_tokens": int(output["sparse_token_present"].sum().item()),
-            "gate_mean": (
-                float(output["mixture_gate"].mean().detach().float().item())
-                if len(output["mixture_gate"])
-                else 0.0
-            ),
-            "losses": {
-                name: float(value.detach().float().item())
-                for name, value in mixture_losses.items()
-            },
-        },
         "max_memory_allocated_bytes": peak_memory,
         "runtime": runtime.metadata,
         "trainable_parameter_count": sum(
@@ -260,7 +195,6 @@ def main() -> None:
                 model.tokenizer,
                 model.encoder,
                 model.decoder,
-                model.sparse_mixture,
             )
             if module is not None
             for parameter in module.parameters()

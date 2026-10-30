@@ -196,6 +196,10 @@ class EventTokenizer(nn.Module):
             event_counts=torch.empty((0,), dtype=torch.long, device=device),
         )
 
+    def _project_token(self, block_features, statistics, encoded_position):
+        # 默认路径保持原拼接顺序，结构实验可避免重复注入统计量。
+        return self.token_projection(torch.cat((block_features, statistics, encoded_position), dim=1))
+
     def forward(
         self,
         events: torch.Tensor,
@@ -317,12 +321,7 @@ class EventTokenizer(nn.Module):
         )
         encoded_position = self.position_encoder(position)
         attention_feature = self._encode_block_features(local_features, inverse, counts, statistics)
-        tokens = self.token_projection(
-            torch.cat(
-                (attention_feature, statistics, encoded_position),
-                dim=1,
-            )
-        )
+        tokens = self._project_token(attention_feature, statistics, encoded_position)
         return TokenizedEvents(
             tokens=tokens,
             token_coords=token_coords,

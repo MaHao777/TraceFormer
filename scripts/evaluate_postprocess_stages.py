@@ -10,7 +10,12 @@ from typing import Any
 import numpy as np
 
 from traceformer.gpu.runtime import add_backend_arguments, validate_backends
-from traceformer.postprocessing.contracts import EventCache, density_group, sha256_file
+from traceformer.postprocessing.contracts import (
+    CacheManifest,
+    EventCache,
+    density_group,
+    sha256_file,
+)
 from traceformer.postprocessing.direct_verifier import (
     apply_direct_verifier,
     direct_candidate_features,
@@ -23,6 +28,7 @@ from traceformer.postprocessing.learning import (
     predict_event_scores,
     required_event_models,
 )
+from traceformer.postprocessing.release import event_validation_gate, load_event_release
 from traceformer.postprocessing.submission import (
     evaluate_predictions,
     write_prediction_npz,
@@ -60,19 +66,28 @@ def main() -> None:
     parser.add_argument("--cache-dir", required=True)
     parser.add_argument("--training-dir", required=True)
     parser.add_argument("--event-release-dir", required=True)
-    parser.add_argument("--direct-verifier-dir", required=True)
+    parser.add_argument("--direct-verifier-dir")
+    parser.add_argument("--event-only", action="store_true")
+    parser.add_argument("--rescore-only", action="store_true")
     parser.add_argument(
         "--diagnostic-allow-rejected-verifier",
         action="store_true",
         help="仅诊断开发门槛失败的门控器，结果不得用于正式提交",
     )
     parser.add_argument("--dataset-root", required=True)
-    parser.add_argument("--original-report", required=True)
+    parser.add_argument("--original-report")
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--prediction-threads", type=positive_prediction_threads, default=8)
     add_backend_arguments(parser, trees=True)
     arguments = parser.parse_args()
     validate_backends(prediction_backend=arguments.prediction_backend, feature_backend=arguments.feature_backend)
+    if arguments.event_only:
+        evaluate_event_only(arguments)
+        return
+    if arguments.rescore_only:
+        parser.error("--rescore-only requires --event-only")
+    if arguments.direct_verifier_dir is None or arguments.original_report is None:
+        parser.error("direct verifier and original report required without --event-only")
 
     cache_dir = Path(arguments.cache_dir)
     training_dir = Path(arguments.training_dir)
@@ -217,6 +232,74 @@ def main() -> None:
         encoding="utf-8",
     )
     print(json.dumps({"output": str(output_path.resolve())}, ensure_ascii=False))
+
+
+def evaluate_event_only(arguments):
+    """事件范围不加载验证器，预测与原始标签评分分开执行。"""
+    cache_dir, output = Path(arguments.cache_dir), Path(arguments.output_dir)
+    release_dir = Path(arguments.event_release_dir)
+    source_dir = Path(arguments.dataset_root)
+    models, release = load_event_release(
+        release_dir, cache_dir=cache_dir, backend=arguments.prediction_backend,
+    )
+    stages = ("objectness", "event_release")
+    paths = sorted(cache_dir.glob("*.npz"))
+    if len(paths) != 24 or {p.name for p in paths} != {p.name for p in source_dir.glob("*.npz")}:
+        raise ValueError("requires the same 24 validation files")
+    manifest = CacheManifest.read(cache_dir / "manifest.json")
+    for row in manifest.files:
+        if sha256_file(source_dir / row["name"]) != row["source_sha256"]:
+            raise ValueError(f"validation cache source hash differs: {row['name']}")
+    if not arguments.rescore_only:
+        output.mkdir(parents=True, exist_ok=False)
+        records = {}
+        for path in paths:
+            cache = EventCache.load(path, allow_labels=False)
+            with np.load(source_dir / path.name, allow_pickle=False) as saved:
+                if not np.array_equal(cache.locations, saved["ev_loc"].astype(np.int64)):
+                    raise ValueError("cache source event order differs")
+            scores = predict_event_scores(cache, models, num_threads=arguments.prediction_threads,
+                                          feature_backend=arguments.feature_backend)
+            _, _, tracked, direct = event_branches(cache, scores, release["event_contract"])
+            for stage, mask in zip(stages, (cache.prediction, tracked | direct)):
+                write_prediction_npz(output / stage / path.name, mask)
+            records[path.name] = {
+                "source_sha256": sha256_file(source_dir / path.name),
+                "events": len(cache.prediction), "density_group": density_group(cache.locations)[0],
+                "prediction_sha256": {stage: sha256_file(output / stage / path.name) for stage in stages},
+            }
+            print(f"{path.name}: {len(cache.prediction):,} events", flush=True)
+        inference = {"files": records, "protocol": {
+            "event_release_report_sha256": sha256_file(release_dir / "release_report.json"),
+            "validation_labels_accessed_during_inference": False,
+            "active_event_models": list(models), "event_only": True,
+            "prediction_backend": arguments.prediction_backend,
+            "feature_backend": arguments.feature_backend,
+        }}
+        (output / "inference.json").write_text(json.dumps(inference, indent=2) + "\n", encoding="utf-8")
+    inference = json.loads((output / "inference.json").read_text(encoding="utf-8"))
+    if inference["protocol"]["event_release_report_sha256"] != sha256_file(release_dir / "release_report.json"):
+        raise ValueError("saved inference release differs")
+    for name, row in inference["files"].items():
+        if sha256_file(source_dir / name) != row["source_sha256"]:
+            raise ValueError("saved inference source differs")
+        for stage in stages:
+            if sha256_file(output / stage / name) != row["prediction_sha256"][stage]:
+                raise ValueError("saved prediction hash differs")
+    comparison = {stage: evaluate_predictions(output / stage, source_dir) for stage in stages}
+    comparison.update(original=comparison["objectness"], protocol=inference["protocol"])
+    comparison["validation_gate"] = event_validation_gate(comparison["event_release"], comparison["original"])
+    comparison["event_release_vs_objectness_delta"] = _metric_delta(
+        comparison["event_release"]["aggregate"], comparison["objectness"]["aggregate"])
+    for name in ("val_015", "val_023"):
+        comparison[name] = {stage: comparison[stage]["files"][f"{name}.npz"] for stage in stages}
+    if arguments.rescore_only:
+        before = json.loads((output / "validation_comparison.json").read_text(encoding="utf-8"))
+        if before != comparison:
+            raise ValueError("independent validation differs")
+    filename = "independent_validation.json" if arguments.rescore_only else "validation_comparison.json"
+    (output / filename).write_text(json.dumps(comparison, indent=2) + "\n", encoding="utf-8")
+    print(json.dumps(comparison["validation_gate"], indent=2), flush=True)
 
 
 if __name__ == "__main__":

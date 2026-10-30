@@ -28,7 +28,9 @@ def write_prediction_npz(path: str | Path, prediction: np.ndarray) -> Path:
     return output
 
 
-def _source_arrays(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def _source_arrays(
+    path: Path, *, include_labels: bool = True,
+) -> tuple[np.ndarray, np.ndarray | None, np.ndarray | None, np.ndarray]:
     with np.load(path, allow_pickle=False) as saved:
         if "ev" in saved:
             source = saved["ev"]
@@ -36,14 +38,16 @@ def _source_arrays(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.n
             raw = np.column_stack((source["x"], source["y"], source["t"], source["p"]))
             return (
                 locations.astype(np.int64),
-                source["label"].astype(bool),
-                source["name"].astype(np.int64),
+                source["label"].astype(bool) if include_labels else None,
+                source["name"].astype(np.int64) if include_labels else None,
                 raw,
             )
         locations = saved["ev_loc"].astype(np.int64)
         values = saved["evs_norm"]
         raw = np.column_stack((locations[:, 0], locations[:, 1], locations[:, 2], values[:, 3]))
-        return locations, values[:, 4].astype(bool), values[:, 5].astype(np.int64), raw
+        # 盲推导出不读取标签列；独立评分仍要求真实标注。
+        return (locations, values[:, 4].astype(bool) if include_labels else None,
+                values[:, 5].astype(np.int64) if include_labels else None, raw)
 
 
 def _prediction_path(directory: Path, stem: str) -> Path:
@@ -90,7 +94,7 @@ def write_submission_txt(
     """逐行保留源x y t p，时间用17位有效数字写出。"""
 
     source_path = Path(source_path)
-    _, _, _, raw = _source_arrays(source_path)
+    _, _, _, raw = _source_arrays(source_path, include_labels=False)
     prediction = np.asarray(prediction, dtype=bool)
     if len(raw) != len(prediction):
         raise ValueError(f"{source_path.name}: prediction row count mismatch")
@@ -128,7 +132,7 @@ def audit_submission(
         prediction = load_prediction(_prediction_path(prediction_dir, source.stem))
         txt_path = txt_root / f"{source.stem}.txt"
         record = write_submission_txt(source, prediction, txt_path)
-        locations, _, _, raw = _source_arrays(source)
+        locations, _, _, raw = _source_arrays(source, include_labels=False)
         written = np.loadtxt(txt_path)
         if written.shape != (len(raw), 5):
             raise ValueError(f"{txt_path.name}: malformed submission rows")

@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "name": "prefix_cone_20261018_optimized",
+  "artifact_root": "../outputs/main_model",
+  "runtime": {"num_threads": 14},
+  "default_inputs": {
+    "val": "../data/ev-uav/val",
+    "test": "../../EV-UAV-dataset/test"
+  },
+  "files": {
+    "best.pt": "90DE8035D603366C5898E1B17AE75C8263CA1633A2ED41B04ECFB6869F8877E1",
+    "config.yaml": "D8B4E4196F930AE4F65E477425856BDA943331C60A9BB0CFF9731E6E8C73F503",
+    "event_release/development_contract.json": "13405A9B9B0B0098F46269A6B7B2E792C65B3B4D3FFEA66C61A097D710BBD5AE",
+    "event_release/events/large.txt": "6A917E320F2F37B028EB98E699D2EB538AC173CFA8DF55B6291ABDD7861EA74C",
+    "event_release/events/small.txt": "3837022C4B99B8ECB92492A02ECB238A45617F9277E607E4D574F3696242E1F7",
+    "event_release/events/training_report.json": "89F7E6D93FF1275F74E808B14EEBF98F654922E7467E2DD2670F6CE1163E6C8E",
+    "event_release/release_report.json": "4B9489B5BC86B706F5BC4BC8B4F40F315F5306BA93DDAEF4DE6A2C59B2A9D340",
+    "event_release/training_manifest.json": "9A64385ED6860B6DC537B450E8426B03C24E4B92EBF415C671A4F9AD2A84FBE3",
+    "validation.json": "05DE6BA47E1C9D110FBB8220166E14C7B3A0478317CCECEC63FE1FD5A95C04E6"
+  },
+  "selection": {
+    "method": "user_requested",
+    "date": "2026-10-18",
+    "source_run": "postprocess_prefix_cone_20261018_202349",
+    "validation_gate": {
+      "score_gain": 0.02942674191955541,
+      "val_023_pd_gain": 0.3486682808716707,
+      "fa": 6.589045498544248e-06,
+      "passed": false
+    },
+    "note": "用户指定为主模型；保留原Fa门槛失败记录，不改写为自动验收通过。"
+  },
+  "evidence": {
+    "complete_return": "../outputs/server_results_20261018/verified.json",
+    "speed_audit": "../outputs/gpu_speed_audit_20261018_222449/summary.json"
+  }
+}

@@ -27,11 +27,8 @@ from traceformer.artifacts import (
 from traceformer.config import TraceFormerConfig, normalize_model_config
 from traceformer.data import (
     EventSequence,
-    HighThresholdView,
     LoadedEventSequence,
     NPZEventDataset,
-    is_dense_balanced_event_stream,
-    simulate_high_threshold_events,
 )
 from traceformer.experiments.ablation import AblationSpec, apply_ablation
 from traceformer.inference import (
@@ -44,11 +41,7 @@ from traceformer.visualization import render_training_curves
 
 from .losses import (
     EventFocalDiceLoss,
-    background_threshold_consistency_loss,
     frame_cell_objectness_loss,
-    object_frame_threshold_consistency_loss,
-    positive_logit_preservation_loss,
-    sparse_block_false_peak_loss,
 )
 from .lr_schedules import LearningRateController
 from .metrics import (
@@ -59,17 +52,11 @@ from .metrics import (
 from .runtime import prepare_device
 from .sampling import sample_event_indices
 
-CHECKPOINT_SCHEMA_VERSION = 7
+CHECKPOINT_SCHEMA_VERSION = 8
 REFINEMENT_SOURCE_SCHEMA_VERSION = CHECKPOINT_SCHEMA_VERSION
-TRAINING_STATE_SCHEMA_VERSION = 3
+TRAINING_STATE_SCHEMA_VERSION = 4
 
-SPARSE_INFERENCE_FIELDS = (
-    "min_events",
-    "max_polarity_fraction",
-    "threshold_ratio",
-)
 REFINEMENT_MODEL_FIELDS = ("context_dim", "scales")
-
 
 
 def _update_training_curves(
@@ -106,10 +93,6 @@ def build_model(
         num_heads=config.model.num_heads,
         mlp_ratio=config.model.mlp_ratio,
         dropout=config.model.dropout,
-        sparse_mixture_router_bias=config.sparse_mixture.initial_router_bias,
-        sparse_mixture_residual_scale=(
-            config.sparse_mixture.initial_residual_scale
-        ),
         frame_refinement_context_dim=config.frame_refinement.context_dim,
         frame_refinement_scales=tuple(config.frame_refinement.scales),
         duration_ms=config.dataset.duration_ms,
@@ -143,59 +126,6 @@ def _fixed_model_config(value: Any) -> dict[str, Any] | None:
     return normalize_model_config(value)
 
 
-def _initialize_full_path(
-    model: TraceFormer,
-    config: TraceFormerConfig,
-    checkpoint_path: str | Path,
-    *,
-    device: torch.device,
-) -> dict[str, Any]:
-    """从历史检查点严格加载 Full 主干并冻结。"""
-
-    path = Path(checkpoint_path).resolve()
-    checkpoint = torch.load(path, map_location=device, weights_only=True)
-    if _fixed_model_config(checkpoint.get("model_config")) != _serializable(
-        asdict(config.model)
-    ):
-        raise ValueError("initial Full checkpoint model configuration does not match")
-    if checkpoint.get("resolution") != _serializable(asdict(config.resolution)):
-        raise ValueError("initial Full checkpoint resolution does not match")
-    source_state = checkpoint.get("model_state")
-    if not isinstance(source_state, dict):
-        raise ValueError("initial Full checkpoint has no model state")
-    excluded_prefixes = ("sparse_mixture.", "event_refinement_head.")
-    expected_full = {
-        name
-        for name in model.state_dict()
-        if not name.startswith(excluded_prefixes)
-    }
-    source_full = {
-        name: value
-        for name, value in source_state.items()
-        if not name.startswith(excluded_prefixes)
-    }
-    if set(source_full) != expected_full:
-        missing = sorted(expected_full - set(source_full))
-        extra = sorted(set(source_full) - expected_full)
-        raise ValueError(
-            f"initial Full checkpoint state mismatch: missing={missing}, extra={extra}"
-        )
-    incompatible = model.load_state_dict(source_full, strict=False)
-    expected_missing = {
-        name for name in model.state_dict() if name.startswith(excluded_prefixes)
-    }
-    if set(incompatible.missing_keys) != expected_missing or incompatible.unexpected_keys:
-        raise ValueError("initial Full checkpoint could not be loaded strictly")
-    model.configure_training_stage("sparse_mixture")
-    return {
-        "kind": "full_path",
-        "path": str(path),
-        "sha256": _file_sha256(path),
-        "schema_version": checkpoint.get("schema_version"),
-        "epoch": checkpoint.get("epoch"),
-    }
-
-
 def _initialize_refinement_head(
     model: TraceFormer,
     config: TraceFormerConfig,
@@ -213,12 +143,6 @@ def _initialize_refinement_head(
         asdict(config.model)
     ):
         raise ValueError("refinement source model configuration does not match")
-    source_mixture = checkpoint.get("sparse_mixture_config")
-    expected_mixture = _serializable(asdict(config.sparse_mixture))
-    if not isinstance(source_mixture, dict) or _config_subset(
-        source_mixture, SPARSE_INFERENCE_FIELDS
-    ) != _config_subset(expected_mixture, SPARSE_INFERENCE_FIELDS):
-        raise ValueError("refinement source sparse mixture configuration does not match")
     if checkpoint.get("resolution") != _serializable(asdict(config.resolution)):
         raise ValueError("refinement source resolution does not match")
     source_state = checkpoint.get("model_state")
@@ -286,14 +210,14 @@ def _initialize_ablation_stage(
     source = torch.load(path, map_location=device, weights_only=True)
     expected_source = AblationSpec(
         backbone=ablation.backbone,
-        sparse=ablation.sparse if stage == "refinement" else False,
+        sparse=False,
         refinement="none",
     )
     if source.get("schema_version") != CHECKPOINT_SCHEMA_VERSION:
         raise ValueError("unsupported ablation source schema")
     if source.get("ablation") != expected_source.to_dict():
         raise ValueError("ablation upstream structure mismatch")
-    expected_stage = "sparse_mixture" if expected_source.sparse else "full"
+    expected_stage = "full"
     if source.get("training_stage") != expected_stage:
         raise ValueError("ablation upstream training stage mismatch")
     if source.get("training_seed") != config.training.seed:
@@ -306,11 +230,7 @@ def _initialize_ablation_stage(
         raise ValueError("ablation upstream resolution mismatch")
     if source.get("duration_ms") != config.dataset.duration_ms:
         raise ValueError("ablation upstream duration mismatch")
-    if _config_subset(source["sparse_mixture_config"], SPARSE_INFERENCE_FIELDS) != _config_subset(
-        _serializable(asdict(config.sparse_mixture)), SPARSE_INFERENCE_FIELDS
-    ):
-        raise ValueError("ablation upstream sparse inference mismatch")
-    prefix = "event_refinement_head." if stage == "refinement" else "sparse_mixture."
+    prefix = "event_refinement_head."
     expected = {name for name in model.state_dict() if not name.startswith(prefix)}
     if set(source["model_state"]) != expected:
         raise ValueError("ablation upstream state keys mismatch")
@@ -357,7 +277,7 @@ def _validate_checkpoint_contract(
     *,
     ablation: AblationSpec | None = None,
 ) -> None:
-    """统一校验 schema-7 推理与恢复契约。"""
+    """统一校验 schema-8 推理与恢复契约。"""
 
     # 即使张量形状相同，也不能把窗口/单向实验权重当作正式模型加载。
     expected_ablation = ablation.to_dict() if ablation is not None else None
@@ -371,15 +291,6 @@ def _validate_checkpoint_contract(
         raise ValueError("checkpoint model configuration does not match the supplied config")
     if checkpoint.get("resolution") != _serializable(asdict(config.resolution)):
         raise ValueError("checkpoint resolution does not match the supplied config")
-
-    checkpoint_mixture = checkpoint.get("sparse_mixture_config")
-    expected_mixture = _serializable(asdict(config.sparse_mixture))
-    if not isinstance(checkpoint_mixture, dict) or _config_subset(
-        checkpoint_mixture, SPARSE_INFERENCE_FIELDS
-    ) != _config_subset(expected_mixture, SPARSE_INFERENCE_FIELDS):
-        raise ValueError(
-            "checkpoint sparse mixture inference configuration does not match"
-        )
 
     checkpoint_refinement = checkpoint.get("frame_refinement_config")
     expected_refinement = _serializable(asdict(config.frame_refinement))
@@ -531,86 +442,6 @@ def _dense_sequence_loss_weight(
     return 1.0
 
 
-def _sparse_mixture_weight(config: TraceFormerConfig, epoch: int) -> float:
-    """Return the residual-gate ramp while auxiliary experts train from epoch one."""
-
-    mixture = config.sparse_mixture
-    if config.training.stage == "refinement":
-        return 1.0
-    if epoch <= mixture.warmup_epochs:
-        return 0.0
-    ramp_position = epoch - mixture.warmup_epochs
-    return float(min(1.0, ramp_position / mixture.ramp_epochs))
-
-
-def _forward_with_sparse_mixture(
-    model: TraceFormer,
-    sequence: LoadedEventSequence,
-    events: torch.Tensor,
-    batch_indices: torch.Tensor,
-    config: TraceFormerConfig,
-    *,
-    mixture_weight: float,
-    compute_sparse_logits: bool = True,
-) -> tuple[dict[str, Any], HighThresholdView | None]:
-    """Create the deterministic paired view and preserve full-event decoding."""
-
-    spec = getattr(model, "ablation_spec", None)
-    if spec is not None and not spec["sparse"]:
-        return model(events, batch_indices), None
-    mixture = config.sparse_mixture
-    if not is_dense_balanced_event_stream(
-        sequence.events,
-        min_events=mixture.min_events,
-        max_polarity_fraction=mixture.max_polarity_fraction,
-    ):
-        return model(events, batch_indices), None
-    view = simulate_high_threshold_events(
-        sequence.events,
-        width=config.resolution.width,
-        height=config.resolution.height,
-        threshold_ratio=mixture.threshold_ratio,
-    )
-    sparse_events = view.events.to(events.device)
-    sparse_source_indices = view.source_indices.to(events.device)
-    sparse_batch_indices = torch.zeros(
-        len(sparse_events), dtype=torch.long, device=events.device
-    )
-    output = model(
-        events,
-        batch_indices,
-        sparse_events=sparse_events,
-        sparse_batch_indices=sparse_batch_indices,
-        sparse_source_indices=sparse_source_indices,
-        mixture_weight=mixture_weight,
-        compute_sparse_logits=compute_sparse_logits,
-    )
-    return output, view
-
-
-def forward_with_sparse_mixture(
-    model: TraceFormer,
-    sequence: LoadedEventSequence,
-    events: torch.Tensor,
-    batch_indices: torch.Tensor,
-    config: TraceFormerConfig,
-    *,
-    mixture_weight: float = 1.0,
-    compute_sparse_logits: bool = True,
-) -> tuple[dict[str, Any], HighThresholdView | None]:
-    """复用训练和评估中的稀疏混合推理路径。"""
-
-    return _forward_with_sparse_mixture(
-        model,
-        sequence,
-        events,
-        batch_indices,
-        config,
-        mixture_weight=mixture_weight,
-        compute_sparse_logits=compute_sparse_logits,
-    )
-
-
 def load_inference_model(
     config: TraceFormerConfig,
     checkpoint_path: str | Path,
@@ -630,147 +461,6 @@ def load_inference_model(
 
     return model, checkpoint
 
-def _sparse_mixture_auxiliary_losses(
-    output: dict[str, Any],
-    labels: torch.Tensor,
-    object_ids: torch.Tensor,
-    timestamps_ms: torch.Tensor,
-    events: torch.Tensor,
-    batch_indices: torch.Tensor,
-    query_indices: torch.Tensor,
-    criterion: EventFocalDiceLoss,
-    config: TraceFormerConfig,
-    *,
-    sampling_generator: torch.Generator,
-) -> dict[str, torch.Tensor]:
-    """Compute conservative expert losses without changing the main event universe."""
-
-    zero = output["event_logits"].sum() * 0.0
-    result = {
-        "full_aux_total": zero,
-        "sparse_total": zero,
-        "object_frame_consistency": zero,
-        "positive_preservation": zero,
-        "background_consistency": zero,
-        "sparse_false_peak": zero,
-        "gate_regularization": zero,
-    }
-    if config.training.stage == "refinement":
-        return result
-    source_indices = output["sparse_source_indices"]
-    if len(source_indices) == 0:
-        return result
-
-    mixture = config.sparse_mixture
-    if mixture.full_aux_loss_weight:
-        full_aux = criterion(
-            output["full_event_logits"][query_indices],
-            labels[query_indices],
-            batch_indices[query_indices],
-            object_ids=object_ids[query_indices],
-            timestamps_ms=timestamps_ms[query_indices],
-            frame_ms=config.evaluation.frame_ms,
-            full_logits=output["full_event_logits"],
-            full_targets=labels,
-            full_batch_indices=batch_indices,
-            full_timestamps_ms=timestamps_ms,
-            full_coordinates=events[:, :2],
-        )
-        result["full_aux_total"] = full_aux["total"]
-    fused_logits = output["event_logits"]
-    sparse_logits = fused_logits[source_indices]
-    sparse_labels = labels[source_indices]
-    sparse_object_ids = object_ids[source_indices]
-    sparse_timestamps_ms = timestamps_ms[source_indices]
-    sparse_events = events[source_indices]
-    sparse_batch_indices = batch_indices[source_indices]
-    sparse_query_indices = sample_event_indices(
-        sparse_labels,
-        logits=sparse_logits,
-        background_ratio=config.training.background_ratio,
-        hard_negative_fraction=config.training.hard_negative_fraction,
-        generator=sampling_generator,
-        max_background_without_positive=(
-            config.training.max_background_without_positive
-        ),
-    )
-    sparse_aux = criterion(
-        sparse_logits[sparse_query_indices],
-        sparse_labels[sparse_query_indices],
-        sparse_batch_indices[sparse_query_indices],
-        object_ids=sparse_object_ids[sparse_query_indices],
-        timestamps_ms=sparse_timestamps_ms[sparse_query_indices],
-        frame_ms=config.evaluation.frame_ms,
-        full_logits=sparse_logits,
-        full_targets=sparse_labels,
-        full_batch_indices=sparse_batch_indices,
-        full_timestamps_ms=sparse_timestamps_ms,
-        full_coordinates=sparse_events[:, :2],
-    )
-    result["sparse_total"] = sparse_aux["total"]
-    if mixture.object_frame_consistency_weight:
-        result["object_frame_consistency"] = object_frame_threshold_consistency_loss(
-            fused_logits[source_indices],
-            output["full_event_logits"],
-            source_indices,
-            labels,
-            object_ids,
-            timestamps_ms,
-            frame_ms=config.evaluation.frame_ms,
-        )
-    all_indices = torch.arange(len(labels), dtype=torch.long, device=labels.device)
-    result["background_consistency"] = background_threshold_consistency_loss(
-        fused_logits,
-        output["full_event_logits"],
-        all_indices,
-        labels,
-        logit_margin=mixture.background_consistency_margin,
-    )
-    result["sparse_false_peak"] = sparse_block_false_peak_loss(
-        fused_logits,
-        labels,
-        batch_indices,
-        timestamps_ms,
-        events[:, :2],
-        frame_ms=config.evaluation.frame_ms,
-        block_size_x=mixture.sparse_false_peak_block_size_x,
-        block_size_y=mixture.sparse_false_peak_block_size_y,
-        logit_margin=mixture.sparse_false_peak_logit_margin,
-        topk_per_frame=mixture.sparse_false_peak_topk_per_frame,
-    )
-    result["positive_preservation"] = positive_logit_preservation_loss(
-        fused_logits,
-        output["full_event_logits"],
-        labels,
-        logit_margin=mixture.positive_preservation_margin,
-    )
-    gate = output["mixture_gate"]
-    result["gate_regularization"] = gate.mean() if len(gate) else zero
-    return result
-
-
-def _add_sparse_mixture_losses(
-    main_total: torch.Tensor,
-    auxiliary: dict[str, torch.Tensor],
-    config: TraceFormerConfig,
-) -> torch.Tensor:
-    mixture = config.sparse_mixture
-    return (
-        main_total
-        + mixture.full_aux_loss_weight * auxiliary["full_aux_total"]
-        + mixture.sparse_loss_weight * auxiliary["sparse_total"]
-        + mixture.object_frame_consistency_weight
-        * auxiliary["object_frame_consistency"]
-        + mixture.positive_preservation_weight
-        * auxiliary["positive_preservation"]
-        + mixture.background_consistency_weight
-        * auxiliary["background_consistency"]
-        + mixture.sparse_false_peak_weight
-        * auxiliary["sparse_false_peak"]
-        + mixture.gate_regularization_weight
-        * auxiliary["gate_regularization"]
-    )
-
 
 def _event_refinement_loss(
     output: dict[str, Any],
@@ -789,106 +479,6 @@ def _event_refinement_loss(
         alpha=criterion.focal_alpha,
         gamma=criterion.focal_gamma,
     )
-
-
-def _sparse_view_statistics(
-    sequence: LoadedEventSequence,
-    view: HighThresholdView,
-    *,
-    frame_ms: float,
-) -> dict[str, int | float]:
-    indices = view.source_indices.detach().cpu()
-    labels = sequence.labels > 0.5
-    retained_labels = labels[indices]
-    integer_time = torch.floor(sequence.timestamps_ms.to(dtype=torch.float64))
-    within_frame = torch.remainder(integer_time, frame_ms)
-    positive = labels & (sequence.object_ids > 0) & (within_frame > 0)
-    retained_positive = positive[indices]
-
-    def group_count(
-        object_ids: torch.Tensor,
-        timestamps: torch.Tensor,
-        mask: torch.Tensor,
-    ) -> int:
-        if not bool(mask.any()):
-            return 0
-        frames = torch.div(
-            torch.floor(timestamps[mask].to(dtype=torch.float64)),
-            frame_ms,
-            rounding_mode="floor",
-        ).long()
-        groups = torch.stack((object_ids[mask].long(), frames), dim=1)
-        return int(torch.unique(groups, dim=0).shape[0])
-
-    source_groups = group_count(
-        sequence.object_ids,
-        sequence.timestamps_ms,
-        positive,
-    )
-    retained_groups = group_count(
-        sequence.object_ids[indices],
-        sequence.timestamps_ms[indices],
-        retained_positive,
-    )
-    return {
-        "source_events": sequence.length,
-        "retained_events": int(len(indices)),
-        "source_positive_events": int(labels.sum().item()),
-        "retained_positive_events": int(retained_labels.sum().item()),
-        "source_object_frames": source_groups,
-        "retained_object_frames": retained_groups,
-    }
-
-
-def _new_sparse_epoch_report(weight: float) -> dict[str, Any]:
-    return {
-        "weight": float(weight),
-        "eligible_files": 0,
-        "augmented_files": 0,
-        "ratio_usage": {},
-        "source_events": 0,
-        "retained_events": 0,
-        "source_positive_events": 0,
-        "retained_positive_events": 0,
-        "source_object_frames": 0,
-        "retained_object_frames": 0,
-    }
-
-
-def _record_sparse_view(
-    report: dict[str, Any],
-    view: HighThresholdView,
-    statistics: dict[str, int | float],
-) -> None:
-    report["augmented_files"] += 1
-    ratio_key = f"{view.threshold_ratio:g}"
-    ratio_usage = report["ratio_usage"]
-    ratio_usage[ratio_key] = int(ratio_usage.get(ratio_key, 0)) + 1
-    for name, value in statistics.items():
-        report[name] += value
-
-
-def _finalize_sparse_epoch_report(report: dict[str, Any]) -> dict[str, Any]:
-    result = dict(report)
-    pairs = (
-        ("event_retention", "retained_events", "source_events"),
-        (
-            "positive_event_retention",
-            "retained_positive_events",
-            "source_positive_events",
-        ),
-        (
-            "object_frame_retention",
-            "retained_object_frames",
-            "source_object_frames",
-        ),
-    )
-    for output_name, numerator_name, denominator_name in pairs:
-        denominator = int(result[denominator_name])
-        result[output_name] = (
-            float(result[numerator_name] / denominator) if denominator else 0.0
-        )
-    return result
 
 
 @torch.no_grad()
@@ -928,14 +518,7 @@ def evaluate_model(
         batch_indices = torch.zeros(
             len(events), dtype=torch.long, device=device
         )
-        output, _ = _forward_with_sparse_mixture(
-            model,
-            sequence,
-            events,
-            batch_indices,
-            config,
-            mixture_weight=1.0,
-        )
+        output = model(events, batch_indices)
         if criterion is not None and loss_totals is not None:
             query_indices = sample_event_indices(
                 labels,
@@ -1173,7 +756,6 @@ def _training_state_payload(
     controller: LearningRateController,
     epoch: int,
     history: list[dict[str, Any]],
-    sparse_mixture_history: list[dict[str, Any]],
     best_score: float,
     best_metrics: dict[str, Any],
     best_checkpoint: dict[str, Any],
@@ -1192,7 +774,6 @@ def _training_state_payload(
         "controller_state": controller.state_dict(),
         "epoch": epoch,
         "history": history,
-        "sparse_mixture_history": sparse_mixture_history,
         "best_score": best_score,
         "best_metrics": best_metrics,
         "best_checkpoint": best_checkpoint,
@@ -1231,7 +812,6 @@ def _run_training_impl(
     device: str | None = None,
     progress: bool = False,
     resume_state_path: str | Path | None = None,
-    initial_full_checkpoint_path: str | Path | None = None,
     initial_refinement_checkpoint_path: str | Path | None = None,
     ablation: AblationSpec | None = None,
 ) -> dict[str, Any]:
@@ -1270,22 +850,19 @@ def _run_training_impl(
     model = build_model(config, ablation=ablation).to(torch_device)
     initialization: dict[str, Any] | None = None
     initialization_paths = (
-        initial_full_checkpoint_path,
         initial_refinement_checkpoint_path,
     )
     if resume_state_path is not None and any(
         path is not None for path in initialization_paths
     ):
         raise ValueError("initial checkpoints and resume state are mutually exclusive")
-    if all(path is not None for path in initialization_paths):
-        raise ValueError("Full and refinement initialization are mutually exclusive")
     stage = config.training.stage
     model.configure_training_stage(stage)
     if resume_state_path is None:
         if ablation is not None:
             initialization = _initialize_ablation_stage(
                 model, config, ablation,
-                initial_refinement_checkpoint_path or initial_full_checkpoint_path,
+                initial_refinement_checkpoint_path,
                 manifest_digest=manifest_digest, device=torch_device,
             )
         elif stage == "refinement":
@@ -1299,23 +876,10 @@ def _run_training_impl(
                 initial_refinement_checkpoint_path,
                 device=torch_device,
             )
-        elif stage == "sparse_mixture":
-            if initial_full_checkpoint_path is None:
-                raise ValueError(
-                    "sparse-mixture training requires --initialize-full"
-                )
-            initialization = _initialize_full_path(
-                model,
-                config,
-                initial_full_checkpoint_path,
-                device=torch_device,
-            )
         elif any(path is not None for path in initialization_paths):
             raise ValueError("full training does not accept initialization checkpoints")
         if stage != "refinement" and initial_refinement_checkpoint_path is not None:
             raise ValueError("--initialize-refinement requires training.stage=refinement")
-        if stage != "sparse_mixture" and initial_full_checkpoint_path is not None:
-            raise ValueError("--initialize-full requires training.stage=sparse_mixture")
     criterion = EventFocalDiceLoss(
         focal_alpha=config.loss.focal_alpha,
         focal_gamma=config.loss.focal_gamma,
@@ -1341,7 +905,6 @@ def _run_training_impl(
     scaler_enabled = _grad_scaler_is_enabled(amp_enabled, amp_dtype)
     scaler = torch.amp.GradScaler("cuda", enabled=scaler_enabled)
     history: list[dict[str, Any]] = []
-    sparse_mixture_history: list[dict[str, Any]] = []
     best_score = -1.0
     best_metrics: dict[str, Any] | None = None
     best_checkpoint: dict[str, Any] | None = None
@@ -1361,7 +924,6 @@ def _run_training_impl(
         model.load_state_dict(state["model_state"], strict=True)
         optimizer.load_state_dict(state["optimizer_state"])
         history = list(state["history"])
-        sparse_mixture_history = list(state["sparse_mixture_history"])
         best_score = float(state["best_score"])
         best_metrics = dict(state["best_metrics"])
         best_checkpoint = dict(state["best_checkpoint"])
@@ -1383,7 +945,6 @@ def _run_training_impl(
         _atomic_write_text(run_dir / "metrics.md", _metrics_markdown(best_metrics))
         if ablation is not None:
             _write_json(run_dir / "history.json", history)
-            _write_json(run_dir / "sparse_mixture.json", sparse_mixture_history)
 
     print(
         f"TraceFormer training on {torch_device.type}: {len(train_dataset)} train files, "
@@ -1395,8 +956,6 @@ def _run_training_impl(
         learning_rate = controller.rate_for_epoch(epoch_number)
         for parameter_group in optimizer.param_groups:
             parameter_group["lr"] = learning_rate
-        mixture_weight = _sparse_mixture_weight(config, epoch_number)
-        mixture_report = _new_sparse_epoch_report(mixture_weight)
         model.train()
         totals = {
             "total": 0.0,
@@ -1405,14 +964,6 @@ def _run_training_impl(
             "object_frame": 0.0,
             "false_alarm": 0.0,
             "event_refinement": 0.0,
-            "sparse_total": 0.0,
-            "full_aux_total": 0.0,
-            "object_frame_consistency": 0.0,
-            "background_consistency": 0.0,
-            "positive_preservation": 0.0,
-            "sparse_false_peak": 0.0,
-            "gate_regularization": 0.0,
-            "mixture_weight": 0.0,
         }
         epoch_started = time.perf_counter()
         epoch_parameters = _parameter_snapshot(model)
@@ -1422,15 +973,6 @@ def _run_training_impl(
         ).tolist()
         for step, dataset_index in enumerate(order):
             sequence = train_dataset[dataset_index]
-            mixture_eligible = is_dense_balanced_event_stream(
-                sequence.events,
-                min_events=config.sparse_mixture.min_events,
-                max_polarity_fraction=(
-                    config.sparse_mixture.max_polarity_fraction
-                ),
-            )
-            if mixture_eligible:
-                mixture_report["eligible_files"] += 1
             events = sequence.events.to(torch_device)
             labels = sequence.labels.to(torch_device)
             object_ids = sequence.object_ids.to(torch_device)
@@ -1444,24 +986,7 @@ def _run_training_impl(
                 dtype=amp_dtype,
                 enabled=amp_enabled,
             ):
-                output, mixture_view = _forward_with_sparse_mixture(
-                    model,
-                    sequence,
-                    events,
-                    batch_indices,
-                    config,
-                    mixture_weight=mixture_weight,
-                )
-                if mixture_view is not None:
-                    _record_sparse_view(
-                        mixture_report,
-                        mixture_view,
-                        _sparse_view_statistics(
-                            sequence,
-                            mixture_view,
-                            frame_ms=config.evaluation.frame_ms,
-                        ),
-                    )
+                output = model(events, batch_indices)
                 query_indices = sample_event_indices(
                     labels,
                     logits=output["event_logits"],
@@ -1493,8 +1018,6 @@ def _run_training_impl(
                     criterion,
                     config,
                 )
-                if config.training.stage == "sparse_mixture":
-                    refinement_loss = refinement_loss * 0.0
                 sequence_weight = _dense_sequence_loss_weight(
                     events,
                     labels,
@@ -1504,39 +1027,14 @@ def _run_training_impl(
                     full_losses["total"]
                     + config.frame_refinement.loss_weight * refinement_loss
                 ) * sequence_weight
-                auxiliary = _sparse_mixture_auxiliary_losses(
-                    output,
-                    labels,
-                    object_ids,
-                    timestamps_ms,
-                    events,
-                    batch_indices,
-                    query_indices,
-                    criterion,
-                    config,
-                    sampling_generator=sampling_generator,
-                )
-                if mixture_view is not None:
-                    combined_total = _add_sparse_mixture_losses(
-                        combined_total,
-                        auxiliary,
-                        config,
-                    )
                 losses = dict(full_losses)
                 losses["total"] = combined_total
                 losses["event_refinement"] = refinement_loss
-                losses["sparse_total"] = auxiliary["sparse_total"]
-                for name, value in auxiliary.items():
-                    if name != "sparse_total":
-                        losses[name] = value
-                losses["mixture_weight"] = combined_total.new_tensor(
-                    mixture_weight if mixture_view is not None else 0.0
-                )
             if not torch.isfinite(losses["total"]):
                 raise RuntimeError(
                     f"non-finite training loss at epoch {epoch_number}, step {step + 1}"
                 )
-            # 非稠密样本不会经过专家；冻结阶段只记录 loss，不执行空反向。
+            # 空事件样本可能没有可训练路径；其余样本正常反向。
             has_trainable_path = losses["total"].requires_grad
             if amp_enabled and has_trainable_path:
                 scaler.scale(losses["total"]).backward()
@@ -1576,10 +1074,6 @@ def _run_training_impl(
 
         for name in totals:
             totals[name] /= len(train_dataset)
-        finalized_mixture_report = _finalize_sparse_epoch_report(
-            mixture_report
-        )
-        sparse_mixture_history.append(finalized_mixture_report)
         validation_result = evaluate_model(
             model,
             validation_dataset,
@@ -1621,11 +1115,9 @@ def _run_training_impl(
             "train_loss": totals,
             "validation_loss": validation_loss,
             "validation": metrics,
-            "sparse_mixture": finalized_mixture_report,
         }
         history.append(epoch_record)
         _write_json(run_dir / "history.json", history)
-        _write_json(run_dir / "sparse_mixture.json", sparse_mixture_history)
         _update_training_curves(run_dir, history)
         competition = metrics["competition"]
         score = float(competition["score"])
@@ -1650,7 +1142,6 @@ def _run_training_impl(
                 "epoch": epoch + 1,
                 "decision_threshold": float(metrics["threshold"]),
                 "model_config": configuration["model"],
-                "sparse_mixture_config": configuration["sparse_mixture"],
                 "frame_refinement_config": configuration["frame_refinement"],
                 "resolution": configuration["resolution"],
                 "validation_manifest_sha256": validation_manifest_digest,
@@ -1679,7 +1170,6 @@ def _run_training_impl(
                 controller=controller,
                 epoch=epoch_number,
                 history=history,
-                sparse_mixture_history=sparse_mixture_history,
                 best_score=best_score,
                 best_metrics=best_metrics,
                 best_checkpoint=best_checkpoint,
@@ -1713,7 +1203,6 @@ def _run_training_impl(
             parameter.numel() for parameter in model.parameters() if parameter.requires_grad
         ),
         "full_initialization": initialization,
-        "sparse_mixture": sparse_mixture_history,
         "best_score": best_score,
         "best_iou": float(best_metrics["competition"]["iou"]),
         "metrics": best_metrics,
@@ -1736,7 +1225,6 @@ def run_training(
     note: str | None = None,
     config_source: str | Path | None = None,
     resume_state_path: str | Path | None = None,
-    initial_full_checkpoint_path: str | Path | None = None,
     initial_refinement_checkpoint_path: str | Path | None = None,
     ablation: AblationSpec | None = None,
 ) -> dict[str, Any]:
@@ -1755,8 +1243,7 @@ def run_training(
     if resume_state_path is not None and any(
         path is not None
         for path in (
-            initial_full_checkpoint_path,
-            initial_refinement_checkpoint_path,
+                initial_refinement_checkpoint_path,
         )
     ):
         raise ValueError("initial checkpoints and resume state are mutually exclusive")
@@ -1785,7 +1272,6 @@ def run_training(
             device=device,
             progress=progress,
             resume_state_path=resume_state_path,
-            initial_full_checkpoint_path=initial_full_checkpoint_path,
             initial_refinement_checkpoint_path=(
                 initial_refinement_checkpoint_path
             ),
@@ -1909,15 +1395,7 @@ def generate_submission_package(
             batch_indices = torch.zeros(
                 len(events), dtype=torch.long, device=torch_device
             )
-            output, _ = _forward_with_sparse_mixture(
-                model,
-                sequence,
-                events,
-                batch_indices,
-                config,
-                mixture_weight=1.0,
-                compute_sparse_logits=False,
-            )
+            output = model(events, batch_indices)
         logits = output["event_logits"].detach().cpu()
         event_sequence = _loaded_to_event_sequence(sequence, config)
         rows = generate_submission_rows(event_sequence, logits, threshold)
@@ -1940,7 +1418,6 @@ __all__ = [
     "build_model",
     "evaluate_checkpoint",
     "evaluate_model",
-    "forward_with_sparse_mixture",
     "load_inference_model",
     "run_training",
 ]

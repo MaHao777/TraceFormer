@@ -1,4 +1,4 @@
-# TraceFormer 固定 schema-7 模型结构
+# TraceFormer 固定 schema-8 模型结构
 
 ## 1. 事件输入与 Token 化
 
@@ -8,26 +8,20 @@
 
 ## 2. 双向时空锥主干
 
-每层按四组固定锥参数查找过去和未来邻域。邻域构建使用每个时间片的稀疏空间索引，输出规模与 `token_count × heads × max_neighbors` 成正比，不构造完整 Token 两两关系。
+每层使用三组固定锥参数`(空间半径, 时间跨度) = (8,2)、(4,4)、(2,8)`，
+分别汇总过去和未来，得到六个摘要。第d个时间切片的空间半径为`floor(空间半径 × d / 时间跨度)`。
+成员采用全量池化，不使用Top-K截断或逐邻居列表。
 
-中心 Token 产生 Query；过去与未来共享 Key/Value 投影，并分别加入方向编码。相对空间、时间和速度特征为注意力分数提供偏置。两侧结果经过数据相关门控融合，再进入残差 MLP。
+线性投影得到Value和正的sigmoid权重，二维前缀和精确查询各时间切片矩形，
+以加权和除以权重和得到摘要。摘要加入形状与方向嵌入，中心Token对六个摘要做多头注意力，
+再进入残差与MLP。没有邻居时显式归零，避免全掩码softmax产生NaN。
+
+三层编码器共享同次前向的整数几何索引，特征前缀表和加权和逐层重算。
+CUDA无梯度推理默认16384 Token分块，CPU和训练为1024；优化不改变模型参数与数学定义。
 
 该主干始终为双向结构。代码中不再存在因果模式或调试统计开关。
 
-## 3. 固定 Sparse Token 混合
-
-`SparseTokenMixture` 始终属于模型并保存在 checkpoint 中。对于事件数足够且极性分布平衡的序列，预处理会确定性地生成 `1.5×` 高触发阈值子流；普通序列不生成子流，但仍经过同一套固定模型。
-
-Full 与 Sparse 视图共享 Tokenizer、锥编码器和事件解码器。Sparse Token 按离散块坐标对齐到 Full Token，路由器只在 Sparse Token 存在的位置计算残差修正：
-
-```text
-gate = sparse_present × sigmoid(router(features))
-mixed_token = full_token + residual_scale × gate × sparse_adapter(features)
-```
-
-最终始终按 Full 视图的事件索引解码，因此输出数量和原始事件顺序保持不变。
-
-## 4. 固定多尺度事件精修
+## 3. 固定多尺度事件精修
 
 `MultiScaleEventRefinementHead` 始终属于模型。它复用最终 Token、六维事件局部特征和基础 logit，在以下三个尺度聚合稀疏 cell 上下文：
 
@@ -43,33 +37,34 @@ event_logit = base_event_logit + refinement_delta[event]
 
 精修头只处理被事件占用的 cell，不构造稠密时空体。
 
-## 5. 训练阶段不改变结构
+## 4. 训练阶段不改变结构
 
 `training.stage` 只设置 `requires_grad` 和冻结模块的评估态：
 
 | 阶段 | 可训练部分 |
 |---|---|
 | `full` | 全部固定结构 |
-| `sparse_mixture` | 仅 Sparse Token 混合 |
 | `refinement` | 仅多尺度事件精修头 |
 
-阶段切换不会创建、删除或绕过模型参数。当前正式配置使用 `refinement`。
+阶段切换不会创建、删除或绕过模型参数。当前主模型及正式配置使用`full`。
 
-训练主损失由事件 Focal、Dice、目标帧召回、完整事件假警约束和主尺度精修辅助损失组成。Sparse 子流存在时再计算其专家辅助约束；这些 loss 权重属于训练策略，不属于模型结构开关。
+训练主损失由事件 Focal、Dice、目标帧召回、完整事件假警约束和主尺度精修辅助损失组成。Dense 序列权重继续使用原训练规则；Sparse 子流、门控调度和专属辅助损失均已删除。
 
-## 6. Checkpoint 契约
+## 5. Checkpoint 契约
 
 正式模型 checkpoint schema 固定为 7，保存完整模型状态和以下推理契约：
 
 - 主干模型结构参数
 - 输入分辨率
-- Sparse 子流的事件数、极性和阈值门限
 - 精修头上下文维度及三个尺度
 
-训练阶段、loss 权重、warmup/ramp 和冻结策略不参与推理兼容性判断。历史 schema-7 元数据中固定关闭的 `causal_mode`、`debug_attention_stats`，以及旧的 `enabled/freeze` 字段只在加载时做受限归一化；它们不再是配置项或代码分支。
+训练阶段、loss 权重和冻结策略不参与推理兼容性判断。新结构为 172,150 参数；旧 schema-7 权重与配置仅保留在归档产物中，不通过当前加载器恢复 Sparse 分支。
 
 `best.pt` 用于推理或明确的分阶段初始化；精确续训统一使用 training-state，以恢复优化器、学习率控制器和随机数状态。
 
 ## 外部事件后处理
 
-最终掩码为直接验证与主轨迹恢复的并集；不加载独立参考模型或参考预测。神经模型结构不因此改变。删除后的 val/test 对照见 [复评报告](reference_recovery_removal_20261016.md)。
+当前主模型使用small/large事件树、冻结融合权重、主轨迹及直接阈值分支，最终掩码为两分支并集。
+逐帧轨迹形态学只在种子包围盒加完整膨胀范围内计算，保留全局节点坐标及连接规则。
+默认`traceformer-predict`运行完整主模型；清单与使用方法见[主模型说明](main_model_20261018.md)。
+此前删除reference recovery的val/test历史对照见[复评报告](reference_recovery_removal_20261016.md)。

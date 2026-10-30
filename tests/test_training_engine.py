@@ -29,7 +29,6 @@ from traceformer.training.engine import (
     _restore_rng_state,
     _select_competition_threshold,
     _serializable,
-    _sparse_mixture_weight,
     build_model,
     evaluate_checkpoint,
     run_training,
@@ -203,8 +202,8 @@ def test_cpu_training_writes_reproducible_metrics_and_checkpoint() -> None:
         checkpoint = __import__("torch").load(
             run_dir / "best.pt", map_location="cpu", weights_only=True
         )
-        assert checkpoint["schema_version"] == 7
-        assert "enabled" not in checkpoint["sparse_mixture_config"]
+        assert checkpoint["schema_version"] == 8
+        assert "sparse_mixture_config" not in checkpoint
         assert "enabled" not in checkpoint["frame_refinement_config"]
         assert checkpoint["decision_threshold"] == metrics["threshold"]
         changed_config = replace(
@@ -266,16 +265,13 @@ def test_refinement_initialization_loads_matching_base_and_trains_only_new_head(
         source_path = temporary_root / "base.pt"
         torch.save(
             {
-                "schema_version": 7,
+                "schema_version": 8,
                 "model_state": {
                     name: value
                     for name, value in source_model.state_dict().items()
                     if not name.startswith("event_refinement_head.")
                 },
                 "model_config": _serializable(asdict(source_config.model)),
-                "sparse_mixture_config": _serializable(
-                    asdict(source_config.sparse_mixture)
-                ),
                 "resolution": _serializable(asdict(source_config.resolution)),
                 "epoch": 7,
             },
@@ -313,7 +309,7 @@ def test_refinement_initialization_loads_matching_base_and_trains_only_new_head(
         assert summary["trainable_parameter_count"] == expected_trainable
         assert summary["full_initialization"]["kind"] == "event_refinement"
         assert summary["full_initialization"]["epoch"] == 7
-        assert checkpoint["schema_version"] == 7
+        assert checkpoint["schema_version"] == 8
         assert "enabled" not in checkpoint["frame_refinement_config"]
         for name, tensor in source_model.state_dict().items():
             if name.startswith("event_refinement_head."):
@@ -649,68 +645,6 @@ def test_dense_balanced_polarity_sequences_receive_configured_loss_weight() -> N
     weight = _dense_sequence_loss_weight(events, labels, config)
 
     assert weight == pytest.approx(3.0)
-
-
-def test_sparse_mixture_schedule_holds_router_then_ramps() -> None:
-    base = TraceFormerConfig.default()
-    config = replace(
-        base,
-        sparse_mixture=replace(
-            base.sparse_mixture,
-            warmup_epochs=2,
-            ramp_epochs=2,
-        ),
-    ).validate()
-
-    assert [_sparse_mixture_weight(config, epoch) for epoch in range(1, 6)] == [
-        0.0,
-        0.0,
-        pytest.approx(0.5),
-        1.0,
-        1.0,
-    ]
-
-
-def test_training_records_sparse_mixture_losses_and_paired_inference() -> None:
-    with TemporaryDirectory(dir=Path.cwd()) as directory:
-        temporary_root = Path(directory)
-        data_root = temporary_root / "data"
-        train_root = data_root / "train"
-        val_root = data_root / "val"
-        train_root.mkdir(parents=True)
-        val_root.mkdir(parents=True)
-        _write_sparse_mixture_sequence(train_root / "train_000.npz")
-        _write_sparse_mixture_sequence(val_root / "val_000.npz")
-        output_root = temporary_root / "outputs"
-        config = _config(data_root, output_root)
-        config = replace(
-            config,
-            sparse_mixture=replace(
-                config.sparse_mixture,
-                min_events=1,
-                max_polarity_fraction=1.0,
-                warmup_epochs=0,
-                ramp_epochs=1,
-            ),
-        ).validate()
-
-        summary = run_training(config, output_dir=output_root / "run")
-        run_dir = Path(summary["run_dir"])
-        history = json.loads((run_dir / "history.json").read_text(encoding="utf-8"))
-        mixture = json.loads(
-            (run_dir / "sparse_mixture.json").read_text(encoding="utf-8")
-        )
-        reproduced = evaluate_checkpoint(config, run_dir / "best.pt")
-
-    train_loss = history[0]["train_loss"]
-    assert train_loss["full_aux_total"] > 0.0
-    assert train_loss["sparse_total"] > 0.0
-    assert train_loss["background_consistency"] > 0.0
-    assert train_loss["sparse_false_peak"] > 0.0
-    assert train_loss["gate_regularization"] > 0.0
-    assert history[0]["sparse_mixture"]["augmented_files"] == 1
-    assert mixture[0]["ratio_usage"] == {"1.5": 1}
-    assert reproduced["event"]["event_count"] == 4
 
 
 def test_training_forwards_all_events_before_sampling_loss(

@@ -57,6 +57,7 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--cache-dir", required=True)
     train.add_argument("--output-dir", required=True)
     train.add_argument("--control-dir")
+    train.add_argument("--event-only", action="store_true", help="仅开发并发布事件树与主轨迹")
     _add_training_controls(train)
 
     release_event = commands.add_parser(
@@ -126,6 +127,7 @@ def main() -> None:
                 arguments.output_dir,
                 _protocol(arguments),
                 control_dir=arguments.control_dir,
+                event_only=arguments.event_only,
                 progress=lambda message: print(message, flush=True),
             )
         elif arguments.command == "release-event":

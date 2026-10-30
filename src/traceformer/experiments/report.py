@@ -22,10 +22,8 @@ from traceformer.training.engine import (
     _atomic_torch_save,
     _dataset,
     _dataset_manifest,
-    _forward_with_sparse_mixture,
     _manifest_identity_digest,
     _metrics_at_threshold,
-    _sparse_view_statistics,
     _validate_checkpoint_contract,
     _write_json,
     build_model,
@@ -54,15 +52,12 @@ def evaluate_ablation(
         prediction_dir.mkdir(exist_ok=True)
     # 固定前向一次作为预热；计时包含子流模拟与 CPU 邻域查找，排除磁盘读取。
     warm = dataset[0]
-    _forward_with_sparse_mixture(model, warm, warm.events, torch.zeros(warm.length, dtype=torch.long),
-                                 config, mixture_weight=1.0)
+    model(warm.events, torch.zeros(warm.length, dtype=torch.long))
     del warm
     for sequence in dataset:
         batches = torch.zeros(sequence.length, dtype=torch.long)
         started = time.perf_counter()
-        output, view = _forward_with_sparse_mixture(
-            model, sequence, sequence.events, batches, config, mixture_weight=1.0,
-        )
+        output = model(sequence.events, batches)
         seconds = time.perf_counter() - started
         elapsed.append(seconds)
         logits = output["event_logits"].detach().clone()
@@ -71,26 +66,20 @@ def evaluate_ablation(
         entry = (logits, sequence)
         results.append(entry)
         eligible = is_dense_balanced_event_stream(
-            sequence.events, min_events=config.sparse_mixture.min_events,
-            max_polarity_fraction=config.sparse_mixture.max_polarity_fraction,
+            sequence.events, min_events=config.training.dense_sequence_event_threshold,
+            max_polarity_fraction=config.training.dense_sequence_background_polarity_max,
         )
         group = "sparse_eligible" if eligible else "ordinary"
         groups[group].append(entry)
         current = _metrics_at_threshold([entry], config, threshold)
         base = _metrics_at_threshold([(output["base_event_logits"], sequence)], config, threshold)
-        present = output["sparse_token_present"]
-        gate = output["mixture_gate"][present]
         details[sequence.source_path.stem] = {
             "group": group, "events": sequence.length, "seconds": seconds,
             "metrics": current, "before_refinement_same_threshold": base,
             "refinement_count_delta": {
                 key: current["event"][key] - base["event"][key] for key in ("tp", "fp", "fn")
             },
-            "token_count": len(present), "aligned_sparse_tokens": int(present.sum()),
-            "gate_quantiles": torch.quantile(gate, torch.tensor([0.0, 0.25, 0.5, 0.75, 1.0])).tolist()
-            if len(gate) else None,
-            "sparse_view": _sparse_view_statistics(sequence, view, frame_ms=config.evaluation.frame_ms)
-            if view is not None else None,
+            "token_count": len(output["token_features"]),
         }
         if neighbor_diagnostics and isinstance(model.encoder, PrefixConeEncoder) and len(output["token_coords"]):
             # 几何统计放在计时区间外；三层使用相同区域，只需统计一次。

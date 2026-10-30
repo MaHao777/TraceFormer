@@ -28,7 +28,6 @@ from traceformer.postprocessing.submission import evaluate_predictions, write_pr
 from traceformer.training.engine import (
     _dataset_manifest,
     _manifest_identity_digest,
-    forward_with_sparse_mixture,
     load_inference_model,
 )
 
@@ -88,9 +87,9 @@ def check(arguments, *, assets=None):
         "checkpoint_sha256": sha256_file(arguments.checkpoint), "sequence": str(original.source_path),
         "source_sha256": sha256_file(original.source_path) if arguments.sequence else None,
         "events": original.length, "model_outputs": {}, "tree_scores": {}}
-    first_forward, _ = forward_with_sparse_mixture(model, sequence, events, batches, config, compute_sparse_logits=False)
+    first_forward = model(events, batches)
 
-    second_forward, _ = forward_with_sparse_mixture(model, sequence, events, batches, config, compute_sparse_logits=False)
+    second_forward = model(events, batches)
     for name, expected in first_forward.items():
         if isinstance(expected, torch.Tensor):
             report["model_outputs"][name] = difference(expected.cpu().numpy(), second_forward[name].cpu().numpy())

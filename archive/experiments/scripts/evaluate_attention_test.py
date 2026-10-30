@@ -1,4 +1,4 @@
-"""复用三组消融权重和验证阈值，在完整带标签测试集推理并独立计分。"""
+"""复用注意力消融权重和验证阈值，在完整带标签测试集推理并独立计分。"""
 
 from __future__ import annotations
 
@@ -38,11 +38,14 @@ def verify_raw_score(original: dict, independent: dict) -> None:
 def evaluate(args) -> None:
     suite_root = args.suite.resolve()
     suite = read(suite_root / "suite.json")
-    if (suite.get("protocol") != "attention_three_variants"
+    variants = {"attention_three_variants": {"C0", "C1", "C2"},
+                "center_attention_four_variants": {"A0", "A1", "A2", "A3"}}
+    expected = variants.get(suite.get("protocol"), set())
+    if (not expected
             or read(suite_root / "status.json")["status"] != "complete"
-            or len(suite["jobs"]) != 3
-            or {job["result_id"] for job in suite["jobs"]} != {"C0", "C1", "C2"}):
-        raise ValueError("requires the completed three-variant attention suite")
+            or len(suite["jobs"]) != len(expected)
+            or {job["result_id"] for job in suite["jobs"]} != expected):
+        raise ValueError("requires a completed single-seed attention suite")
     source = Path(suite["source_snapshot"])
     for relative, digest in read(suite_root / "source_hashes.json").items():
         if _file_sha256(source / relative) != digest:
@@ -51,13 +54,19 @@ def evaluate(args) -> None:
     if len(dataset) != 24:
         raise ValueError("requires all 24 labeled test sequences")
     root = args.output.resolve()
-    root.mkdir(parents=True, exist_ok=False)
-    (root / "logs").mkdir()
+    root.mkdir(parents=True, exist_ok=True)
+    manifest = _dataset_manifest(dataset)
+    if (root / "dataset_manifest.json").exists() and read(root / "dataset_manifest.json") != manifest:
+        raise ValueError("test dataset changed when resuming evaluation")
+    if ((root / "source_hashes.json").exists()
+            and read(root / "source_hashes.json") != read(suite_root / "source_hashes.json")):
+        raise ValueError("test source changed when resuming evaluation")
+    (root / "logs").mkdir(exist_ok=True)
     adapters = root / "adapters"
-    adapters.mkdir()
+    adapters.mkdir(exist_ok=True)
     for path in (Path(__file__), Path(__file__).with_name("evaluate_neural_checkpoint.py")):
         shutil.copy2(path, adapters / path.name)
-    _write_json(root / "dataset_manifest.json", _dataset_manifest(dataset))
+    _write_json(root / "dataset_manifest.json", manifest)
     _write_json(root / "source_hashes.json", read(suite_root / "source_hashes.json"))
     environment = dict(os.environ, PYTHONPATH=str(source / "src"), PYTHONIOENCODING="utf-8",
                        PYTHONUNBUFFERED="1", PYTHONDONTWRITEBYTECODE="1")
@@ -79,8 +88,13 @@ def evaluate(args) -> None:
             "--device", "cpu", "--num-threads", "8", "--output", str(output),
         ]
         # 每组推理与概率复评分开进程，沿用训练时冻结的全部模型源码。
-        with (root / "logs" / f"{variant}.log").open("w", encoding="utf-8") as log:
-            subprocess.run(command, check=True, env=environment, stdout=log, stderr=subprocess.STDOUT)
+        cached = output / "independent_report.json"
+        reusable = (cached.exists() and read(cached).get("checkpoint_sha256") == done["sha256"]
+                    and read(cached).get("ablation") == job["spec"])
+        with (root / "logs" / f"{variant}.log").open("a", encoding="utf-8") as log:
+            if not reusable:
+                subprocess.run(command, check=True, env=environment, stdout=log, stderr=subprocess.STDOUT)
+            # 即使恢复已有推理，仍重读概率/源哈希/掩码并执行独立复评分支。
             subprocess.run([*command, "--rescore-only"], check=True, env=environment,
                            stdout=log, stderr=subprocess.STDOUT)
         report = read(output / "independent_report.json")
@@ -110,7 +124,7 @@ def evaluate(args) -> None:
         "comparisons": comparisons,
         "adapter_sha256": {p.name: _file_sha256(p) for p in adapters.glob("*.py")},
     })
-    lines = ["# 三组注意力消融：带标签测试集", "",
+    lines = [f"# {len(expected)}组注意力消融：带标签测试集", "",
              "99训练/24验证选模；复用各组验证阈值，24测试文件，不进行测试调参或后处理。",
              "推理标签清零，另进程复评分数，并与原始事件的另一计数实现逐文件一致。", "",
              "|组别|验证阈值|验证Score|测试Score|IoU|SegAcc|Pd|Fa|",
@@ -125,7 +139,7 @@ def evaluate(args) -> None:
                      f"ΔIoU={row['iou']:+.6f}，ΔPd={row['pd']:+.6f}，ΔFa={row['fa']:+.8g}")
     lines.extend(["", "seed37单次训练；不据此声称多种子稳定性或统计显著性。"])
     (root / "results.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
-    _write_json(root / "status.json", {"status": "complete", "completed_variants": 3})
+    _write_json(root / "status.json", {"status": "complete", "completed_variants": len(expected)})
 
 
 if __name__ == "__main__":

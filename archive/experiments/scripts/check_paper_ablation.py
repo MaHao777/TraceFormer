@@ -15,11 +15,9 @@ from traceformer.config import load_config
 from traceformer.data import NPZEventDataset
 from traceformer.experiments.ablation import AblationSpec
 from traceformer.training.engine import (
-    _add_sparse_mixture_losses,
     _dense_sequence_loss_weight,
     _event_refinement_loss,
-    _forward_with_sparse_mixture,
-    _sparse_mixture_auxiliary_losses,
+    _file_sha256,
     _write_json,
     build_model,
 )
@@ -31,8 +29,10 @@ from traceformer.training.sampling import sample_event_indices
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="configs/traceformer_score_optimized.yaml")
-    parser.add_argument("--backbone", choices=["cone", "box", "pointwise"], default="cone")
-    parser.add_argument("--stage", choices=["full", "sparse_mixture", "refinement"], default="full")
+    parser.add_argument("--backbone", choices=[
+        "cone", "box", "pointwise", "local", "single_box", "single_cone",
+    ], default="cone")
+    parser.add_argument("--stage", choices=["full", "refinement"], default="full")
     parser.add_argument("--pooling", choices=["attention", "mean", "statistics"], default="attention")
     parser.add_argument("--sequence", default="train_096.npz")
     parser.add_argument("--output", type=Path, required=True)
@@ -56,7 +56,7 @@ def main() -> None:
     generator = torch.Generator().manual_seed(config.training.seed)
     criterion = EventFocalDiceLoss(**asdict(config.loss))
     started = time.perf_counter()
-    output, view = _forward_with_sparse_mixture(model, sequence, events, batches, config, mixture_weight=1.0)
+    output = model(events, batches)
     queries = sample_event_indices(
         labels, logits=output["event_logits"], background_ratio=config.training.background_ratio,
         hard_negative_fraction=config.training.hard_negative_fraction, generator=generator,
@@ -70,12 +70,6 @@ def main() -> None:
     )
     refinement = _event_refinement_loss(output, labels, criterion, config)
     total = (losses["total"] + config.frame_refinement.loss_weight * refinement) * _dense_sequence_loss_weight(events, labels, config)
-    auxiliary = _sparse_mixture_auxiliary_losses(
-        output, labels, sequence.object_ids, sequence.timestamps_ms, events, batches, queries,
-        criterion, config, sampling_generator=generator,
-    )
-    if view is not None:
-        total = _add_sparse_mixture_losses(total, auxiliary, config)
     if not torch.isfinite(total):
         raise RuntimeError("nonfinite resource-check loss")
     total.backward()
@@ -93,6 +87,9 @@ def main() -> None:
         "loss": float(total.detach()), "elapsed_seconds": time.perf_counter() - started,
         "peak_rss_bytes": getattr(memory, "peak_wset", memory.rss),
         "trainable_parameters": sum(p.numel() for p in model.parameters() if p.requires_grad),
+        "config_sha256": _file_sha256(Path(args.config)),
+        "source_sha256": _file_sha256(sequence.source_path),
+        "local_cpu_backend": getattr(model.encoder.layers[0].attention, "cpu_backend", None),
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     _write_json(args.output, report)

@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import json
 import zipfile
-from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +14,8 @@ import torch
 from traceformer.config import load_config
 from traceformer.data import NPZEventDataset
 from traceformer.gpu.runtime import add_backend_arguments, validate_backends
-from traceformer.postprocessing.contracts import EventCache, density_group, sha256_file
+from traceformer.postprocessing.cache import infer_event_cache
+from traceformer.postprocessing.contracts import density_group, sha256_file
 from traceformer.postprocessing.direct_verifier import (
     apply_direct_verifier,
     direct_candidate_features,
@@ -28,19 +28,8 @@ from traceformer.postprocessing.learning import (
     predict_event_scores,
     required_event_models,
 )
-from traceformer.training.engine import (
-    _fixed_model_config,
-    build_model,
-    forward_with_sparse_mixture,
-)
-
-
-def _serializable(value: Any) -> Any:
-    if isinstance(value, tuple | list):
-        return [_serializable(item) for item in value]
-    if isinstance(value, dict):
-        return {key: _serializable(item) for key, item in value.items()}
-    return value
+from traceformer.postprocessing.release import event_validation_gate, load_event_release
+from traceformer.training.engine import load_inference_model
 
 
 def _write_track2_txt(
@@ -136,7 +125,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--training-cache-manifest", type=Path, required=True)
     parser.add_argument("--validation-report", type=Path, required=True)
-    parser.add_argument("--baseline-validation-report", type=Path, required=True)
+    parser.add_argument("--baseline-validation-report", type=Path)
     parser.add_argument("--test-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--prediction-threads", type=positive_prediction_threads, default=8)
@@ -148,20 +137,16 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     parser = build_parser()
     arguments = parser.parse_args()
+    if not arguments.event_only and arguments.baseline_validation_report is None:
+        parser.error("baseline validation report is required without --event-only")
     validate_backends(prediction_backend=arguments.prediction_backend, feature_backend=arguments.feature_backend)
 
     config = load_config(arguments.config)
-    checkpoint = torch.load(arguments.checkpoint, map_location="cpu", weights_only=False)
-    if checkpoint.get("schema_version") != 7:
-        raise ValueError("event-postprocess submission requires schema 7")
-    for name, expected in (
-        ("model_config", _serializable(asdict(config.model))),
-        ("sparse_mixture_config", _serializable(asdict(config.sparse_mixture))),
-        ("resolution", asdict(config.resolution)),
-    ):
-        actual = _fixed_model_config(checkpoint.get(name)) if name == "model_config" else checkpoint.get(name)
-        if actual != expected:
-            raise ValueError(f"checkpoint {name} does not match config")
+    torch.set_num_threads(config.training.num_threads)
+    # 所有推理入口共用完整结构检查，包括精修头及消融契约。
+    model, checkpoint = load_inference_model(
+        config, arguments.checkpoint, device=torch.device(arguments.device),
+    )
 
     cache_manifest = json.loads(
         arguments.training_cache_manifest.read_text(encoding="utf-8")
@@ -172,8 +157,6 @@ def main() -> None:
 
     training_report_path = arguments.training_dir / "training_report.json"
     training_report = json.loads(training_report_path.read_text(encoding="utf-8"))
-    if training_report["status"] != "rejected_component_stage":
-        raise ValueError("expected completed event and component development training")
     event_contract = training_report["event_stage"]
     if not event_contract["gate"]["passed"]:
         raise ValueError("event postprocess did not pass its development gate")
@@ -201,24 +184,12 @@ def main() -> None:
             raise ValueError("direct verifier did not pass its development gate")
         verifier_threshold = float(verifier_report["threshold"])
     validation_report = json.loads(arguments.validation_report.read_text(encoding="utf-8"))
-    baseline_validation_report = json.loads(
-        arguments.baseline_validation_report.read_text(encoding="utf-8")
-    )
+    baseline_path = arguments.baseline_validation_report or arguments.validation_report
+    baseline_validation_report = json.loads(baseline_path.read_text(encoding="utf-8"))
     if arguments.event_only:
         candidate = validation_report["event_release"]
         baseline = validation_report["original"]
-        validation_gate = {
-            "score_gain": float(candidate["aggregate"]["score"])
-            - float(baseline["aggregate"]["score"]),
-            "val_023_pd_gain": float(candidate["files"]["val_023.npz"]["pd"])
-            - float(baseline["files"]["val_023.npz"]["pd"]),
-            "fa": float(candidate["aggregate"]["fa"]),
-        }
-        validation_gate["passed"] = (
-            validation_gate["score_gain"] > 0
-            and validation_gate["val_023_pd_gain"] >= 0
-            and validation_gate["fa"] <= 6.0e-6
-        )
+        validation_gate = event_validation_gate(candidate, baseline)
         if not validation_gate["passed"]:
             raise ValueError(f"validation promotion gate failed: {validation_gate}")
     else:
@@ -239,14 +210,14 @@ def main() -> None:
         ):
             raise ValueError("validation report does not match the direct verifier")
 
-    model = build_model(config).to(arguments.device)
-    load_result = model.load_state_dict(checkpoint["model_state"], strict=True)
-    if load_result.missing_keys or load_result.unexpected_keys:
-        raise RuntimeError("checkpoint did not strict-load")
-    model.eval()
-
-    event_models = load_event_models(model_dir, names=required_event_models(event_contract),
-                                    backend=arguments.prediction_backend)
+    if arguments.event_only:
+        event_models, release_report = load_event_release(
+            arguments.event_release_dir, checkpoint=arguments.checkpoint,
+            config=arguments.config, backend=arguments.prediction_backend,
+        )
+    else:
+        event_models = load_event_models(model_dir, names=required_event_models(event_contract),
+                                        backend=arguments.prediction_backend)
     dataset = NPZEventDataset(
         arguments.test_dir,
         width=config.resolution.width,
@@ -266,38 +237,8 @@ def main() -> None:
     with torch.inference_mode():
         for index in range(len(dataset)):
             sequence = dataset[index]
-            events = sequence.events.to(arguments.device)
-            batch_indices = torch.zeros(len(events), dtype=torch.long, device=events.device)
-            output, sparse_view = forward_with_sparse_mixture(
-                model,
-                sequence,
-                events,
-                batch_indices,
-                config,
-                mixture_weight=1.0,
-                compute_sparse_logits=False,
-            )
-            with np.load(sequence.source_path, allow_pickle=False) as archive:
-                locations = archive["ev_loc"].astype(np.int64, copy=True)
-                raw_features = archive["evs_norm"][:, :4].astype(
-                    np.float32, copy=True
-                )
-            probability = torch.sigmoid(output["event_logits"]).cpu().numpy()
-            cache = EventCache(
-                name=sequence.source_path.name,
-                locations=locations,
-                raw_features=raw_features,
-                base_probability=probability,
-                token_features=output["token_features"].cpu().numpy(),
-                event_token_indices=output["event_token_indices"].cpu().numpy(),
-                prediction=probability
-                >= float(
-                    checkpoint.get(
-                        "decision_threshold", config.inference.sigmoid_threshold
-                    )
-                ),
-                labels=None,
-                target_ids=None,
+            cache = infer_event_cache(
+                model, config, sequence, checkpoint["decision_threshold"],
             )
             scores = predict_event_scores(
                 cache, event_models, num_threads=arguments.prediction_threads,
@@ -328,7 +269,6 @@ def main() -> None:
                     "positives": positives,
                     "density_group": group,
                     "events_per_frame": density,
-                    "sparse_view": sparse_view is not None,
                     "direct_gate": {
                         "executed": candidate_batch is not None,
                         "candidate_components": (
@@ -364,10 +304,8 @@ def main() -> None:
         "validation_gate": validation_gate,
         "validation_report": str(arguments.validation_report.resolve()),
         "validation_report_sha256": sha256_file(arguments.validation_report),
-        "baseline_validation_report": str(arguments.baseline_validation_report.resolve()),
-        "baseline_validation_report_sha256": sha256_file(
-            arguments.baseline_validation_report
-        ),
+        "baseline_validation_report": str(baseline_path.resolve()),
+        "baseline_validation_report_sha256": sha256_file(baseline_path),
         "config": str(arguments.config.resolve()),
         "config_sha256": sha256_file(arguments.config),
         "checkpoint": str(arguments.checkpoint.resolve()),

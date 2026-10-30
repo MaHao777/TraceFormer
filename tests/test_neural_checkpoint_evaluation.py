@@ -14,7 +14,7 @@ from traceformer.training.engine import _dataset, _dataset_manifest, _manifest_i
 
 
 def load_evaluator():
-    source = Path(__file__).parents[1] / "scripts/evaluate_neural_checkpoint.py"
+    source = Path(__file__).parents[1] / "src/traceformer/experiments/evaluation.py"
     spec = importlib.util.spec_from_file_location("evaluate_neural_checkpoint", source)
     evaluator = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(evaluator)
@@ -44,12 +44,12 @@ def test_neural_test_prediction_is_annotation_isolated_and_rescorable(tmp_path, 
     )
     calls = []
 
-    def infer(model, sequence, events, batches, config, **kwargs):
+    def infer(model, config, sequence):
         assert sequence.labels.eq(0).all() and sequence.object_ids.eq(0).all()
         calls.append(True)
-        return {"event_logits": torch.logit(torch.tensor([0.8, 0.6]))}, None
+        return {"event_logits": torch.logit(torch.tensor([0.8, 0.6]))}
 
-    monkeypatch.setattr(evaluator, "forward_with_sparse_mixture", infer)
+    monkeypatch.setattr(evaluator, "infer_event_output", infer)
     checkpoint_path = tmp_path / "best.pt"
     checkpoint_path.write_bytes(b"checkpoint test identity")
     config_path = tmp_path / "config.yaml"

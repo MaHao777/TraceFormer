@@ -22,8 +22,6 @@ def _model() -> TraceFormer:
 
 
 
-        sparse_mixture_router_bias=-2.0,
-        sparse_mixture_residual_scale=0.01,
         frame_refinement_context_dim=4,
         frame_refinement_scales=(
             RefinementScaleConfig(2, 2, 10.0),
@@ -49,10 +47,11 @@ def _batch_indices() -> torch.Tensor:
     return torch.tensor([0, 0, 0, 1, 1])
 
 
-def test_fixed_model_always_contains_sparse_mixture_and_refinement() -> None:
+def test_fixed_model_has_no_sparse_parameters_and_retains_refinement() -> None:
     model = _model()
 
-    assert model.sparse_mixture is not None
+    assert not hasattr(model, "sparse_mixture")
+    assert not any("sparse_mixture" in key for key in model.state_dict())
     assert model.event_refinement_head is not None
 
 
@@ -65,21 +64,6 @@ def test_training_stage_full_keeps_every_module_trainable() -> None:
     assert all(module.training for module in model.children())
 
 
-def test_training_stage_sparse_mixture_opens_only_adapter() -> None:
-    model = _model()
-    model.configure_training_stage("sparse_mixture")
-    model.train()
-
-    assert model.sparse_mixture.training
-    assert all(parameter.requires_grad for parameter in model.sparse_mixture.parameters())
-    for module in (
-        model.tokenizer,
-        model.encoder,
-        model.decoder,
-        model.event_refinement_head,
-    ):
-        assert not module.training
-        assert not any(parameter.requires_grad for parameter in module.parameters())
 
 
 def test_training_stage_refinement_opens_only_new_head() -> None:
@@ -91,7 +75,7 @@ def test_training_stage_refinement_opens_only_new_head() -> None:
     assert all(
         parameter.requires_grad for parameter in model.event_refinement_head.parameters()
     )
-    for module in (model.tokenizer, model.encoder, model.decoder, model.sparse_mixture):
+    for module in (model.tokenizer, model.encoder, model.decoder):
         assert not module.training
         assert not any(parameter.requires_grad for parameter in module.parameters())
 
@@ -116,11 +100,6 @@ def test_forward_returns_only_fixed_model_training_contract() -> None:
         "event_refinement_cell_logits",
         "event_refinement_event_cell_indices",
         "event_refinement_event_logits",
-        "full_event_logits",
-        "sparse_event_logits",
-        "sparse_source_indices",
-        "mixture_gate",
-        "sparse_token_present",
         "token_features",
         "token_coords",
         "token_batch_indices",
@@ -131,32 +110,8 @@ def test_forward_returns_only_fixed_model_training_contract() -> None:
     assert output["event_refinement_cell_logits"].ndim == 1
     assert output["event_refinement_event_cell_indices"].shape == (5,)
     assert torch.equal(output["event_refinement_event_logits"], torch.zeros(5))
-    assert output["sparse_event_logits"].shape == (0,)
 
 
-def test_paired_sparse_view_preserves_event_order_and_trains_router() -> None:
-    model = _model()
-    events = _events()
-    source_indices = torch.tensor([0, 1, 3, 4])
-
-    output = model(
-        events,
-        _batch_indices(),
-        sparse_events=events[source_indices],
-        sparse_batch_indices=_batch_indices()[source_indices],
-        sparse_source_indices=source_indices,
-        mixture_weight=1.0,
-    )
-
-    assert output["event_logits"].shape == (len(events),)
-    assert output["sparse_event_logits"].shape == (len(source_indices),)
-    assert torch.equal(output["sparse_source_indices"], source_indices)
-    assert bool(output["sparse_token_present"].any())
-    output["event_logits"].square().mean().backward()
-    assert all(
-        parameter.grad is not None and torch.isfinite(parameter.grad).all()
-        for parameter in model.sparse_mixture.parameters()
-    )
 
 
 def test_explicit_batch_indices_stay_isolated() -> None:
@@ -169,30 +124,6 @@ def test_explicit_batch_indices_stay_isolated() -> None:
     assert not set(first.tolist()) & set(second.tolist())
 
 
-def test_skipping_sparse_decoder_preserves_all_decision_outputs() -> None:
-    model = _model().eval()
-    events, batches = _events(), _batch_indices()
-    source_indices = torch.tensor([0, 1, 3, 4])
-    kwargs = {
-        "sparse_events": events[source_indices],
-        "sparse_batch_indices": batches[source_indices],
-        "sparse_source_indices": source_indices,
-    }
-    calls = []
-    hook = model.decoder.register_forward_hook(lambda *_: calls.append(1))
-    with torch.no_grad():
-        default = model(events, batches, **kwargs)
-        assert len(calls) == 3
-        calls.clear()
-        optimized = model(events, batches, compute_sparse_logits=False, **kwargs)
-    hook.remove()
-    # 默认辅助监督仍存在，推理只少执行一次稀疏 Decoder。
-    assert len(calls) == 2
-    assert default["sparse_event_logits"].shape == (len(source_indices),)
-    assert optimized["sparse_event_logits"].shape == (0,)
-    assert optimized.keys() == default.keys()
-    for key in default.keys() - {"sparse_event_logits"}:
-        assert torch.equal(default[key], optimized[key]), key
 
 
 def test_empty_event_sample_returns_empty_finite_outputs() -> None:

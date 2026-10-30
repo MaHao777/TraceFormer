@@ -208,7 +208,7 @@ def test_prediction_pipeline_selects_models_passes_threads_and_reports(monkeypat
         assert np.array_equal(saved["prediction"], cache.prediction)
 
 
-def test_cache_entry_skips_sparse_logits_and_preserves_format(monkeypatch, tmp_path):
+def test_cache_entry_uses_single_view_and_preserves_format(monkeypatch, tmp_path):
     from traceformer.postprocessing import cache as cache_module
 
     calls = []
@@ -217,22 +217,27 @@ def test_cache_entry_skips_sparse_logits_and_preserves_format(monkeypatch, tmp_p
     source.write_bytes(b"tiny source")
     checkpoint = tmp_path / "best.pt"
     checkpoint.write_bytes(b"tiny checkpoint")
-    sequence = SimpleNamespace(events=events, source_path=source, length=4)
+    from traceformer.data.dataset import LoadedEventSequence
+
+    sequence = LoadedEventSequence(
+        events=events, labels=torch.zeros(4), object_ids=torch.zeros(4, dtype=torch.long),
+        timestamps_ms=torch.arange(4, dtype=torch.float64), source_path=source,
+    )
     cached = _cache()
-    monkeypatch.setattr(cache_module, "load_inference_model", lambda *args, **kwargs: (None, {}))
+    monkeypatch.setattr(cache_module, "load_inference_model", lambda *args, **kwargs: (torch.nn.Linear(1, 1), {}))
     monkeypatch.setattr(cache_module, "NPZEventDataset", lambda *args, **kwargs: [sequence])
-    monkeypatch.setattr(cache_module, "forward_with_sparse_mixture", lambda *args, **kwargs:
-                        calls.append(kwargs) or ({
+    monkeypatch.setattr(cache_module, "infer_event_output", lambda *args, **kwargs:
+                        calls.append(True) or {
                             "event_logits": torch.logit(torch.from_numpy(cached.base_probability)),
                             "token_features": torch.from_numpy(cached.token_features),
                             "event_token_indices": torch.from_numpy(cached.event_token_indices),
-                        }, None))
+                        })
     monkeypatch.setattr(cache_module, "_source_arrays", lambda *args, **kwargs: {
         "locations": cached.locations, "raw_features": cached.raw_features,
         "labels": None, "target_ids": None,
     })
     cache_module.cache_split(TraceFormerConfig(), checkpoint, tmp_path / "output", split="val")
-    assert calls[0]["compute_sparse_logits"] is False
+    assert calls == [True]
     loaded = EventCache.load(tmp_path / "output/val/tiny.npz", allow_labels=False)
     assert np.array_equal(loaded.locations, cached.locations)
     assert np.array_equal(loaded.event_token_indices, cached.event_token_indices)

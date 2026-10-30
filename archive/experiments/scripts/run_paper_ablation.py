@@ -16,11 +16,12 @@ from pathlib import Path
 import psutil
 
 from traceformer.config import load_config
-from traceformer.experiments.ablation import AblationSpec
+from traceformer.experiments.ablation import parse_ablation
 from traceformer.experiments.figures import render_figures, select_windows
 from traceformer.experiments.report import evaluate_ablation
 from traceformer.experiments.suite import (
     prepare_attention_suite,
+    prepare_center_attention_suite,
     prepare_pooling_suite,
     prepare_simple_suite,
     prepare_suite,
@@ -85,7 +86,7 @@ def worker(root: Path, identifier: str) -> None:
         current = _dataset_manifest(_dataset(config, "train"), _dataset(config, "val"))
         if _manifest_identity_digest(current) != suite["dataset_manifest_sha256"]:
             raise ValueError("attention suite dataset changed after preparation")
-    spec = AblationSpec(**job["spec"])
+    spec = parse_ablation(job["spec"])
     folder = root / identifier
     folder.mkdir(parents=True, exist_ok=True)
     attempts = sorted(folder.glob("attempt_*"))
@@ -122,19 +123,22 @@ def evaluate_worker(root: Path, identifier: str, attempt: Path) -> None:
     suite = read_json(root / "suite.json")
     job = next(item for item in suite["jobs"] if item["id"] == identifier)
     report = evaluate_ablation(load_config(job["config"]), attempt / "best.pt",
-                               AblationSpec(**job["spec"]), save_predictions=bool(job["result_id"]),
-                               neighbor_diagnostics=suite.get("protocol") == "attention_three_variants")
+                               parse_ablation(job["spec"]), save_predictions=bool(job["result_id"]),
+                               neighbor_diagnostics=suite.get("protocol") in {
+                                   "attention_three_variants", "center_attention_four_variants",
+                               })
     if report["metrics"] != read_json(attempt / "metrics.json"):
         raise RuntimeError("independent FP32 metrics do not exactly reproduce saved best metrics")
 
 
 def source_snapshot(root: Path) -> None:
-    repo = Path(__file__).resolve().parents[1]
+    repo = Path(__file__).resolve().parents[3]
     target = root / "source"
     target.mkdir()
     for directory in ("src", "scripts", "configs"):
         shutil.copytree(repo / directory, target / directory,
                         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    shutil.copytree(repo / "archive/experiments/scripts", target / "scripts", dirs_exist_ok=True)
     for name in ("pyproject.toml", "AGENTS.md"):
         shutil.copy2(repo / name, target / name)
     hashes = {str(path.relative_to(target)): _file_sha256(path)
@@ -202,6 +206,7 @@ def main() -> None:
     parser.add_argument("--suite", type=Path, required=True)
     parser.add_argument("--prepare", action="store_true")
     parser.add_argument("--prepare-attention", action="store_true")
+    parser.add_argument("--prepare-center-attention", action="store_true")
     parser.add_argument("--prepare-simple-from", type=Path)
     parser.add_argument("--prepare-pooling-from", type=Path)
     parser.add_argument("--config", default="configs/traceformer_score_optimized.yaml")
@@ -214,7 +219,7 @@ def main() -> None:
     root = args.suite.resolve()
     if args.prepare_pooling_from:
         # 仅允许此次已审计的聚合入口/实验契约改动，其余模型和训练实现必须相同。
-        repo = Path(__file__).resolve().parents[1]
+        repo = Path(__file__).resolve().parents[3]
         allowed = {"src/traceformer/models/event_tokenizer.py", "src/traceformer/training/engine.py"}
         hashes = read_json(args.prepare_pooling_from / "source_hashes.json")
         for relative, digest in hashes.items():
@@ -231,7 +236,7 @@ def main() -> None:
         print(root, flush=True)
     elif args.prepare_simple_from:
         # 只允许复用相同的模型、训练与数据处理实现；汇总/队列代码可更新。
-        repo = Path(__file__).resolve().parents[1]
+        repo = Path(__file__).resolve().parents[3]
         hashes = read_json(args.prepare_simple_from / "source_hashes.json")
         for relative, digest in hashes.items():
             normalized = relative.replace("\\", "/")
@@ -247,7 +252,7 @@ def main() -> None:
         _write_json(root / "status.json", {"status": "prepared", "reused_results": 2, "pending_training_stages": 2,
                                            "updated_at": time.time()})
         print(root, flush=True)
-    elif args.prepare or args.prepare_attention:
+    elif args.prepare or args.prepare_attention or args.prepare_center_attention:
         config = load_config(args.config)
         for split, expected in (("train", 99), ("val", 24)):
             files = list((Path(config.dataset.root) / split).glob("*.npz"))
@@ -255,7 +260,9 @@ def main() -> None:
                 raise ValueError(f"expected {expected} {split} files, found {len(files)}")
         if config.training.max_train_files is not None or config.training.max_val_files is not None:
             raise ValueError("formal ablation must use every file")
-        if args.prepare_attention:
+        if args.prepare_center_attention:
+            prepare_center_attention_suite(config, root, args.seeds or [37])
+        elif args.prepare_attention:
             prepare_attention_suite(config, root, args.seeds or [37])
         else:
             prepare_suite(config, root, args.seeds or [37, 73, 101])

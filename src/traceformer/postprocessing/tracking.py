@@ -163,15 +163,20 @@ def _frame_nodes(
         if not len(indices):
             continue
         points = locations[indices, :2]
-        mask = np.zeros((260, 346), dtype=bool)
-        mask[points[:, 1], points[:, 0]] = True
+        # 局部画布覆盖完整膨胀范围，保留传感器边界与节点的全局坐标。
+        left = max(0, int(points[:, 0].min()) - cluster_radius)
+        right = min(346, int(points[:, 0].max()) + cluster_radius + 1)
+        top = max(0, int(points[:, 1].min()) - cluster_radius)
+        bottom = min(260, int(points[:, 1].max()) + cluster_radius + 1)
+        mask = np.zeros((bottom - top, right - left), dtype=bool)
+        mask[points[:, 1] - top, points[:, 0] - left] = True
         if cluster_radius:
             mask = ndimage.binary_dilation(
                 mask,
                 structure=np.ones((2 * cluster_radius + 1, 2 * cluster_radius + 1), dtype=bool),
             )
         component_map, _ = ndimage.label(mask, structure=structure)
-        component_ids = component_map[points[:, 1], points[:, 0]]
+        component_ids = component_map[points[:, 1] - top, points[:, 0] - left]
         frame_nodes: list[TrackNode] = []
         for component_id in np.unique(component_ids):
             selected = indices[component_ids == component_id]

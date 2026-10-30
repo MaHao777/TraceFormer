@@ -10,7 +10,6 @@ from traceformer.config import (
     FrameRefinementConfig,
     ModelConfig,
     RefinementScaleConfig,
-    SparseMixtureConfig,
     TraceFormerConfig,
     load_config,
 )
@@ -46,28 +45,7 @@ def test_score_config_fixes_model_modules_and_refinement_stage() -> None:
         (4, 4),
         (2, 8),
     ]
-    assert config.sparse_mixture == SparseMixtureConfig(
-        min_events=300000,
-        max_polarity_fraction=0.65,
-        threshold_ratio=1.5,
-        warmup_epochs=3,
-        ramp_epochs=3,
-        initial_router_bias=-2.0,
-        initial_residual_scale=0.01,
-        full_aux_loss_weight=0.0,
-        sparse_loss_weight=0.05,
-        object_frame_consistency_weight=0.0,
-        positive_preservation_weight=0.2,
-        positive_preservation_margin=0.0,
-        background_consistency_weight=0.01,
-        background_consistency_margin=0.0,
-        sparse_false_peak_weight=0.01,
-        sparse_false_peak_logit_margin=0.0,
-        sparse_false_peak_topk_per_frame=8,
-        sparse_false_peak_block_size_x=8,
-        sparse_false_peak_block_size_y=8,
-        gate_regularization_weight=0.001,
-    )
+    assert "sparse_mixture" not in config.__dataclass_fields__
     assert config.frame_refinement == FrameRefinementConfig(
         context_dim=16,
         scales=(
@@ -86,7 +64,6 @@ def test_runtime_variants_keep_one_model_contract() -> None:
     for config in configs[1:]:
         assert config.model == reference.model
         assert config.loss == reference.loss
-        assert config.sparse_mixture == reference.sparse_mixture
         assert config.frame_refinement == reference.frame_refinement
         assert config.training.stage == "full"
 
@@ -102,7 +79,7 @@ def test_runtime_variants_keep_one_model_contract() -> None:
     assert Path(cpu_smoke.training.output_root).name == "smoke_outputs"
 
 
-@pytest.mark.parametrize("stage", ["full", "sparse_mixture", "refinement"])
+@pytest.mark.parametrize("stage", ["full", "refinement"])
 def test_training_stage_accepts_only_explicit_fixed_model_phases(stage: str) -> None:
     TraceFormerConfig(
         training=replace(TraceFormerConfig.default().training, stage=stage)
@@ -149,19 +126,6 @@ def test_refinement_requires_increasing_scales_and_fixed_primary_cell() -> None:
             ).validate()
 
 
-def test_sparse_mixture_validation_rejects_invalid_inference_gate() -> None:
-    base = TraceFormerConfig.default()
-    for changes in (
-        {"threshold_ratio": 1.0},
-        {"max_polarity_fraction": 0.49},
-        {"min_events": 0},
-        {"ramp_epochs": 0},
-    ):
-        with pytest.raises(ValueError):
-            replace(
-                base,
-                sparse_mixture=replace(base.sparse_mixture, **changes),
-            ).validate()
 
 
 def test_model_config_contains_structure_not_optional_module_flags() -> None:

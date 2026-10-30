@@ -18,7 +18,6 @@ from .event_decoder import EventDecoder
 from .event_refinement import MultiScaleEventRefinementHead
 from .event_tokenizer import EventTokenizer
 from .prefix_cone import PrefixConeEncoder
-from .sparse_mixture import SparseTokenMixture
 
 
 class TraceFormer(nn.Module):
@@ -30,11 +29,6 @@ class TraceFormer(nn.Module):
         "event_refinement_cell_logits",
         "event_refinement_event_cell_indices",
         "event_refinement_event_logits",
-        "full_event_logits",
-        "sparse_event_logits",
-        "sparse_source_indices",
-        "mixture_gate",
-        "sparse_token_present",
         "token_features",
         "token_coords",
         "token_batch_indices",
@@ -56,8 +50,6 @@ class TraceFormer(nn.Module):
         mlp_ratio: float,
         dropout: float,
         num_pool_queries: int = 4,
-        sparse_mixture_router_bias: float = -2.0,
-        sparse_mixture_residual_scale: float = 0.01,
         frame_refinement_context_dim: int = 16,
         frame_refinement_scales: tuple[RefinementScaleConfig, ...] = DEFAULT_REFINEMENT_SCALES,
         duration_ms: float = 8000.0,
@@ -85,14 +77,6 @@ class TraceFormer(nn.Module):
             dropout=dropout,
         )
         self.decoder = EventDecoder(token_dim=token_dim, dropout=dropout)
-        self.sparse_mixture = SparseTokenMixture(
-            token_dim=token_dim,
-            num_x_blocks=self.tokenizer.num_x_blocks,
-            num_y_blocks=self.tokenizer.num_y_blocks,
-            num_time_blocks=num_time_blocks,
-            initial_router_bias=sparse_mixture_router_bias,
-            initial_residual_scale=sparse_mixture_residual_scale,
-        )
         self.event_refinement_head = MultiScaleEventRefinementHead(
             token_dim=token_dim,
             event_feature_dim=6,
@@ -111,19 +95,11 @@ class TraceFormer(nn.Module):
         self.requires_grad_(True)
         if stage == "full":
             frozen: tuple[nn.Module, ...] = ()
-        elif stage == "sparse_mixture":
-            frozen = (
-                self.tokenizer,
-                self.encoder,
-                self.decoder,
-                self.event_refinement_head,
-            )
         elif stage == "refinement":
             frozen = (
                 self.tokenizer,
                 self.encoder,
                 self.decoder,
-                self.sparse_mixture,
             )
         else:
             raise ValueError(f"unsupported training stage: {stage}")
@@ -144,12 +120,6 @@ class TraceFormer(nn.Module):
         self,
         events: torch.Tensor,
         batch_indices: torch.Tensor | None = None,
-        *,
-        sparse_events: torch.Tensor | None = None,
-        sparse_batch_indices: torch.Tensor | None = None,
-        sparse_source_indices: torch.Tensor | None = None,
-        mixture_weight: float = 1.0,
-        compute_sparse_logits: bool = True,
     ) -> dict[str, Any]:
         tokenized = self.tokenizer(events, batch_indices)
         encoded = self.encoder(
@@ -157,71 +127,13 @@ class TraceFormer(nn.Module):
             tokenized.token_coords,
             tokenized.token_batch_indices,
         )
-        full_event_logits = self.decoder(
+        base_event_logits = self.decoder(
             encoded.token_features,
             tokenized.event_token_indices,
             tokenized.event_local_features,
         )
-        event_logits = full_event_logits
+        # 单视图直接解码全部原始事件，精修仍读取完整 Token。
         token_features = encoded.token_features
-        sparse_event_logits = full_event_logits.new_empty((0,))
-        returned_source_indices = torch.empty(0, dtype=torch.long, device=events.device)
-        mixture_gate = full_event_logits.new_zeros(len(encoded.token_features))
-        sparse_token_present = torch.zeros(
-            len(encoded.token_features), dtype=torch.bool, device=events.device
-        )
-        paired_arguments = (
-            sparse_events is not None,
-            sparse_source_indices is not None,
-        )
-        if any(paired_arguments) and not all(paired_arguments):
-            raise ValueError("sparse_events and sparse_source_indices must be provided together")
-        if sparse_events is not None and sparse_source_indices is not None:
-            if (
-                sparse_source_indices.ndim != 1
-                or sparse_source_indices.dtype != torch.long
-                or len(sparse_source_indices) != len(sparse_events)
-            ):
-                raise ValueError("sparse_source_indices must be int64 and align with sparse_events")
-            if len(sparse_source_indices) and (
-                bool(torch.any(sparse_source_indices < 0))
-                or bool(torch.any(sparse_source_indices >= len(events)))
-            ):
-                raise ValueError("sparse_source_indices are outside the full event view")
-            sparse_tokenized = self.tokenizer(sparse_events, sparse_batch_indices)
-            sparse_encoded = self.encoder(
-                sparse_tokenized.tokens,
-                sparse_tokenized.token_coords,
-                sparse_tokenized.token_batch_indices,
-            )
-            mixed = self.sparse_mixture(
-                encoded.token_features,
-                tokenized.token_coords,
-                tokenized.token_batch_indices,
-                tokenized.token_statistics,
-                sparse_encoded.token_features,
-                sparse_tokenized.token_coords,
-                sparse_tokenized.token_batch_indices,
-                sparse_tokenized.token_statistics,
-                mixture_weight=mixture_weight,
-            )
-            token_features = mixed.token_features
-            mixture_gate = mixed.gate
-            sparse_token_present = mixed.sparse_present
-            event_logits = self.decoder(
-                token_features,
-                tokenized.event_token_indices,
-                tokenized.event_local_features,
-            )
-            # 稀疏事件 logits 仅用于辅助监督，推理可保留空输出并跳过 Decoder。
-            if compute_sparse_logits:
-                sparse_event_logits = self.decoder(
-                    sparse_encoded.token_features,
-                    sparse_tokenized.event_token_indices,
-                    sparse_tokenized.event_local_features,
-                )
-            returned_source_indices = sparse_source_indices
-        base_event_logits = event_logits
         refinement = self.event_refinement_head(
             token_features=token_features,
             event_token_indices=tokenized.event_token_indices,
@@ -241,11 +153,6 @@ class TraceFormer(nn.Module):
             "event_refinement_cell_logits": refinement_cell_logits,
             "event_refinement_event_cell_indices": refinement_event_cell_indices,
             "event_refinement_event_logits": refinement_event_logits,
-            "full_event_logits": full_event_logits,
-            "sparse_event_logits": sparse_event_logits,
-            "sparse_source_indices": returned_source_indices,
-            "mixture_gate": mixture_gate,
-            "sparse_token_present": sparse_token_present,
             "token_features": token_features,
             "token_coords": tokenized.token_coords,
             "token_batch_indices": tokenized.token_batch_indices,

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 from torch import nn
@@ -19,6 +19,7 @@ class PrefixSample:
     coords: torch.Tensor
     flat_indices: torch.Tensor
     shape: tuple[int, int, int]
+    corner_cache: dict[tuple, torch.Tensor] | None = field(default=None, compare=False, repr=False)
 
 
 def _rectangle_indices(
@@ -26,6 +27,9 @@ def _rectangle_indices(
     fixed_radius: bool = False,
 ) -> torch.Tensor:
     """生成四角索引；越过时间边界时四角均置零，使求和贡献为零。"""
+    key = (window.spatial_radius, window.time_horizon, direction, start, end, fixed_radius)
+    if sample.corner_cache is not None and key in sample.corner_cache:
+        return sample.corner_cache[key]
     times, height, width = sample.shape
     xyz = sample.coords[start:end]
     distance = torch.arange(1, window.time_horizon + 1, device=xyz.device)
@@ -49,14 +53,17 @@ def _rectangle_indices(
         ),
         dim=-1,
     )
-    return torch.where(valid[..., None], corners, 0)
+    corners = torch.where(valid[..., None], corners, 0)
+    if sample.corner_cache is not None:
+        sample.corner_cache[key] = corners
+    return corners
 
 
 class _ConeSums(torch.autograd.Function):
     """固定几何下的线性区域求和；反向只分配一张前缀表梯度。"""
 
     @staticmethod
-    def forward(ctx, features, sample, windows, chunk_size, fixed_radius):
+    def forward(ctx, features, sample, windows, chunk_size, fixed_radius, directions):
         times, height, width = sample.shape
         grid = features.new_zeros((times * height * width, features.shape[-1]))
         grid.index_add_(0, sample.flat_indices, features)
@@ -68,17 +75,17 @@ class _ConeSums(torch.autograd.Function):
         occupied = F.pad(
             occupied.reshape(times, height, width).cumsum(1).cumsum(2), (1, 0, 1, 0)
         ).flatten()
-        total = features.new_zeros((len(features), 2 * len(windows), features.shape[-1]))
+        total = features.new_zeros((len(features), len(directions) * len(windows), features.shape[-1]))
         counts = torch.zeros(total.shape[:2], dtype=torch.int64, device=features.device)
         signs = features.new_tensor([1, -1, -1, 1])
         for start in range(0, len(features), chunk_size):
             end = min(start + chunk_size, len(features))
             for index, window in enumerate(windows):
-                for direction_index, direction in enumerate((-1, 1)):
+                for direction_index, direction in enumerate(directions):
                     corners = _rectangle_indices(
                         sample, window, direction, start, end, fixed_radius
                     )
-                    slot = 2 * index + direction_index
+                    slot = len(directions) * index + direction_index
                     # 顺序相减减少峰值临时张量，不保留逐邻居特征。
                     rectangle = (
                         integral[corners[..., 0]]
@@ -90,6 +97,7 @@ class _ConeSums(torch.autograd.Function):
                     counts[start:end, slot] = (occupied[corners] * signs.long()).sum((1, 2))
         ctx.sample, ctx.windows, ctx.chunk_size = sample, windows, chunk_size
         ctx.fixed_radius = fixed_radius
+        ctx.directions = directions
         ctx.feature_dim = features.shape[-1]
         ctx.mark_non_differentiable(counts)
         return total, counts
@@ -102,11 +110,11 @@ class _ConeSums(torch.autograd.Function):
         for start in range(0, len(sample.indices), ctx.chunk_size):
             end = min(start + ctx.chunk_size, len(sample.indices))
             for index, window in enumerate(ctx.windows):
-                for direction_index, direction in enumerate((-1, 1)):
+                for direction_index, direction in enumerate(ctx.directions):
                     corners = _rectangle_indices(
                         sample, window, direction, start, end, ctx.fixed_radius
                     )
-                    grad = grad_total[start:end, 2 * index + direction_index]
+                    grad = grad_total[start:end, len(ctx.directions) * index + direction_index]
                     grad = (
                         grad[:, None]
                         .expand(-1, window.time_horizon, -1)
@@ -118,7 +126,7 @@ class _ConeSums(torch.autograd.Function):
         grad_grid = grad_integral.reshape(times, height + 1, width + 1, -1)
         grad_grid = grad_grid.flip((1, 2)).cumsum(1).cumsum(2).flip((1, 2))
         grad_grid = grad_grid[:, 1:, 1:].reshape(-1, ctx.feature_dim)
-        return grad_grid[sample.flat_indices], None, None, None, None
+        return grad_grid[sample.flat_indices], None, None, None, None, None
 
 
 def prepare_prefix_geometry(coords: torch.Tensor, batches: torch.Tensor) -> list[PrefixSample]:
@@ -131,7 +139,9 @@ def prepare_prefix_geometry(coords: torch.Tensor, batches: torch.Tensor) -> list
         xyz = xyz - xyz.amin(dim=0)
         width, height, times = (xyz.amax(dim=0) + 1).tolist()
         flat = (xyz[:, 2] * height + xyz[:, 1]) * width + xyz[:, 0]
-        samples.append(PrefixSample(indices, xyz, flat, (times, height, width)))
+        # 整数几何仅在本次无梯度前向内复用；训练不保留索引缓存。
+        cache = {} if not torch.is_grad_enabled() else None
+        samples.append(PrefixSample(indices, xyz, flat, (times, height, width), cache))
     return samples
 
 
@@ -140,22 +150,29 @@ def prefix_cone_pool(
     weights: torch.Tensor,
     geometry: list[PrefixSample],
     windows: tuple[ConeWindowConfig, ...],
-    chunk_size: int = 1024,
+    chunk_size: int | None = None,
     *,
     fixed_radius: bool = False,
+    directions: tuple[int, ...] = (-1, 1),
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """返回 [N, 6, D] 摘要和 [N, 6] 成员数；不创建邻居列表。"""
+    # 单向消融只计算过去区域；默认双向运算顺序保持不变。
+    if directions not in {(-1, 1), (-1,)}:
+        raise ValueError("directions must be bidirectional or past-only")
+    if chunk_size is None:
+        # CUDA推理减少小分块发射；训练和CPU保留原临时内存规模。
+        chunk_size = 16384 if values.is_cuda and not torch.is_grad_enabled() else 1024
     if chunk_size <= 0:
         raise ValueError("chunk_size must be positive")
     summaries = values.new_zeros(
-        (len(values), 2 * len(windows), values.shape[-1]), dtype=torch.float32
+        (len(values), len(directions) * len(windows), values.shape[-1]), dtype=torch.float32
     )
     counts = torch.zeros(summaries.shape[:2], dtype=torch.int64, device=values.device)
     for sample in geometry:
         selected = sample.indices
         w = weights[selected].float().reshape(-1, 1)
         features = torch.cat((values[selected].float() * w, w), dim=-1)
-        total, count = _ConeSums.apply(features, sample, windows, chunk_size, fixed_radius)
+        total, count = _ConeSums.apply(features, sample, windows, chunk_size, fixed_radius, directions)
         mean = total[..., :-1] / total[..., -1:].clamp_min(1e-8)
         summaries[selected] = torch.where(count[..., None] > 0, mean, 0.0)
         counts[selected] = count
@@ -164,15 +181,17 @@ def prefix_cone_pool(
 
 class PrefixConeAttention(nn.Module):
     def __init__(
-        self, token_dim: int, num_heads: int, windows: tuple[ConeWindowConfig, ...], dropout: float
+        self, token_dim: int, num_heads: int, windows: tuple[ConeWindowConfig, ...], dropout: float,
+        *, directions: tuple[int, ...] = (-1, 1), learned_pool_weights: bool = True,
     ) -> None:
         super().__init__()
         self.windows = windows
         self.fixed_radius = False
+        self.directions = directions
         self.pool_value = nn.Linear(token_dim, token_dim)
-        self.pool_weight = nn.Linear(token_dim, 1)
+        self.pool_weight = nn.Linear(token_dim, 1) if learned_pool_weights else None
         self.shape_embedding = nn.Parameter(torch.empty(len(windows), token_dim))
-        self.direction_embedding = nn.Parameter(torch.empty(2, token_dim))
+        self.direction_embedding = nn.Parameter(torch.empty(len(directions), token_dim))
         nn.init.normal_(self.shape_embedding, std=0.02)
         nn.init.normal_(self.direction_embedding, std=0.02)
         self.center_attention = nn.MultiheadAttention(
@@ -185,9 +204,12 @@ class PrefixConeAttention(nn.Module):
         if geometry is None:
             geometry = prepare_prefix_geometry(token_coords, token_batch_indices)
         values = self.pool_value(tokens)
-        weights = torch.sigmoid(self.pool_weight(tokens).float()) + 1e-4
+        # 无门控时每个成员权重严格为1，得到锥内算术均值。
+        weights = (torch.sigmoid(self.pool_weight(tokens).float()) + 1e-4
+                   if self.pool_weight is not None else tokens.new_ones((len(tokens), 1)))
         summaries, counts = prefix_cone_pool(
-            values, weights, geometry, self.windows, fixed_radius=self.fixed_radius
+            values, weights, geometry, self.windows, fixed_radius=self.fixed_radius,
+            directions=self.directions,
         )
         embeddings = (self.shape_embedding[:, None] + self.direction_embedding[None]).flatten(0, 1)
         summaries = summaries.to(tokens.dtype) + embeddings

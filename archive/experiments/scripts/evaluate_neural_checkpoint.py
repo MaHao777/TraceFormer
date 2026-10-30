@@ -10,10 +10,12 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from sklearn.metrics import average_precision_score
 
 from traceformer.config import load_config
 from traceformer.data import NPZEventDataset
-from traceformer.experiments.ablation import AblationSpec
+from traceformer.experiments.ablation import parse_ablation
+from traceformer.postprocessing.cache import infer_event_output
 from traceformer.training.engine import (
     _dataset,
     _dataset_manifest,
@@ -23,7 +25,6 @@ from traceformer.training.engine import (
     _validate_checkpoint_contract,
     _write_json,
     build_model,
-    forward_with_sparse_mixture,
     load_inference_model,
 )
 
@@ -31,6 +32,10 @@ from traceformer.training.engine import (
 def evaluate(args):
     config = load_config(args.config)
     torch.set_num_threads(args.num_threads or config.training.num_threads)
+    if args.device == "cuda":
+        # 独立预测固定FP32，避免主机默认TF32设置改变对照协议。
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
     ablation_path = getattr(args, "ablation", None)
     if ablation_path is None:
         model, checkpoint = load_inference_model(
@@ -38,7 +43,7 @@ def evaluate(args):
         )
     else:
         # 实验入口要求显式契约；正式模型加载器仍拒绝所有消融权重。
-        ablation = AblationSpec(**json.loads(ablation_path.read_text(encoding="utf-8")))
+        ablation = parse_ablation(json.loads(ablation_path.read_text(encoding="utf-8")))
         checkpoint = torch.load(args.checkpoint, map_location=args.device, weights_only=True)
         _validate_checkpoint_contract(checkpoint, config, ablation=ablation)
         model = build_model(config, ablation=ablation).to(args.device).eval()
@@ -52,6 +57,7 @@ def evaluate(args):
         width=config.resolution.width,
         height=config.resolution.height,
         duration_ms=config.dataset.duration_ms,
+        limit_files=getattr(args, "max_files", None),
     )
     output = args.output
     output.mkdir(parents=True, exist_ok=True)
@@ -60,6 +66,7 @@ def evaluate(args):
     probabilities.mkdir(exist_ok=True)
     masks.mkdir(exist_ok=True)
     results, records = [], {}
+    probability_scores, target_values = [], []
     if args.rescore_only:
         expected = {p.stem for p in dataset.files}
         if {p.stem for p in probabilities.glob("*.pt")} != expected:
@@ -76,28 +83,21 @@ def evaluate(args):
                     raise ValueError("prediction source hash differs")
                 probability = saved["event_probabilities"]
             else:
-                events = sequence.events.to(args.device)
-                batches = torch.zeros(len(events), dtype=torch.long, device=args.device)
                 # 标签与目标 ID 只送入评分器；网络推理显式使用清零的副本。
                 inference_sequence = replace(
                     sequence,
                     labels=torch.zeros_like(sequence.labels),
                     object_ids=torch.zeros_like(sequence.object_ids),
                 )
-                prediction, _ = forward_with_sparse_mixture(
-                    model,
-                    inference_sequence,
-                    events,
-                    batches,
-                    config,
-                    compute_sparse_logits=False,
-                )
+                prediction = infer_event_output(model, config, inference_sequence)
                 probability = prediction["event_logits"].sigmoid().cpu()
                 torch.save({"event_probabilities": probability, "source_sha256": source_hash}, path)
             if probability.shape != (sequence.length,) or not torch.isfinite(probability).all():
                 raise ValueError("invalid aligned probabilities")
             if bool(((probability < 0) | (probability > 1)).any()):
                 raise ValueError("probabilities must be in [0,1]")
+            probability_scores.append(probability.numpy())
+            target_values.append(sequence.labels.numpy())
             prediction = probability >= threshold
             mask_path = masks / name
             if args.rescore_only:
@@ -116,6 +116,8 @@ def evaluate(args):
             }
             print(f"{args.split} {name}: {sequence.length:,} events", flush=True)
     report = _metrics_at_threshold(results, config, 0.5)
+    report["average_precision"] = float(average_precision_score(
+        np.concatenate(target_values), np.concatenate(probability_scores)))
     report.update(
         threshold=threshold,
         split=args.split,
@@ -163,4 +165,5 @@ if __name__ == "__main__":
     parser.add_argument("--num-threads", type=int)
     parser.add_argument("--rescore-only", action="store_true")
     parser.add_argument("--ablation", type=Path, help="显式消融契约 ablation.json")
+    parser.add_argument("--max-files", type=int, help="仅用于smoke的文件数限制，正式评估不设置")
     evaluate(parser.parse_args())

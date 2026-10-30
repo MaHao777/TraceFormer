@@ -116,7 +116,7 @@ def test_cone_base_matches_production_full_path_exactly(small_config):
     torch.manual_seed(37)
     experiment = build_model(small_config, ablation=attention_stage_jobs()[2].spec).eval()
     events = _dataset(small_config, "train")[0].events
-    assert torch.equal(production(events)["full_event_logits"], experiment(events)["event_logits"])
+    assert torch.equal(production(events)["base_event_logits"], experiment(events)["event_logits"])
 
 
 @pytest.mark.parametrize("job", attention_stage_jobs(), ids=lambda job: job.name)
@@ -125,7 +125,7 @@ def test_event_mapping_empty_outputs_and_gradients(small_config, job):
     events = _dataset(small_config, "train")[0].events
     output = model(events)
     assert output["event_logits"].shape == (len(events),)
-    assert torch.equal(output["event_logits"], output["full_event_logits"])
+    assert torch.equal(output["event_logits"], output["base_event_logits"])
     output["event_logits"].square().mean().backward()
     for name, parameter in model.named_parameters():
         assert parameter.grad is not None and torch.isfinite(parameter.grad).all(), name

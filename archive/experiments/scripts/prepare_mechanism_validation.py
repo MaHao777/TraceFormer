@@ -25,7 +25,7 @@ from traceformer.training.engine import (
     _write_json,
 )
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[3]
 DEFINITIONS = [
     Job("cone", "full", AblationSpec(sparse=False, refinement="none"), None, "C"),
     Job("window", "full", AblationSpec("window", False, "none"), None, "W"),

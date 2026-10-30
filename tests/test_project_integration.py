@@ -59,8 +59,7 @@ def test_largest_sequence_check_runs_forward_loss_backward_and_reports_memory() 
     assert checker.is_file()
     contents = checker.read_text(encoding="utf-8")
     assert "train_094.npz" in contents
-    assert "_forward_with_sparse_mixture(" in contents
-    assert "_sparse_mixture_auxiliary_losses(" in contents
+    assert "output = model(events, batch_indices)" in contents
     assert "lambda_object_frame=config.loss.lambda_object_frame" in contents
     assert "object_frame_logit_margin=config.loss.object_frame_logit_margin" in contents
     assert "lambda_false_alarm=config.loss.lambda_false_alarm" in contents

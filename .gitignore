@@ -25,6 +25,10 @@ __pycache__/
 # Build and environment artifacts
 build/
 dist/
+# 可再生的上传快照只交付文件夹，不把整份源码快照重复提交。
+/remote_upload/
+# 原始云端回传保留在本地；可审阅结论由实验导航登记。
+/remote_result/
 *.egg-info/
 .venv/
 venv/

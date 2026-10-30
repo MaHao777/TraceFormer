@@ -8,11 +8,10 @@ import pytest
 import torch
 from test_training_engine import _config, _write_sparse_mixture_sequence
 
-from traceformer.experiments.ablation import AblationSpec, NoRefinement, NoSparse
+from traceformer.experiments.ablation import AblationSpec, NoRefinement
 from traceformer.experiments.suite import job_config, stage_jobs
 from traceformer.training.engine import (
     _dataset,
-    _forward_with_sparse_mixture,
     _initialize_ablation_stage,
     _validate_checkpoint_contract,
     build_model,
@@ -28,17 +27,14 @@ def small_config(tmp_path):
         folder.mkdir(parents=True)
         _write_sparse_mixture_sequence(folder / f"{split}_000.npz")
     config = _config(Path.cwd() / "data", tmp_path / "out")
-    return replace(config, dataset=replace(config.dataset, root=tmp_path / "data"), sparse_mixture=replace(
-        config.sparse_mixture, min_events=1, max_polarity_fraction=1.0,
-        warmup_epochs=0, ramp_epochs=1,
-    ))
+    return replace(config, dataset=replace(config.dataset, root=tmp_path / "data"))
 
 
-def test_dag_has_five_current_structure_stages():
+def test_dag_has_three_current_structure_stages():
     jobs = stage_jobs()
     seen = set()
-    assert len(jobs) == 5
-    assert {job.result_id for job in jobs if job.result_id} == {"A0", "A1", "A2", "A3", "A7"}
+    assert len(jobs) == 3
+    assert {job.result_id for job in jobs if job.result_id} == {"A0", "A2", "A7"}
     for job in jobs:
         assert job.parent is None or job.parent in seen
         job.spec.validate_stage(job.stage)
@@ -54,27 +50,19 @@ def test_full_ablation_matches_production_exactly(small_config):
     for name, value in production.state_dict().items():
         assert torch.equal(value, experiment.state_dict()[name])
     with torch.no_grad():
-        for sparse in (None, events[:2]):
-            kwargs = {} if sparse is None else {
-                "sparse_events": sparse, "sparse_source_indices": torch.tensor([0, 1]),
-            }
-            left, right = production(events, **kwargs), experiment(events, **kwargs)
-            assert all(torch.equal(left[key], right[key]) for key in left)
+        left, right = production(events), experiment(events)
+        assert all(torch.equal(left[key], right[key]) for key in left)
 
 
 @pytest.mark.parametrize("backbone", ["cone"])
 def test_base_removes_modules_and_preserves_event_universe(small_config, backbone):
     model = build_model(small_config, ablation=AblationSpec(backbone, False, "none"))
-    assert isinstance(model.sparse_mixture, NoSparse)
+    assert not hasattr(model, "sparse_mixture")
     assert isinstance(model.event_refinement_head, NoRefinement)
     sequence = _dataset(small_config, "train")[0]
-    output, view = _forward_with_sparse_mixture(
-        model, sequence, sequence.events, torch.zeros(sequence.length, dtype=torch.long),
-        small_config, mixture_weight=1.0,
-    )
-    assert view is None
+    output = model(sequence.events, torch.zeros(sequence.length, dtype=torch.long))
     assert output["event_logits"].shape == (sequence.length,)
-    assert torch.equal(output["event_logits"], output["full_event_logits"])
+    assert torch.equal(output["event_logits"], output["base_event_logits"])
     output["event_logits"].sum().backward()
     assert any(p.grad is not None for p in model.encoder.parameters())
     assert model(torch.empty(0, 4))["event_logits"].shape == (0,)
@@ -148,35 +136,34 @@ def test_independent_report_and_saved_predictions(small_config, tmp_path):
     report = evaluate_ablation(config, directory / "best.pt", job.spec, save_predictions=True)
     assert report["metrics"] == json.loads((directory / "metrics.json").read_text(encoding="utf-8"))
     assert report["fixed_threshold"]["threshold"] == 0.5
-    assert report["groups"]["sparse_eligible"]["validation_files"] == 1
+    assert report["groups"]["ordinary"]["validation_files"] == 1
     assert report["per_file"]["val_000"]["refinement_count_delta"] == {"tp": 0, "fp": 0, "fn": 0}
     saved = torch.load(directory / "predictions" / "val_000.pt", weights_only=True)
     assert saved["event_logits"].shape == (4,)
 
 
-def test_simple_suite_only_has_three_paired_configs(small_config, tmp_path):
+def test_simple_suite_has_no_sparse_stage(small_config, tmp_path):
     from traceformer.experiments.suite import prepare_suite, simple_stage_jobs
 
     jobs = simple_stage_jobs()
     assert [(job.name, job.result_id) for job in jobs] == [
-        ("B", "E1"), ("BS", "E2"), ("BSR", "E3"),
+        ("B", "E1"), ("BR", "E3"),
     ]
-    assert jobs[-1].parent == "BS"
-    assert jobs[2].parent == "BS"
+    assert jobs[-1].parent == "B"
     assert job_config(small_config, jobs[0], 37, tmp_path).training.epochs == 18
-    assert job_config(small_config, jobs[2], 37, tmp_path).training.epochs == 24
+    assert job_config(small_config, jobs[1], 37, tmp_path).training.epochs == 24
     manifest = prepare_suite(small_config, tmp_path / "simple", [37], definitions=jobs)
-    assert len(manifest["jobs"]) == 3
+    assert len(manifest["jobs"]) == 2
     assert all(job["seed"] == 37 for job in manifest["jobs"])
 
 
-def test_simple_summary_uses_three_results_and_adjacent_comparisons(small_config, tmp_path):
+def test_simple_summary_uses_base_and_refinement_results(small_config, tmp_path):
     from traceformer.experiments.suite import prepare_suite, simple_stage_jobs, summarize
     from traceformer.training.engine import _write_json
 
     root = tmp_path / "summary_simple"
     manifest = prepare_suite(small_config, root, [37], definitions=simple_stage_jobs())
-    manifest["comparisons"] = [["E2", "E1"], ["E3", "E2"]]
+    manifest["comparisons"] = [["E3", "E1"]]
     _write_json(root / "suite.json", manifest)
     for job in manifest["jobs"]:
         folder = root / job["id"]
@@ -190,10 +177,10 @@ def test_simple_summary_uses_three_results_and_adjacent_comparisons(small_config
         _write_json(folder / "report.json", report)
         _write_json(folder / "done.json", {"report": str(folder / "report.json")})
     summarize(root)
-    assert "完成 3/3" in (root / "results.md").read_text(encoding="utf-8")
+    assert "完成 2/2" in (root / "results.md").read_text(encoding="utf-8")
     aggregate = json.loads((root / "aggregate.json").read_text(encoding="utf-8"))
-    assert [row["comparison"] for row in aggregate["paired"]] == ["E2-E1", "E3-E2"]
-    assert all(row["score"] == pytest.approx(.01) for row in aggregate["paired"])
+    assert [row["comparison"] for row in aggregate["paired"]] == ["E3-E1"]
+    assert all(row["score"] == pytest.approx(.02) for row in aggregate["paired"])
 
 
 def test_simple_reuse_rejects_changed_source_config(small_config, tmp_path):

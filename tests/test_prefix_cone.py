@@ -14,6 +14,7 @@ from traceformer.config import (
 )
 from traceformer.models.prefix_cone import (
     PrefixConeAttention,
+    _rectangle_indices,
     prefix_cone_pool,
     prepare_prefix_geometry,
 )
@@ -204,3 +205,35 @@ def test_experiment_yaml():
     assert config.model.cone_windows == DEFAULT_CONE_WINDOWS
     assert config.training.stage == "full"
     assert config.model.token_dim == 64
+
+
+def test_inference_geometry_reuses_indices_without_reusing_features():
+    torch.manual_seed(124)
+    coords = torch.randint(0, 9, (45, 3))
+    batches = torch.arange(len(coords)) % 2
+    with torch.inference_mode():
+        geometry = prepare_prefix_geometry(coords, batches)
+        sample = geometry[0]
+        first = _rectangle_indices(sample, DEFAULT_CONE_WINDOWS[0], 1, 0, 10)
+        second = _rectangle_indices(sample, DEFAULT_CONE_WINDOWS[0], 1, 0, 10)
+        assert first.data_ptr() == second.data_ptr()
+        # 各层特征和权重改变，几何复用不能复用旧特征摘要。
+        for _ in range(3):
+            values, weights = torch.randn(45, 4), torch.rand(45, 1) + 0.1
+            actual, counts = prefix_cone_pool(values, weights, geometry, DEFAULT_CONE_WINDOWS)
+            expected, expected_counts = enumerate_pool(values, weights, coords, batches)
+            torch.testing.assert_close(actual, expected, atol=2e-5, rtol=2e-5)
+            assert torch.equal(counts, expected_counts)
+        changed = prepare_prefix_geometry(coords.flip(0), batches)
+        other = _rectangle_indices(changed[0], DEFAULT_CONE_WINDOWS[0], 1, 0, 10)
+        assert other.data_ptr() != first.data_ptr()
+        fixed = _rectangle_indices(sample, DEFAULT_CONE_WINDOWS[0], 1, 0, 10, True)
+        assert fixed.data_ptr() != first.data_ptr()
+
+
+def test_training_geometry_does_not_retain_inference_indices():
+    coords = torch.tensor([[0, 0, 0], [1, 1, 1], [2, 1, 2]])
+    sample = prepare_prefix_geometry(coords, torch.zeros(3, dtype=torch.long))[0]
+    first = _rectangle_indices(sample, DEFAULT_CONE_WINDOWS[0], 1, 0, 3)
+    second = _rectangle_indices(sample, DEFAULT_CONE_WINDOWS[0], 1, 0, 3)
+    assert first.data_ptr() != second.data_ptr()

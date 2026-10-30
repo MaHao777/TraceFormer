@@ -10,13 +10,14 @@ import test_paper_ablation
 import torch
 from test_neural_checkpoint_evaluation import load_evaluator
 
-from traceformer.experiments.suite import attention_stage_jobs
+from traceformer.experiments.suite import attention_stage_jobs, center_attention_stage_jobs
 from traceformer.training.engine import run_training
 
 small_config = test_paper_ablation.small_config
 
 
-@pytest.mark.parametrize("job", attention_stage_jobs(), ids=lambda job: job.name)
+@pytest.mark.parametrize("job", [*attention_stage_jobs(), *center_attention_stage_jobs()],
+                         ids=lambda job: job.name)
 def test_ablation_test_uses_saved_threshold_and_rejects_wrong_model(small_config, tmp_path, job, monkeypatch):
     config = replace(small_config, training=replace(
         small_config.training, stage="full", epochs=1, num_threads=1,
@@ -27,17 +28,17 @@ def test_ablation_test_uses_saved_threshold_and_rejects_wrong_model(small_config
     (root / "test").mkdir()
     shutil.copy2(root / "val/val_000.npz", root / "test/test_000.npz")
     evaluator = load_evaluator()
-    original_forward = evaluator.forward_with_sparse_mixture
+    original_forward = evaluator.infer_event_output
     calls = []
 
-    def infer(model, sequence, *args, **kwargs):
+    def infer(model, config, sequence):
         # 原始测试标签只用于后续评分，不能传给模型或子流生成器。
         assert sequence.labels.eq(0).all() and sequence.object_ids.eq(0).all()
         assert model.ablation_spec == job.spec.to_dict()
         calls.append(True)
-        return original_forward(model, sequence, *args, **kwargs)
+        return original_forward(model, config, sequence)
 
-    monkeypatch.setattr(evaluator, "forward_with_sparse_mixture", infer)
+    monkeypatch.setattr(evaluator, "infer_event_output", infer)
     args = SimpleNamespace(
         config=run / "config.yaml", checkpoint=run / "best.pt", ablation=run / "ablation.json",
         dataset_root=root, split="test", output=tmp_path / "test_result", device="cpu",

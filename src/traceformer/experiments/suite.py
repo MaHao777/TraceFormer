@@ -39,11 +39,9 @@ class Job:
 def stage_jobs() -> list[Job]:
     # 公共上游只训练一次；机制消融各自重训主干与下游。
     jobs = [
-        Job("B", "full", AblationSpec(sparse=False, refinement="none"), None, "A0"),
-        Job("BS", "sparse_mixture", AblationSpec(refinement="none"), "B", "A1"),
-        Job("BR", "refinement", AblationSpec(sparse=False), "B", "A2"),
-        Job("BSR", "refinement", AblationSpec(), "BS", "A3"),
-        Job("same_scale", "refinement", AblationSpec(refinement="same_scale"), "BS", "A7"),
+        Job("B", "full", AblationSpec(refinement="none"), None, "A0"),
+        Job("BR", "refinement", AblationSpec(), "B", "A2"),
+        Job("same_scale", "refinement", AblationSpec(refinement="same_scale"), "B", "A7"),
     ]
     return jobs
 
@@ -62,11 +60,10 @@ def job_config(
 
 
 def simple_stage_jobs() -> list[Job]:
-    # E1/E2 复用，队列只补训新三锥完整网络精修。
+    # 删除的 Sparse 阶段不再进入新训练队列。
     return [
-        Job("B", "full", AblationSpec(sparse=False, refinement="none"), None, "E1"),
-        Job("BS", "sparse_mixture", AblationSpec(refinement="none"), "B", "E2"),
-        Job("BSR", "refinement", AblationSpec(), "BS", "E3"),
+        Job("B", "full", AblationSpec(refinement="none"), None, "E1"),
+        Job("BR", "refinement", AblationSpec(), "B", "E3"),
     ]
 
 
@@ -85,6 +82,41 @@ def attention_stage_jobs() -> list[Job]:
         Job(f"{backbone}_B", "full", AblationSpec(backbone, False, "none"), None, f"C{i}")
         for i, backbone in enumerate(("pointwise", "box", "cone"))
     ]
+
+
+def center_attention_stage_jobs() -> list[Job]:
+    """四组递进结构对照，与旧 C0/C1/C2 和模块组合 A0/A1 隔离。"""
+    return [Job(f"{backbone}_B", "full", AblationSpec(backbone, False, "none"), None, f"A{i}")
+            for i, backbone in enumerate(("local", "single_box", "single_cone", "cone"))]
+
+
+def prepare_center_attention_suite(base: TraceFormerConfig, root: Path, seeds: list[int]) -> dict:
+    if base.model != ModelConfig():
+        raise ValueError("center attention suite requires the registered three-cone configuration")
+    dataset_manifest = _dataset_manifest(_dataset(base, "train"), _dataset(base, "val"))
+    manifest = prepare_suite(base, root, seeds, definitions=center_attention_stage_jobs(), epochs=24,
+                             save_training_state_interval=1)
+    manifest.update(
+        protocol="center_attention_four_variants",
+        dataset_manifest_sha256=_manifest_identity_digest(dataset_manifest),
+        comparisons=[["A3", "A0"], ["A1", "A0"], ["A2", "A1"], ["A3", "A2"]],
+        figure_variants=["A0", "A1", "A2", "A3"],
+        variant_labels={"A0": "滑动局部自注意力", "A1": "固定窗口中心摘要注意力",
+                        "A2": "单锥中心摘要注意力", "A3": "多锥中心摘要注意力"},
+        attention_protocol={
+            "epochs": 24, "initialization": "paired common weights; middle-scale embedding",
+            "single_window": [4, 4], "single_cone": [4, 4],
+            "multi_cone": [[8, 2], [4, 4], [2, 8]],
+            "bidirectional": True, "include_same_time": False, "neighbor_cap": None,
+            "matching": "same maximum spatial and temporal extent, not equal volume or FLOPs",
+            "summary_slots": {"A0": None, "A1": 2, "A2": 2, "A3": 6},
+            "limitations": "single seed; A2 is the predefined middle cone, not the best single cone; "
+                           "A0/A1 both use geometrically center-anchored sliding supports",
+        },
+    )
+    _write_json(root / "dataset_manifest.json", dataset_manifest)
+    _write_json(root / "suite.json", manifest)
+    return manifest
 
 
 def prepare_attention_suite(base: TraceFormerConfig, root: Path, seeds: list[int]) -> dict:
@@ -320,7 +352,8 @@ def summarize(root: Path) -> None:
                 paired.append({"seed": seed, "comparison": f"{left}-{right}", **{
                     k: by_id[left][k] - by_id[right][k] for k in ("score", "iou", "pd", "fa")
                 }})
-        if all(key in by_id for key in ("A0", "A1", "A2", "A3")):
+        if (suite.get("protocol") != "center_attention_four_variants"
+                and all(key in by_id for key in ("A0", "A1", "A2", "A3"))):
             paired.append({"seed": seed, "comparison": "A3-A2-A1+A0", **{
                 k: by_id["A3"][k] - by_id["A2"][k] - by_id["A1"][k] + by_id["A0"][k]
                 for k in ("score", "iou", "pd", "fa")
@@ -340,12 +373,18 @@ def summarize(root: Path) -> None:
     if suite.get("variant_labels"):
         lines.extend(["", "配置说明：", ""])
         lines.extend(f"- {key}：{value}" for key, value in suite["variant_labels"].items())
-    if suite.get("protocol") in {"pooling_three_variants", "attention_three_variants"}:
+    if suite.get("protocol") in {
+        "pooling_three_variants", "attention_three_variants", "center_attention_four_variants",
+    }:
         note = ("所有组关闭 Sparse 和精修；三组从头训练24轮，C0/C1/C2近似匹配参数量。"
                 "固定窗口仅近似等体积，实际邻居数见各组 ablation_report.json。"
                 if suite["protocol"] == "attention_three_variants" else
                 "所有组关闭 Sparse 和精修；T1/T2 近似匹配参数量，T0 为较小统计基线。"
                 "T2 复用完整训练后重新复评，T0/T1 从头训练。")
+        if suite["protocol"] == "center_attention_four_variants":
+            note = ("四组均关闭 Sparse、神经细化和 VTR，seed37、24轮。A0/A1使用(4,4)固定窗口，"
+                    "A2固定为(4,4)单锥，A3为三个锥。匹配最大范围，不宣称等参数、等体积或等FLOPs。"
+                    "A0→A1检验摘要式中心交互；单次训练不支持显著性或稳定性结论。")
         lines.extend(["", note, "", "|配置|阈值|Score@0.5|参数量|秒/序列|峰值RSS MiB|",
                       "|---|---:|---:|---:|---:|---:|"])
         for row in sorted(rows, key=lambda r: r["variant"]):

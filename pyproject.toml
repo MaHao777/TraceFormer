@@ -13,13 +13,14 @@ dependencies = ["torch", "numpy", "scipy", "PyYAML", "matplotlib>=3.8"]
 [project.optional-dependencies]
 dev = ["pytest", "ruff"]
 postprocess = ["lightgbm>=4.6,<5"]
-experiments = ["psutil>=5.9"]
+experiments = ["psutil>=5.9", "numba>=0.61", "scikit-learn>=1.3"]
 gpu = ["numba-cuda[cu12]", "lightgbm>=4.6,<5"]
 
 [project.urls]
 Repository = "https://github.com/MaHao777/TraceFormer"
 
 [project.scripts]
+traceformer-experiment = "traceformer.cli.experiment:main"
 traceformer-train = "traceformer.cli.train:main"
 traceformer-evaluate = "traceformer.cli.evaluate:main"
 traceformer-predict = "traceformer.cli.predict:main"

@@ -395,6 +395,21 @@ def release_event_models(
             name: sha256_file(model_dir / name) for name in ("small.txt", "large.txt")
         },
     }
+    manifest_path = cache_dir / "manifest.json"
+    if manifest_path.is_file():
+        # 发布目录保留完整来源清单，迁移主机后仍能核对权重与特征版本。
+        from .release import validate_cache_manifest
+
+        manifest = validate_cache_manifest(cache_dir, split="train")
+        shutil.copy2(manifest_path, output_dir / "training_manifest.json")
+        release["provenance"] = {
+            "checkpoint_sha256": manifest.checkpoint_sha256,
+            "config_sha256": manifest.config_sha256,
+            "cache_schema_version": manifest.cache_schema_version,
+            "feature_schema_version": manifest.feature_schema_version,
+            "training_manifest_sha256": sha256_file(output_dir / "training_manifest.json"),
+            "token_feature_dtype": "float16",
+        }
     (output_dir / "release_report.json").write_text(
         json.dumps(release, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
@@ -408,6 +423,7 @@ def train_pipeline(
     protocol: PostprocessProtocol,
     *,
     control_dir: str | Path | None = None,
+    event_only: bool = False,
     progress: Callable[[str], None] = print,
 ) -> dict[str, Any]:
     """按预注册门槛训练；任一级失败即停止，不发布替换模型。"""
@@ -415,6 +431,10 @@ def train_pipeline(
     protocol.validate()
     require_lightgbm()
     cache_dir = Path(cache_dir)
+    if event_only:
+        from .release import validate_cache_manifest
+
+        validate_cache_manifest(cache_dir, split="train")
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=False)
     names = _cache_names(cache_dir)
@@ -512,10 +532,15 @@ def train_pipeline(
         event_release_dir,
         progress=progress,
     )
+    if event_only:
+        # 事件范围无需 OOF 或组件模型；真实成功状态不再依赖后续阶段失败。
+        report["status"] = "event_released"
     training_report_path.write_text(
         json.dumps(report, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+    if event_only:
+        return report
 
     progress("生成79序列OOF分数并训练组件剪枝")
     caches.update(

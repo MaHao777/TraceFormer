@@ -131,6 +131,8 @@ class EventCache:
                 raise ValueError(f"{self.name}: {name} must align with events")
         if self.token_features.ndim != 2 or self.token_features.shape[1] != 64:
             raise ValueError(f"{self.name}: token_features must have shape [T,64]")
+        if not np.all(np.isfinite(self.token_features)) or not np.all(np.isfinite(self.raw_features)):
+            raise ValueError(f"{self.name}: features must be finite")
         if count and (
             int(self.event_token_indices.min()) < 0
             or int(self.event_token_indices.max()) >= len(self.token_features)

@@ -41,13 +41,6 @@ def main() -> None:
         help="branch from an exact optimizer/RNG training state",
     )
     resume_group.add_argument(
-        "--initialize-full",
-        type=str,
-        default=None,
-        metavar="BEST_PT",
-        help="initialize and freeze the Full path from a historical best.pt",
-    )
-    resume_group.add_argument(
         "--initialize-refinement",
         type=str,
         default=None,
@@ -65,7 +58,6 @@ def main() -> None:
             note=arguments.note,
             config_source=arguments.config,
             resume_state_path=arguments.resume_state,
-            initial_full_checkpoint_path=arguments.initialize_full,
             initial_refinement_checkpoint_path=arguments.initialize_refinement,
         )
     except (OSError, RuntimeError, ValueError) as error:
