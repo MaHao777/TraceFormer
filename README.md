@@ -160,4 +160,4 @@ schema-8 加载严格检查模型结构、分辨率和精修头结构。带 Spar
 - `training_state.pt` 与可选的分 epoch 状态
 - `summary.json`、`experiment.md`、`training_curves.png`
 
-详细结构见 [docs/architecture.md](docs/architecture.md)。历史实验计划和淘汰方案只作为记录保存在 `docs/superpowers/plans/` 与既有输出目录中，不再进入当前配置和代码路径。
+详细结构见 [docs/architecture.md](docs/architecture.md)。历史实验记录保存在本地，不属于当前模型的运行代码。
