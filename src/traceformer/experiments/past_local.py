@@ -11,6 +11,7 @@ from torch.nn import functional as F
 from torch.utils.checkpoint import checkpoint
 
 from traceformer.config import ConeWindowConfig
+from traceformer.models.cone_geometry import euclidean_offsets
 from traceformer.models.cone_transformer import ConeAttentionOutput, ConeTransformerOutput
 from traceformer.models.prefix_cone import prepare_prefix_geometry
 
@@ -18,7 +19,8 @@ from traceformer.models.prefix_cone import prepare_prefix_geometry
 class PastLocalAttention(nn.Module):
     """过去两块内的完整小锥；源 Token 门控作为注意力概率先验。"""
 
-    def __init__(self, original: nn.Module, chunk_size: int | None = None) -> None:
+    def __init__(self, original: nn.Module, chunk_size: int | None = None, *,
+                 metric: str = "chebyshev", windows: tuple[ConeWindowConfig, ...] | None = None) -> None:
         super().__init__()
         size = os.environ.get("TRACEFORMER_LOCAL_QUERY_CHUNK", "256") if chunk_size is None else chunk_size
         if isinstance(size, str) and size.isdecimal():
@@ -30,14 +32,25 @@ class PastLocalAttention(nn.Module):
         self.chunk_size = size
         self.attention = original.center_attention
         self.pool_weight = original.pool_weight
-        self.windows = (ConeWindowConfig(2, 2),)
+        self.windows = (ConeWindowConfig(2, 2),) if windows is None else windows
+        if not self.windows or any(w.spatial_radius < 0 or w.time_horizon < 1 for w in self.windows):
+            raise ValueError("local cone windows must be nonempty with valid radii/horizons")
         self.directions = (-1,)
         self.fixed_radius = False
-        # 半径依次为 1、2；34 个候选格点全部读取，不按占用数截断。
-        offsets = [(x, y, -distance)
-                   for distance in (1, 2)
-                   for y in range(-distance, distance + 1)
-                   for x in range(-distance, distance + 1)]
+        if metric not in {"chebyshev", "euclidean"}:
+            raise ValueError("unsupported local cone metric")
+        self.metric = metric
+        # 三锥并集先去重；原单小锥保持距离、行、列的枚举顺序。
+        offsets = set()
+        for window in self.windows:
+            radius, horizon = window.spatial_radius, window.time_horizon
+            if metric == "euclidean":
+                offsets.update(euclidean_offsets(radius, horizon))
+            else:
+                offsets.update((x, y, -d) for d in range(1, horizon + 1)
+                               for y in range(-(radius*d//horizon), radius*d//horizon + 1)
+                               for x in range(-(radius*d//horizon), radius*d//horizon + 1))
+        offsets = sorted(offsets, key=lambda xyz: (-xyz[2], xyz[1], xyz[0]))
         self.register_buffer("offsets", torch.tensor(offsets, dtype=torch.long), persistent=False)
 
     def _build_neighbors(self, sample) -> torch.Tensor:
@@ -58,7 +71,7 @@ class PastLocalAttention(nn.Module):
 
     def _neighbor_indices(self, sample) -> torch.Tensor:
         # 本次前向的三个层共享整数索引；不缓存任何依赖网络权重的特征。
-        key = ("past_local_neighbors", 2, 2)
+        key = ("past_local_neighbors", tuple((w.spatial_radius, w.time_horizon) for w in self.windows), self.metric)
         cache = sample.corner_cache
         if cache is not None and key in cache:
             return cache[key]

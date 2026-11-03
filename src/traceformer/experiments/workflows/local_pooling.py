@@ -24,6 +24,18 @@ class LocalPoolingWorkflow(ExperimentRuntime):
     """六组统一训练后评分，保留 S0 原字节和原契约。"""
 
     experiment = "local_pooling_six"
+    variants = VARIANTS
+    comparison_pairs = (("L0", "S0"), ("S1", "S0"), ("L1", "L0"), ("S2", "S1"), ("L2", "L1"))
+    interaction_pairs = (("L1", "L0"), ("S1", "S0"))
+    title = "均值/空间卷积池化 × 过去锥局部注意力"
+    execution_chunks = CHUNKS
+    limitations = "single seed; encoder geometry and interaction change together; convolution includes nonlinearity"
+
+    def scientific_contract(self):
+        return {}
+
+    def extra_results(self, root, rows, comparisons):
+        return {}, []
 
     def configure(self, args, root, package_digest):
         prior = read_json(root / "experiment.json") if (root / "experiment.json").exists() else None
@@ -35,7 +47,7 @@ class LocalPoolingWorkflow(ExperimentRuntime):
         test_root = (args.test_root or (Path(prior["test_root"]) if prior else data_root)).resolve()
         device = args.device or (saved["training"]["device"] if saved else "cuda")
         if device != "cuda" and not args.smoke:
-            raise ValueError("formal six-group experiments require CUDA FP32; CPU is smoke-only")
+            raise ValueError("formal experiments require CUDA FP32; CPU is smoke-only")
         base = load_config(self.bundle / "config.yaml")
         config = replace(base, dataset=replace(base.dataset, root=data_root), training=replace(
             base.training, device=device, output_root=root, mixed_precision=False,
@@ -56,17 +68,17 @@ class LocalPoolingWorkflow(ExperimentRuntime):
                 raise ValueError("formal experiment resolution/duration/summary cone geometry differs")
         # 恢复沿用原分块，新的默认值不改变已有训练的随机数调用顺序。
         saved_chunks = prior.get("execution_chunks", {}) if prior else {}
-        chunks = {name: os.environ.get(name, saved_chunks.get(name, value)) for name, value in CHUNKS.items()}
+        chunks = {name: os.environ.get(name, saved_chunks.get(name, value)) for name, value in self.execution_chunks.items()}
         for name, value in chunks.items():
             if not value.isdecimal() or int(value) <= 0:
                 raise ValueError(f"{name} must be a positive integer")
             os.environ[name] = value
-        contract = {"variants": list(VARIANTS), "config": _serializable(asdict(config)),
+        contract = {"variants": list(self.variants), "config": _serializable(asdict(config)),
                     "test_root": str(test_root), "precision": "fp32", "smoke": args.smoke,
                     "execution_chunks": chunks, "package_sha256": package_digest,
-                    "resource_policy": "timing_only"}
+                    "resource_policy": "timing_only", **self.scientific_contract()}
         comparable = ({**prior, "test_root": contract["test_root"]}
-                      if prior and not any((root / name / "test/report.json").exists() for name in VARIANTS)
+                      if prior and not any((root / name / "test/report.json").exists() for name in self.variants)
                       else prior)
         if prior is not None and comparable != contract:
             raise ValueError("experiment settings/source changed; use original settings and preserve this output")
@@ -77,7 +89,7 @@ class LocalPoolingWorkflow(ExperimentRuntime):
         _write_json(root / "package_manifest.json", read_json(self.bundle / "package_manifest.json"))
         _atomic_write_text(root / "config.yaml", yaml.safe_dump(contract["config"], allow_unicode=True,
                                                               sort_keys=False))
-        for name in VARIANTS:
+        for name in self.variants:
             folder = root / name
             folder.mkdir(exist_ok=True)
             spec = self.specification(name, args.smoke)
@@ -121,9 +133,9 @@ class LocalPoolingWorkflow(ExperimentRuntime):
         report_root = root / "benchmark" / stage
         report_root.mkdir(parents=True, exist_ok=True)
         reports = {}
-        runtime = setup_device(load_config(root / "S0/config.yaml")).metadata
+        runtime = setup_device(load_config(root / self.variants[0] / "config.yaml")).metadata
         identities = read_json(self.bundle / "dataset_manifest.json")
-        for name in VARIANTS:
+        for name in self.variants:
             folder = root / name
             destination = report_root / f"{name}.json"
             checkpoint = None
@@ -183,7 +195,7 @@ class LocalPoolingWorkflow(ExperimentRuntime):
 
     def finish(self, root, reports, args):
         rows = []
-        for name in VARIANTS:
+        for name in self.variants:
             splits = {split: read_json(root / name / split / "independent_report.json")
                       for split in ("val", "test")}
             rows.append({"variant": name, **splits, "benchmark": reports[name],
@@ -193,31 +205,34 @@ class LocalPoolingWorkflow(ExperimentRuntime):
         for split in ("val", "test"):
             score = {name: row[split]["competition"]["score"] for name, row in by_name.items()}
             comparisons[split] = {f"{a}-{b}": score[a] - score[b]
-                                  for a, b in (("L0", "S0"), ("S1", "S0"), ("L1", "L0"),
-                                               ("S2", "S1"), ("L2", "L1"))}
-            comparisons[split]["single_kernel_interaction"] = (score["L1"] - score["L0"]) - (score["S1"] - score["S0"])
+                                  for a, b in self.comparison_pairs}
+            if self.interaction_pairs:
+                (a, b), (c, d) = self.interaction_pairs
+                comparisons[split]["single_kernel_interaction"] = (score[a] - score[b]) - (score[c] - score[d])
+        extra, extra_lines = self.extra_results(root, rows, comparisons)
         _write_json(root / "results.json", {"complete": True, "diagnostic_only": args.smoke,
-                    "rows": rows, "comparisons": comparisons,
+                    "rows": rows, "comparisons": comparisons, **extra,
                     "experiment": read_json(root / "experiment.json"),
-                    "limitations": "single seed; encoder geometry and interaction change together; convolution includes nonlinearity"})
-        lines = ["# 均值/空间卷积池化 × 过去锥局部注意力", "",
+                    "limitations": self.limitations})
+        baseline = self.variants[0]
+        lines = [f"# {self.title}", "",
                  "耗时和显存仅记录，不设置预算门槛；CPU smoke仅检查接口。", ""]
         for split in ("val", "test"):
-            lines += [f"## {split}", "", "|模型|参数|Score|IoU|SegAcc|Pd|Fa|AP|阈值|ΔScore/S0|",
+            lines += [f"## {split}", "", f"|模型|参数|Score|IoU|SegAcc|Pd|Fa|AP|阈值|ΔScore/{baseline}|",
                       "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|"]
             for row in rows:
                 report = row[split]
                 m = report["competition"]
-                delta = m["score"] - by_name["S0"][split]["competition"]["score"]
+                delta = m["score"] - by_name[baseline][split]["competition"]["score"]
                 lines.append(f"|{row['variant']}|{report['parameters']}|{m['score']:.9f}|{m['iou']:.6f}|"
                              f"{m['seg_acc']:.6f}|{m['pd']:.6f}|{m['fa']:.8g}|"
                              f"{report['average_precision']:.6f}|{report['threshold']:.6f}|{delta:+.9f}|")
             lines.append("")
         lines += ["## 测试集完整网络预测时间", "",
-                  "|模型|前向平均毫秒|前向P95毫秒|峰值MiB|前向相对S0|",
+                  f"|模型|前向平均毫秒|前向P95毫秒|峰值MiB|前向相对{baseline}|",
                   "|---|---:|---:|---:|---:|"]
-        baseline_mean = reports["S0"]["inference"]["mean_seconds"]
-        for name in VARIANTS:
+        baseline_mean = reports[baseline]["inference"]["mean_seconds"]
+        for name in self.variants:
             bench = reports[name]
             inference = bench["inference"]
             lines.append(f"|{name}|{1000 * inference['mean_seconds']:.3f}|"
@@ -225,13 +240,13 @@ class LocalPoolingWorkflow(ExperimentRuntime):
                          f"{inference['mean_seconds'] / baseline_mean:.4f}|")
         lines += ["", "逐文件预测耗时见benchmark/trained及trained_timing.json；无时间预算门槛。",
                   "计时不使用读取缓存概率后的重评分耗时；测试固定验证阈值。"]
-        _atomic_write_text(root / "results.md", "\n".join(lines) + "\n")
+        _atomic_write_text(root / "results.md", "\n".join(lines + extra_lines) + "\n")
         hashes = {path.relative_to(root).as_posix(): _file_sha256(path) for path in sorted(root.rglob("*"))
                   if path.is_file() and path.name not in {"completion_audit.json", "workflow.log", "status.json", "run.lock"}}
         _write_json(root / "completion_audit.json", {"complete": True, "sha256": hashes,
-                    "variants": list(VARIANTS), "partitions": {s: rows[0][s]["sequences"] for s in ("val", "test")},
+                    "variants": list(self.variants), "partitions": {s: rows[0][s]["sequences"] for s in ("val", "test")},
                     "budget_enforced": False, "timing_split": "test", "diagnostic_only": args.smoke})
-        _write_json(root / "status.json", {"status": "complete", "variants": list(VARIANTS),
+        _write_json(root / "status.json", {"status": "complete", "variants": list(self.variants),
                                            "diagnostic_only": args.smoke})
         self.archive_results(root)
 
@@ -249,14 +264,14 @@ class LocalPoolingWorkflow(ExperimentRuntime):
             return
         if args.stage in {"all", "train"}:
             self.baseline(root, config, test_root, args)
-            for name in VARIANTS[1:]:
+            for name in self.variants[1:]:
                 self.training(root / name, args)
-        for name in VARIANTS:
+        for name in self.variants:
             self.completed_checkpoint(root / name)
         if args.stage == "predict":
             self.baseline(root, config, test_root, args)
         if args.stage in {"all", "predict"}:
-            for name in VARIANTS:
+            for name in self.variants:
                 self.predict_variant(root / name, config, test_root,
                                      self.completed_checkpoint(root / name), args)
             reports = self.benchmark_suite(root, args, "trained", test_root=test_root)

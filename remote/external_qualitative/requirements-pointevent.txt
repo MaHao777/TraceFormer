@@ -1,0 +1,16 @@
+torch==2.1.2
+torchvision==0.16.2
+numpy==1.26.4
+addict==2.4.0
+einops==0.7.0
+matplotlib==3.8.4
+scikit-learn==1.4.2
+spconv-cu118==2.3.8
+termcolor>=2,<3
+timm==0.9.16
+transformers==4.39.3
+yapf==0.40.2
+regex
+packaging
+ninja
+wheel

@@ -1,0 +1,14 @@
+torch==2.3.1+cu118
+torchvision==0.18.1+cu118
+numpy==1.26.4
+spconv-cu118==2.3.8
+cumm-cu118==0.7.11
+PyYAML>=6,<7
+addict==2.4.0
+einops==0.7.0
+timm==0.9.16
+matplotlib==3.8.4
+scikit-learn==1.4.2
+yapf==0.40.2
+regex
+termcolor>=2,<4

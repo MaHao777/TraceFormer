@@ -19,10 +19,10 @@ bundle = test_mean_past_remote.bundle
 packager = test_mean_past_remote.packager
 
 
-def test_list_contains_only_two_maintained_workflows(capsys):
+def test_list_contains_maintained_workflows(capsys):
     experiment.main(["list"])
     result = json.loads(capsys.readouterr().out)
-    assert set(result["maintained"]) == {"mean_past_gated", "local_pooling_six"}
+    assert set(result["maintained"]) == {"mean_past_gated", "local_pooling_six", "euclidean_pooling_four", "s1_paper_ablation"}
     assert {"paper_ablation", "component_core", "original_readout"} <= result["archived"].keys()
     for row in result["archived"].values():
         if row["status"] == "runnable":

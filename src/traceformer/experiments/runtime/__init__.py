@@ -81,6 +81,49 @@ def setup_device(config):
     return runtime
 
 
+def freeze_execution_environment(config, root, label):
+    """同一实验恢复时固定主机、GPU、驱动与运行时。"""
+    runtime = setup_device(config)
+    environment = {"runtime": runtime.metadata, "host": platform.node(), "python": sys.version,
+                   "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES")}
+    if runtime.device.type == "cuda":
+        properties = torch.cuda.get_device_properties(runtime.device)
+        environment["device_uuid"] = str(getattr(properties, "uuid", "unavailable"))
+        try:
+            driver = subprocess.run(["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
+                                    capture_output=True, text=True, check=True, timeout=15)
+            environment["driver_versions"] = driver.stdout.strip().splitlines()
+        except (OSError, subprocess.SubprocessError) as error:
+            environment["driver_query_error"] = type(error).__name__
+    path = root / "execution_environment.json"
+    if path.exists() and read_json(path) != environment:
+        raise ValueError(f"{label} execution environment changed; preserve the original run")
+    _write_json(path, environment)
+
+
+def validate_benchmark_coverage(report, checkpoint, identities, inference_split="val"):
+    """新科学实验要求真实数值/梯度检查和完整输入覆盖，不设置速度预算。"""
+    smoke = report.get("smoke")
+    if type(smoke) is not bool or report.get("precision") != "fp32":
+        raise ValueError("benchmark precision/protocol differs")
+    numerical = report.get("numerical_check", {})
+    if not numerical.get("passed") or not numerical.get("parameter_gradients_checked"):
+        raise ValueError("benchmark numerical/gradient check failed")
+    if not smoke and (report.get("device") != "cuda" or not numerical.get("real_cuda_checked")):
+        raise ValueError("formal preflight requires real CUDA numerical checks")
+    parts = [("inference", inference_split)]
+    if checkpoint is None:
+        parts.append(("training", "train"))
+    for part, split in parts:
+        expected = sorted(identities[split])[:2] if smoke else (
+            ["train_094.npz", "train_096.npz"] if split == "train" else sorted(identities[split]))
+        rows = report.get(part, {}).get("sequences", [])
+        if [row["file"] for row in rows] != expected:
+            raise ValueError("benchmark has incomplete sequence coverage")
+        if part == "training" and not all(row.get("finite_gradients") for row in rows):
+            raise ValueError("full-sequence gradient check failed")
+
+
 class ExperimentRuntime:
     """一份冻结包对应一个执行环境；具体阶段由 workflow 定义。"""
 
@@ -236,7 +279,13 @@ class ExperimentRuntime:
             for path in sorted((self.bundle / "baseline").glob("*")):
                 if path.is_file():
                     zipped.write(path, "baseline/" + path.name)
-        print(f"complete; copy back {archive}", flush=True)
+        # 回传前验证ZIP条目CRC，并提供整个归档的SHA256供本地核验。
+        with zipfile.ZipFile(archive) as zipped:
+            if zipped.testzip() is not None:
+                raise ValueError("result archive CRC verification failed")
+        checksum = archive.with_suffix(".zip.sha256")
+        checksum.write_text(f"{_file_sha256(archive)}  {archive.name}\n", encoding="utf-8")
+        print(f"complete; copy back {archive} and {checksum.name}", flush=True)
 
     def worker(self, args):
         if args.worker != "train":

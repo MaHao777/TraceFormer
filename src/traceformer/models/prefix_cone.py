@@ -10,6 +10,7 @@ from torch.nn import functional as F
 
 from traceformer.config import ConeWindowConfig
 
+from .cone_geometry import euclidean_rows
 from .cone_transformer import ConeAttentionOutput, ConeTransformerBlock, ConeTransformerOutput
 
 
@@ -59,11 +60,39 @@ def _rectangle_indices(
     return corners
 
 
+def _euclidean_indices(sample, window, direction, start, end, fixed_radius=False):
+    """圆盘拆为互不重叠的单行矩形，复用前缀和及其伴随。"""
+    if fixed_radius:
+        raise ValueError("Euclidean cones do not support fixed-radius boxes")
+    key = ("euclidean", window.spatial_radius, window.time_horizon, direction, start, end)
+    if sample.corner_cache is not None and key in sample.corner_cache:
+        return sample.corner_cache[key]
+    times, height, width = sample.shape
+    xyz = sample.coords[start:end]
+    rows = xyz.new_tensor(euclidean_rows(window.spatial_radius, window.time_horizon))
+    distance, dy, half_width = rows.unbind(-1)
+    time = xyz[:, 2:3] + direction * distance
+    y = xyz[:, 1:2] + dy
+    valid = (time >= 0) & (time < times) & (y >= 0) & (y < height)
+    base = time.clamp(0, times - 1) * (height + 1) * (width + 1)
+    y0, y1 = y.clamp(0, height), (y + 1).clamp(0, height)
+    x0 = (xyz[:, 0:1] - half_width).clamp(0, width)
+    x1 = (xyz[:, 0:1] + half_width + 1).clamp(0, width)
+    corners = torch.stack((base + y1 * (width + 1) + x1,
+                           base + y0 * (width + 1) + x1,
+                           base + y1 * (width + 1) + x0,
+                           base + y0 * (width + 1) + x0), dim=-1)
+    corners = torch.where(valid[..., None], corners, 0)
+    if sample.corner_cache is not None:
+        sample.corner_cache[key] = corners
+    return corners
+
+
 class _ConeSums(torch.autograd.Function):
     """固定几何下的线性区域求和；反向只分配一张前缀表梯度。"""
 
     @staticmethod
-    def forward(ctx, features, sample, windows, chunk_size, fixed_radius, directions):
+    def forward(ctx, features, sample, windows, chunk_size, fixed_radius, directions, metric):
         times, height, width = sample.shape
         grid = features.new_zeros((times * height * width, features.shape[-1]))
         grid.index_add_(0, sample.flat_indices, features)
@@ -82,7 +111,8 @@ class _ConeSums(torch.autograd.Function):
             end = min(start + chunk_size, len(features))
             for index, window in enumerate(windows):
                 for direction_index, direction in enumerate(directions):
-                    corners = _rectangle_indices(
+                    indexer = _euclidean_indices if metric == "euclidean" else _rectangle_indices
+                    corners = indexer(
                         sample, window, direction, start, end, fixed_radius
                     )
                     slot = len(directions) * index + direction_index
@@ -98,6 +128,7 @@ class _ConeSums(torch.autograd.Function):
         ctx.sample, ctx.windows, ctx.chunk_size = sample, windows, chunk_size
         ctx.fixed_radius = fixed_radius
         ctx.directions = directions
+        ctx.metric = metric
         ctx.feature_dim = features.shape[-1]
         ctx.mark_non_differentiable(counts)
         return total, counts
@@ -111,13 +142,14 @@ class _ConeSums(torch.autograd.Function):
             end = min(start + ctx.chunk_size, len(sample.indices))
             for index, window in enumerate(ctx.windows):
                 for direction_index, direction in enumerate(ctx.directions):
-                    corners = _rectangle_indices(
+                    indexer = _euclidean_indices if ctx.metric == "euclidean" else _rectangle_indices
+                    corners = indexer(
                         sample, window, direction, start, end, ctx.fixed_radius
                     )
                     grad = grad_total[start:end, len(ctx.directions) * index + direction_index]
                     grad = (
                         grad[:, None]
-                        .expand(-1, window.time_horizon, -1)
+                        .expand(-1, corners.shape[1], -1)
                         .reshape(-1, ctx.feature_dim)
                     )
                     for corner, sign in enumerate((1, -1, -1, 1)):
@@ -126,7 +158,7 @@ class _ConeSums(torch.autograd.Function):
         grad_grid = grad_integral.reshape(times, height + 1, width + 1, -1)
         grad_grid = grad_grid.flip((1, 2)).cumsum(1).cumsum(2).flip((1, 2))
         grad_grid = grad_grid[:, 1:, 1:].reshape(-1, ctx.feature_dim)
-        return grad_grid[sample.flat_indices], None, None, None, None, None
+        return grad_grid[sample.flat_indices], None, None, None, None, None, None
 
 
 def prepare_prefix_geometry(coords: torch.Tensor, batches: torch.Tensor) -> list[PrefixSample]:
@@ -154,11 +186,14 @@ def prefix_cone_pool(
     *,
     fixed_radius: bool = False,
     directions: tuple[int, ...] = (-1, 1),
+    metric: str = "chebyshev",
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """返回 [N, 6, D] 摘要和 [N, 6] 成员数；不创建邻居列表。"""
     # 单向消融只计算过去区域；默认双向运算顺序保持不变。
     if directions not in {(-1, 1), (-1,)}:
         raise ValueError("directions must be bidirectional or past-only")
+    if metric not in {"chebyshev", "euclidean"} or (metric == "euclidean" and fixed_radius):
+        raise ValueError("unsupported cone metric or fixed-radius Euclidean cone")
     if chunk_size is None:
         # CUDA推理减少小分块发射；训练和CPU保留原临时内存规模。
         chunk_size = 16384 if values.is_cuda and not torch.is_grad_enabled() else 1024
@@ -172,7 +207,7 @@ def prefix_cone_pool(
         selected = sample.indices
         w = weights[selected].float().reshape(-1, 1)
         features = torch.cat((values[selected].float() * w, w), dim=-1)
-        total, count = _ConeSums.apply(features, sample, windows, chunk_size, fixed_radius, directions)
+        total, count = _ConeSums.apply(features, sample, windows, chunk_size, fixed_radius, directions, metric)
         mean = total[..., :-1] / total[..., -1:].clamp_min(1e-8)
         summaries[selected] = torch.where(count[..., None] > 0, mean, 0.0)
         counts[selected] = count

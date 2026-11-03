@@ -31,7 +31,7 @@ def packager():
 
 
 @pytest.fixture
-def bundle(tmp_path, packager):
+def bundle(tmp_path, packager, request):
     data = tmp_path / "existing data"
     for split, count in (("train", 99), ("val", 24), ("test", 24)):
         folder = data / split
@@ -47,11 +47,12 @@ def bundle(tmp_path, packager):
                      training=replace(config.training, seed=37, save_training_state_interval=1))
     template = tmp_path / "template.yaml"
     template.write_text(yaml.safe_dump(_serializable(asdict(config))), encoding="utf-8")
-    destination = packager.build_package("local_pooling_six", tmp_path / "upload folder", template, data, data)
+    experiment = getattr(request, "param", "local_pooling_six")
+    destination = packager.build_package(experiment, tmp_path / "upload folder", template, data, data)
     return destination, data, config
 
 
-def run_bundle(bundle, *flags, check=True, env_override=None):
+def run_bundle(bundle, *flags, check=True, env_override=None, timeout=420):
     directory, data, _ = bundle
     environment = dict(os.environ, PYTHONPATH="", PYTHONUTF8="1", PYTHONIOENCODING="utf-8",
                        OMP_NUM_THREADS="1", MKL_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1")
@@ -59,7 +60,7 @@ def run_bundle(bundle, *flags, check=True, env_override=None):
     result = subprocess.run([sys.executable, "-u", str(directory / "run.py"),
                              "--data-root", str(data), "--test-root", str(data), *flags],
                             cwd=directory.parent, env=environment, capture_output=True,
-                            encoding="utf-8", timeout=420)
+                            encoding="utf-8", timeout=timeout)
     if check:
         assert result.returncode == 0, result.stdout + result.stderr
     return result

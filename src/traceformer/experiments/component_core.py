@@ -89,6 +89,7 @@ class SummaryAttention(nn.Module):
         summaries, counts = prefix_cone_pool(
             self.pool_value(tokens), torch.sigmoid(self.pool_weight(tokens).float()) + 1e-4,
             geometry, self.windows, fixed_radius=self.fixed_radius, directions=self.directions,
+            metric=getattr(self, "metric", "chebyshev"),
         )
         embeddings = (self.shape_embedding[:, None] + self.direction_embedding[None]).flatten(0, 1)
         summaries = summaries.to(tokens.dtype) + embeddings

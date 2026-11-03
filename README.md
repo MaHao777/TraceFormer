@@ -73,7 +73,7 @@ EventTokenizer
 
 ## 安装与检查
 
-实验统一使用 `traceformer-experiment`，维护 M1+C4 和六组池化/局部注意力两套流程。
+实验统一使用 `traceformer-experiment`，维护 M1+C4、六组池化/局部注意力、四组欧氏锥对照及S1论文筛选消融。
 启动、分阶段运行、续跑、独立上传包和历史归档见[实验使用导航](docs/experiments/README.md)。
 旧实验已分类到 `archive/experiments/`，历史冻结源码与结果保留原位。
 

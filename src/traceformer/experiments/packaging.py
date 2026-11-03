@@ -1,4 +1,4 @@
-"""两套实验共用的源码冻结与独立上传包生成。"""
+"""实验共用的源码冻结与独立上传包生成。"""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ import yaml
 from traceformer.config import load_config
 from traceformer.experiments.ablation import ComponentCoreSpec, LocalPoolingSpec
 from traceformer.experiments.component_suite import read_json
+from traceformer.experiments.euclidean_pooling import initialization_audit
 from traceformer.training.engine import (
     _file_sha256,
     _serializable,
@@ -64,7 +65,8 @@ def data_manifest(data_root, test_root):
                              for path in paths}
     return identities
 
-def validate_baseline(root, config, identities):
+def validate_baseline(root, config, identities, *, spec=None, identity_file=None, pointer_file=None,
+                      canonical_variant="S0"):
     if root is None:
         return None
     root = Path(root).resolve()
@@ -78,11 +80,11 @@ def validate_baseline(root, config, identities):
     for name in BASELINE_FILES:
         if not (run / name).is_file():
             raise ValueError(f"baseline artifact missing: {name}")
-    identity_file = root / "dataset_identity.json"
+    identity_file = Path(identity_file) if identity_file is not None else root / "dataset_identity.json"
     if not identity_file.exists() or read_json(identity_file) != identities:
         raise ValueError("baseline data identity differs or lacks its full dataset identity")
     checkpoint = torch.load(run / "best.pt", map_location="cpu", weights_only=True)
-    _validate_checkpoint_contract(checkpoint, config, ablation=ComponentCoreSpec("M1_C4"))
+    _validate_checkpoint_contract(checkpoint, config, ablation=spec or ComponentCoreSpec("M1_C4"))
     if checkpoint.get("training_seed") != 37:
         raise ValueError("baseline training seed differs from seed37")
     summary = read_json(run / "summary.json")
@@ -101,7 +103,7 @@ def validate_baseline(root, config, identities):
     for section in ("loss", "evaluation", "frame_refinement", "inference"):
         if asdict(getattr(previous, section)) != asdict(getattr(config, section)):
             raise ValueError(f"baseline {section} protocol differs from this experiment")
-    source = read_json(root / "training.json")
+    source = read_json(Path(pointer_file) if pointer_file is not None else root / "training.json")
     digest = _file_sha256(run / "best.pt")
     if source.get("sha256") != digest:
         raise ValueError("baseline checkpoint differs from original training pointer")
@@ -109,7 +111,7 @@ def validate_baseline(root, config, identities):
     if float(checkpoint["decision_threshold"]) != float(metrics["threshold"]):
         raise ValueError("baseline saved decision threshold differs from metrics")
     preserved = (*BASELINE_FILES, *(name for name in OPTIONAL_BASELINE_FILES if (run / name).is_file()))
-    return root, run, {"checkpoint_sha256": digest, "canonical_variant": "S0",
+    return root, run, {"checkpoint_sha256": digest, "canonical_variant": canonical_variant,
                        "ablation": checkpoint["ablation"], "source_training": source,
                        "source_files": {name: _file_sha256(run / name) for name in preserved}}
 
@@ -123,13 +125,13 @@ def source_manifest(destination, experiment):
               and p.name != "package_manifest.json"}
     _write_json(destination / "package_manifest.json", {"schema": 1, "sha256": hashes,
                 "experiment": experiment, "contains_training_data": False,
-                "contains_trained_checkpoint": (destination / "baseline/best.pt").is_file()})
+                "contains_trained_checkpoint": any((destination / "baseline").rglob("best.pt"))})
 
 
 def build_package(experiment, destination, config_source, data_root, test_root, *,
                   baseline_root=None, references=None):
     """先核验全部输入，再创建目标；已有目录永不覆盖。"""
-    if experiment not in {"mean_past_gated", "local_pooling_six"}:
+    if experiment not in {"mean_past_gated", "local_pooling_six", "euclidean_pooling_four", "s1_paper_ablation"}:
         raise ValueError(f"unknown maintained experiment: {experiment}")
     destination = Path(destination).resolve()
     if destination.exists():
@@ -142,8 +144,16 @@ def build_package(experiment, destination, config_source, data_root, test_root, 
         save_training_state_interval=1,
     )).validate()
     baseline = validate_baseline(baseline_root, config, identities) if experiment == "local_pooling_six" else None
-    if baseline_root is not None and experiment != "local_pooling_six":
-        raise ValueError("only local_pooling_six accepts a reusable baseline")
+    if baseline_root is not None and experiment not in {"local_pooling_six", "s1_paper_ablation"}:
+        raise ValueError("only local_pooling_six and s1_paper_ablation accept a reusable baseline")
+    if references is not None and experiment == "euclidean_pooling_four":
+        raise ValueError("Euclidean experiments do not import historical reference results")
+    s1_references = None
+    if experiment == "s1_paper_ablation":
+        from traceformer.experiments.s1_references import collect_references
+        if references is not None:
+            raise ValueError("S1 paper ablations do not accept historical score references")
+        s1_references = collect_references(baseline_root, config, identities)
     destination.mkdir(parents=True)
     shutil.copytree(REPO / "src/traceformer", destination / "src/traceformer",
                     ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
@@ -164,6 +174,16 @@ def build_package(experiment, destination, config_source, data_root, test_root, 
         + ("六组固定 CUDA FP32；耗时与显存仅记录，不设置相对预算门槛。\n"
            "查询分块默认8192、空间分块4096；实际值冻结后不能在恢复时修改。\n"
            if experiment == "local_pooling_six" else
+           "四组固定 CUDA FP32，全部从随机初值训练；all/train自动执行首次预检。\n"
+           "查询分块默认8192、空间分块4096；实际值冻结，恢复不能改变。\n"
+           "E0/E1为均值/单核加(2,2)欧氏局部过去锥，E2/E3为均值/单核加三尺度欧氏中心锚定。\n"
+           "单种子结果；注意力同时改变支持域与交互方式，单核包含GELU；整网不宣称严格因果。\n"
+           if experiment == "euclidean_pooling_four" else
+           "S1论文筛选：seed37、24轮、CUDA FP32；7种新结构从头训练。\n"
+           "有效S1/S0按原字节复用，先独立复现验证指标；没有基线时需从头训练。\n"
+           "all/train自动预检；三锥并集直接注意力默认256查询分块，不截断552个候选。\n"
+           "完整科学定义和两张消融表见EXPERIMENT.md，不自动执行seed38/39或VTR。\n"
+           if experiment == "s1_paper_ablation" else
            "M1+C4 默认 CUDA FP32；可显式选择 --precision bf16。\n"), encoding="utf-8")
     if experiment == "mean_past_gated":
         torch.manual_seed(config.training.seed)
@@ -176,6 +196,29 @@ def build_package(experiment, destination, config_source, data_root, test_root, 
                     "directions": [-1], "learned_pool_gate": True,
                     "parameters": sum(p.numel() for p in model.parameters()),
                     "initialization": "random from seed37; no existing trained weights reused"})
+    elif experiment == "s1_paper_ablation":
+        from traceformer.experiments.s1_paper import initialization_audit as s1_initialization_audit
+        audit = s1_initialization_audit(config)
+        shutil.copy2(REPO / "docs/experiments/s1_paper_ablation.md", destination / "EXPERIMENT.md")
+        _write_json(destination / "initialization_audit.json", audit)
+        _write_json(destination / "suite.json", {"variants": audit["variants"], "seed": 37,
+                    "epochs": 24, "precision": "fp32", "profile": "screen",
+                    "references": {k: value[2] for k, value in s1_references.items()},
+                    "mandatory_preflight": True, "budget_enforced": False})
+        for variant, (_source, run, identity) in s1_references.items():
+            target = destination / "baseline" / variant
+            target.mkdir(parents=True)
+            for name in identity["source_files"]:
+                shutil.copy2(run / name, target / name)
+            _write_json(target / "identity.json", identity)
+    elif experiment == "euclidean_pooling_four":
+        audit = initialization_audit(config)
+        shutil.copy2(REPO / "docs/experiments/euclidean_pooling_four.md", destination / "EXPERIMENT.md")
+        _write_json(destination / "initialization_audit.json", audit)
+        _write_json(destination / "suite.json", {"variants": audit["variants"], "seed": 37,
+                    "epochs": 24, "precision": "fp32", "resource_policy": "timing_only",
+                    "budget_enforced": False, "timing_split": "test", "baseline_reused": False,
+                    "mandatory_preflight": True})
     else:
         rows = []
         for name in VARIANTS:

@@ -12,6 +12,8 @@ from pathlib import Path
 EXPERIMENTS = {
     "mean_past_gated": ("M1+C4", "均值池化与三层门控过去锥"),
     "local_pooling_six": ("S0/S1/S2/L0/L1/L2", "池化与过去锥局部注意力六组对照"),
+    "euclidean_pooling_four": ("E0/E1/E2/E3", "均值/单核池化与局部/中心欧氏过去锥四组对照"),
+    "s1_paper_ablation": ("S1/S0+A1/A2/P1/G1/G2/F1/T1", "S1论文结构与创新点筛选消融"),
 }
 REPO = Path(__file__).resolve().parents[3]
 
@@ -26,7 +28,7 @@ def run_arguments(parser, *, workers=False):
     parser.add_argument("--resume", action="store_true")
     if workers:
         parser.add_argument("--output", type=Path)
-        parser.add_argument("--worker", choices=("gate", "train", "benchmark", "prediction_benchmark"),
+        parser.add_argument("--worker", choices=("gate", "train", "benchmark", "prediction_benchmark", "support"),
                             help=argparse.SUPPRESS)
         for name in ("root", "config", "attempt", "resume-state", "checkpoint", "report"):
             parser.add_argument("--" + name, type=Path, help=argparse.SUPPRESS)
@@ -47,6 +49,16 @@ def bundled_main(bundle, argv=None):
             parser.error("local_pooling_six requires CUDA FP32")
         from traceformer.experiments.workflows.local_pooling import LocalPoolingWorkflow
         workflow = LocalPoolingWorkflow(bundle, args.output)
+    elif manifest["experiment"] == "euclidean_pooling_four":
+        if args.precision not in (None, "fp32"):
+            parser.error("euclidean_pooling_four requires CUDA FP32")
+        from traceformer.experiments.workflows.euclidean_pooling import EuclideanPoolingWorkflow
+        workflow = EuclideanPoolingWorkflow(bundle, args.output)
+    elif manifest["experiment"] == "s1_paper_ablation":
+        if args.precision not in (None, "fp32"):
+            parser.error("s1_paper_ablation requires CUDA FP32")
+        from traceformer.experiments.workflows.s1_paper import S1PaperWorkflow
+        workflow = S1PaperWorkflow(bundle, args.output)
     else:
         parser.error("unknown maintained experiment")
     workflow.run(args)
@@ -68,8 +80,10 @@ def build_from_arguments(args, destination):
         raise ValueError("--baseline-root and --without-baseline cannot be combined")
     if args.experiment == "local_pooling_six" and not args.without_baseline:
         baseline = args.baseline_root or REPO / "remote_result/26-10-28"
+    elif args.experiment == "s1_paper_ablation" and not args.without_baseline:
+        baseline = args.baseline_root or REPO / "remote_result/26-10-29/full"
     elif args.baseline_root is not None:
-        raise ValueError("only local_pooling_six accepts --baseline-root")
+        raise ValueError("only local_pooling_six and s1_paper_ablation accept --baseline-root")
     references = json.loads(args.references.read_text(encoding="utf-8")) if args.references else None
     return build_package(args.experiment, destination,
                          args.config or REPO / "outputs/no_sparse_local_20261025/training/config.yaml",

@@ -1,16 +1,23 @@
 # 实验使用导航
 
-日常维护两套实验。安装 `pip install -e ".[experiments]"` 后，统一使用
+日常维护四套实验。安装 `pip install -e ".[experiments]"` 后，统一使用
 `traceformer-experiment`；`python -m traceformer.cli.experiment` 与它等价。
 
 |ID|用途|变体|
 |---|---|---|
 |mean_past_gated|M1 均值池化 + 三层门控过去锥|M1_C4|
 |local_pooling_six|池化与过去锥局部注意力对照|S0/S1/S2/L0/L1/L2|
+|euclidean_pooling_four|均值/单核池化 × 小局部/三尺度中心欧氏过去锥|E0/E1/E2/E3|
+|s1_paper_ablation|S1论文结构与创新点筛选消融|S1/S0＋7种新增结构|
 
-模型结构模块与 checkpoint 契约保留原定义。两套 workflow 只规定阶段顺序；日志、锁、
+新增四组的结构、启动和解释边界见 [欧氏过去锥四组实验](euclidean_pooling_four.md)。
+四组全部重新训练，all/train自动执行首次预检，不接受旧基线或BF16。
+云端已完成的四组结果与本地独立复核见 [2026-10-31回传分析](euclidean_pooling_four_results_20261031.md)。
+S1论文筛选包固定seed37、复用有效S1/S0，见 [结构及创新点消融说明](s1_paper_ablation.md)。
+
+历史模型结构与 checkpoint 契约保留原定义，新欧氏实验使用版本5消融契约。workflow只规定阶段顺序；日志、锁、
 子进程、恢复、概率复评和原始掩码独立核验由公共运行层提供。
-本轮数值对照、539项通过测试及限制见 [整理验证记录](reorganization_20261030.md)。
+此前流程整理的数值对照、539项通过测试及限制见 [整理验证记录](reorganization_20261030.md)。
 
 ## 本地运行
 

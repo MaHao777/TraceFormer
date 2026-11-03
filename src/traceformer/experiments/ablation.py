@@ -20,6 +20,51 @@ from traceformer.models.spatiotemporal_cone import TraceFormer
 
 
 @dataclass(frozen=True)
+class S1PaperSpec:
+    """论文筛选消融只改变S1的一个设计；历史基线沿用原契约。"""
+
+    variant: str = "A1"
+    version: int = 6
+
+    def validate(self) -> S1PaperSpec:
+        if self.version != 6 or self.variant not in {"A1", "A2", "P1", "G1", "G2", "F1", "T1"}:
+            raise ValueError("unknown S1 paper ablation contract")
+        return self
+
+    def validate_stage(self, stage: str) -> None:
+        self.validate()
+        if stage != "full":
+            raise ValueError("S1 paper ablations require joint full training")
+
+    def to_dict(self) -> dict:
+        self.validate()
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class EuclideanPoolingSpec:
+    """四组欧氏过去锥实验使用独立契约，不接管历史权重。"""
+
+    variant: str = "E0"
+    version: int = 5
+    metric: str = "euclidean"
+
+    def validate(self) -> EuclideanPoolingSpec:
+        if self.version != 5 or self.variant not in {"E0", "E1", "E2", "E3"} or self.metric != "euclidean":
+            raise ValueError("unknown Euclidean pooling experiment contract")
+        return self
+
+    def validate_stage(self, stage: str) -> None:
+        self.validate()
+        if stage != "full":
+            raise ValueError("Euclidean pooling experiments require joint full training")
+
+    def to_dict(self) -> dict:
+        self.validate()
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class LocalPoolingSpec:
     """六组实验只改变块内聚合和编码器交互，不开放隐式结构开关。"""
 
@@ -96,8 +141,12 @@ class ComponentCoreSpec:
 
 def parse_ablation(
     value: dict,
-) -> AblationSpec | ComponentCoreSpec | StructureImprovementSpec | LocalPoolingSpec:
+) -> AblationSpec | ComponentCoreSpec | StructureImprovementSpec | LocalPoolingSpec | EuclideanPoolingSpec | S1PaperSpec:
     # 旧协议仍保持原含义；新实验契约拒绝任何额外的分支字段。
+    if value.get("version") == 6:
+        return S1PaperSpec(**value).validate()
+    if value.get("version") == 5:
+        return EuclideanPoolingSpec(**value).validate()
     if value.get("version") == 4:
         return LocalPoolingSpec(**value).validate()
     if value.get("version") == 3:
@@ -159,9 +208,15 @@ class NoRefinement(nn.Module):
 
 def apply_ablation(
     model: TraceFormer, config: TraceFormerConfig,
-    spec: AblationSpec | ComponentCoreSpec | StructureImprovementSpec | LocalPoolingSpec,
+    spec: AblationSpec | ComponentCoreSpec | StructureImprovementSpec | LocalPoolingSpec | EuclideanPoolingSpec | S1PaperSpec,
 ) -> TraceFormer:
     spec.validate()
+    if isinstance(spec, S1PaperSpec):
+        from traceformer.experiments.s1_paper import apply_s1_paper
+        return apply_s1_paper(model, spec)
+    if isinstance(spec, EuclideanPoolingSpec):
+        from traceformer.experiments.euclidean_pooling import apply_euclidean_pooling
+        return apply_euclidean_pooling(model, spec)
     if isinstance(spec, LocalPoolingSpec):
         from traceformer.experiments.local_pooling import apply_local_pooling
         return apply_local_pooling(model, spec)
