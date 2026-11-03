@@ -1,12 +1,4 @@
-"""Public model contracts and the spatiotemporal-cone event detector."""
-
-from __future__ import annotations
-
-from .event_refinement import EventRefinementOutput, MultiScaleEventRefinementHead
+"""论文模型基础模块；请使用包级 build_model 构建 S1。"""
 from .spatiotemporal_cone import TraceFormer
 
-__all__ = [
-    "EventRefinementOutput",
-    "MultiScaleEventRefinementHead",
-    "TraceFormer",
-]
+__all__ = ["TraceFormer"]

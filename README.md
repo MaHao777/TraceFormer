@@ -1,163 +1,139 @@
-# TraceFormer 固定 schema-8 事件检测模型
+# TraceFormer
 
-当前后处理已删除 reference recovery，最终使用直接分支与主轨迹并集；[48 序列独立复评与变更说明](docs/reference_recovery_removal_20261016.md)。论文冻结 schema-5 系统与下述当前 schema-8 模型分开计分。
+TraceFormer segments tiny UAV targets directly in event streams. The paper model (S1) combines spatial tokenization, multiscale past-cone summaries, event decoding, and a multiscale neural refinement head. It predicts one probability and one binary label for every original event, without external postprocessing.
 
-项目地址：https://github.com/MaHao777/TraceFormer
+[中文说明](README.zh-CN.md)
 
-## 当前主模型
+## Model
 
-当前主模型固定为新三锥网络及其重训事件后处理：189,900个神经网络参数，
-small/large两套树，以及主轨迹与直接分支并集。
-[主模型清单](configs/main_model.json)固定权重、原配置和后处理文件哈希，
-本地产物在`outputs/main_model`；[使用与核验说明](docs/main_model_20261018.md)。
-这是用户指定的主模型，原始验证Fa门槛失败记录仍保留。
+For a 346 × 260 sensor and an 8 s sequence, occupied 8 × 8 pixel × 125 ms blocks form 64-dimensional tokens. The tokenizer encodes six event features, averages them in a 4 × 4 spatial subcell grid, applies one 3 × 3 depthwise convolution and GELU, and uses event-count-weighted readout. Seven block statistics and positional encoding complete each token.
 
-默认预测运行完整主模型，无需填写权重和后处理路径：
+Three encoder layers use source-gated, square-section past-cone summaries with `(radius, time horizon)` of `(8,2)`, `(4,4)`, and `(2,8)` in token coordinates. A center query fuses the three summaries with four-head attention. The event decoder gathers token context back to the original events. Neural refinement adds context at 2 × 2 × 10 ms, 4 × 4 × 25 ms, and 8 × 8 × 50 ms.
 
-```powershell
-traceformer-predict --device cpu --predictions-only
-# 云端使用同一完整管线，网络、特征和树均在GPU运行。
-traceformer-predict --device cuda --input-dir /path/to/test --output-dir outputs/main_test
-```
+S1 has **143,350 trainable parameters**: tokenizer 14,400; encoder 113,987; decoder 6,785; refinement 8,178. The encoder uses past-only support; sequence statistics and the refinement head use additional temporal information, so the full network is an offline sequence model.
 
-默认生成NPZ掩码及经过审计的TXT/ZIP；`--predictions-only`只保存掩码。
-`--split val`选择验证集。显式`--checkpoint`用于单网络预测，不包含后处理。
-CUDA无梯度推理已默认采用16384分块与层间索引复用，轨迹形态学已改为局部画布；
-训练仍用1024分块，模型结构和checkpoint张量键不变。
+## Installation
 
-已合入代码的GPU复核完成：单网络**168.973 ms/文件**、完整管线**442.657 ms/文件**，
-全部24测试文件各三轮；48序列精确对照、实际默认入口、独立复评及TXT/ZIP审计通过。
-[最新GPU实测与完整回传记录](docs/main_model_gpu_verification_20261018.md)。
+Use Python 3.10–3.12. Install a CUDA-enabled PyTorch appropriate for your server first, then run from this repository root:
 
-## 新三锥网络的事件后处理重训
-
-本地重训入口只读取 train/val，冻结指定网络，用79/20开发划分选择事件树融合与
-轨迹阈值，通过后用全部99训练序列发布，并对24个验证序列独立复评：
-
-```powershell
-python scripts/retrain_event_postprocess.py --config outputs/prefix_cone/cpu_20261017_full/config.yaml --checkpoint outputs/prefix_cone/cpu_20261017_full/best.pt --output outputs/postprocess_prefix_cone_new
-```
-
-`status.json` 记录开发/验证门槛结果。只有 `validation_accepted` 才可运行
-`python scripts/package_event_release.py --run-dir outputs/postprocess_prefix_cone_new`。
-云端包包含冻结产物、验证掩码、GPU预测/计时命令；本地重训不运行测试集。
-事件范围也可通过 `traceformer-postprocess train --event-only` 单独执行。
-
-优化前，2026-10-18在现有RTX 3090服务器完成新模型及重训后处理候选的完整诊断评测，
-复用原有数据，并按历史配置对齐为Torch/OMP/MKL 14线程、OpenBLAS 1线程、CPU树参数8。
-测试集三轮平均耗时为单模型536.679 ms/文件、完整管线1202.171 ms/文件；
-[14线程实测范围、数值核验与结果](docs/gpu_prefix_cone_14t_20261018.md)。
-[原8线程记录](docs/gpu_prefix_cone_20261018.md)保留，候选仍保留原验证门槛未通过状态。
-
-[耗时回归定位](docs/prefix_cone_latency_diagnosis_20261018.md)确认默认1024 Token分块的前缀池化是主要瓶颈；
-临时16384分块试验使完整管线降至919.527 ms/文件，val/test全部网络Tensor与原输出逐位一致。
-上述诊断时尚未改动默认实现；优化现已合入，见主模型说明。
-
-[完整管线进一步提速审计](docs/full_pipeline_speed_audit_20261018.md)验证了轨迹形态学局部裁剪与层间几何索引复用：
-在16384分块基础上，同次三轮对照由955.015降至444.187 ms/文件，输出及独立评分不变。
-上述为独立进程原型的历史记录；当前代码已合入这两项优化。
-
-Python 包为 `traceformer`，模型入口为 `from traceformer import TraceFormer`，配置类为 `TraceFormerConfig`。命令统一使用 `traceformer-` 前缀。更名前的本地目录名与历史实验记录可继续保留；checkpoint 的张量键和数值结构不因名称变更而改变。
-
-本仓库当前只保留一套正式模型结构：
-
-```text
-EventTokenizer
-  → 双向时空锥 Transformer
-  → 事件解码器
-  → 多尺度事件精修头
-  → 每个原始事件的二分类 logit
-```
-
-模型结构固定为 schema-8，包含 Tokenizer、三锥编码器、事件解码器和多尺度精修头，共 172,150 参数。Full/Sparse 双视图融合及其专属监督已经删除，所有序列均直接处理完整事件流。历史主模型产物保留原字节，通过对应归档源码复现。
-
-## 安装与检查
-
-实验统一使用 `traceformer-experiment`，维护 M1+C4、六组池化/局部注意力、四组欧氏锥对照及S1论文筛选消融。
-启动、分阶段运行、续跑、独立上传包和历史归档见[实验使用导航](docs/experiments/README.md)。
-旧实验已分类到 `archive/experiments/`，历史冻结源码与结果保留原位。
-
-```powershell
+```bash
 python -m pip install -e .
-python -m pip install -e ".[dev]"
-python -m pip install -e ".[experiments]"
-
 traceformer-train --help
 traceformer-evaluate --help
 traceformer-predict --help
-traceformer-check-gpu --help
-traceformer-experiment --help
 ```
 
-运行测试与静态检查：
+The paper experiments used PyTorch 2.10.0+cu128 on an RTX 4090, with CUDA 12.8, FP32, AMP/TF32 disabled, and eight CPU threads. A compatible installed PyTorch is reused. CPU execution is available with `--device cpu`; it is slower and its timing is not comparable to the paper's GPU timing.
 
-```powershell
-python -m unittest discover -s tests -v
-python -m pytest
-python -m ruff check src tests scripts
-git diff --check
+## Data and preprocessing
+
+Provide the EV-UAV NPZ files yourself; data are not included:
+
+```text
+/path/to/ev-uav/
+  train/*.npz    # 99 labeled sequences in the paper
+  val/*.npz      # 24 labeled sequences
+  test/*.npz     # 24 sequences; labels needed only for evaluation
 ```
 
-## 固定配置
+Each NPZ must contain a one-dimensional structured array named `ev` with integer `x`, `y`, and `p` fields, and numeric `t` in **milliseconds**. Coordinates satisfy `0 <= x < 346`, `0 <= y < 260`; polarity is 0/1. Timestamps are finite, nondecreasing, and within [0,8000]. Training/evaluation additionally require binary integer `label` and integer target identity `name` (0 for background). Empty sequences are rejected.
 
-仅保留四份当前模型配置：
+Preprocessing preserves source order and uses `t / 8000` as the network time coordinate. Spatial blocks, subcells, local event descriptors, and token statistics are computed online. No intermediate voxel dataset or raw-format conversion is required.
 
-- `configs/traceformer_score_optimized.yaml`：本地 CPU 正式配置
-- `configs/traceformer_score_optimized_smoke.yaml`：本地 CPU 冒烟配置
-- `configs/traceformer_score_optimized_autodl.yaml`：CUDA 正式配置
-- `configs/traceformer_score_optimized_autodl_smoke.yaml`：CUDA 冒烟配置
-
-四份配置的模型结构完全相同，只允许设备、混合精度、线程、数据文件上限和输出目录等运行环境字段不同。训练配置中的 `stage` 只控制哪些参数参与优化，不改变模型组成：
-
-- `full`：训练完整固定结构
-- `refinement`：冻结主干，只训练多尺度精修头
-
-当前正式配置固定为`full`。如需训练`refinement`阶段，应先在配置中明确指定该阶段，并通过`--initialize-refinement`提供基线checkpoint；精确续训使用`--resume-state`恢复模型、优化器、学习率控制器和随机数状态。
-
-## 训练、复评与预测
-
-新建完整模型训练示例（不改动已冻结的主模型产物）：
-
-```powershell
-traceformer-train `
-  --config configs/traceformer_score_optimized.yaml `
-  --output-dir outputs/new_prefix_cone_training
+```bash
+traceformer-preprocess --data-root /path/to/ev-uav --split train val test --output outputs/data_manifest.json
+# Check an unlabeled test split:
+traceformer-preprocess --data-root /path/to/ev-uav --split test --unlabeled --output outputs/test_manifest.json
 ```
 
-从完整训练状态继续：
+These commands validate the same preprocessing used during training and write file identities and event counts; they do not rewrite the dataset.
 
-```powershell
-traceformer-train `
-  --config path/to/run/config.yaml `
-  --resume-state path/to/run/training_state.pt `
-  --output-dir outputs/resumed_run
+## Pretrained S1
+
+`weights/s1_best.pt` is the original schema-8 checkpoint, selected by validation Score at **epoch 22**. Its contract is `{"variant":"S1","version":4}`. The stored threshold is `0.887499988079071` (0.8875 when rounded).
+
+SHA-256:
+
+```text
+6931ab7529907d50c191a560dcd0e65fbba011689354566056ce4383f7e54e10
 ```
 
-复评和生成预测时，应优先使用 checkpoint 同目录保存的 `config.yaml`：
+The loader checks the structure and normalization contract and loads every tensor strictly. `num_pool_queries` in the saved model metadata preserves the original initialization contract; the actual S1 network has no query-pooling parameters. Temporary initialization draws retain the paper's shared weights and RNG state.
 
-```powershell
-traceformer-evaluate `
-  --config path/to/run/config.yaml `
-  --checkpoint path/to/run/best.pt `
-  --device cpu
+## Training and resume
 
-traceformer-predict `
-  --config path/to/run/config.yaml `
-  --checkpoint path/to/run/best.pt `
-  --device cpu
+```bash
+traceformer-train --config configs/s1.yaml --variant S1 --data-root /path/to/ev-uav --device cuda --output-dir outputs/s1
 ```
 
-schema-8 加载严格检查模型结构、分辨率和精修头结构。带 Sparse 参数的历史 schema-7 checkpoint 不作为新结构加载；精确续训只接受匹配的 schema-4 training-state。
+The default configuration uses seed37, 24 epochs, AdamW (learning rate 0.0007, weight decay 0.0002), the original cosine schedule, gradient clipping at 1.0, and one complete sequence per optimization step. Focal/Dice supervision samples at most 12 background events per target, equally split between hard and random negatives. The complete event stream is still passed through the network. The joint loss is focal + 0.75 Dice + 0.25 object-frame + 0.05 false-alarm + 0.2 auxiliary cell loss. The original dense-sequence weighting is retained.
 
-## 输出产物
+Validation selects the best weights and threshold after each epoch. Runtime outputs include `best.pt`, `training_state.pt`, per-epoch states, the effective configuration, dataset manifest, history, and metrics. Output directories must be new; resume into a new output directory:
 
-训练目录保存：
+```bash
+traceformer-train --config outputs/s1/config.yaml --variant S1 --data-root /path/to/ev-uav --device cuda --resume-state outputs/s1/training_state.pt --output-dir outputs/s1_resumed
+```
 
-- `best.pt`：固定 schema-8 模型及推理契约
-- `config.yaml`：本次运行的完整配置
-- `history.json`、`metrics.json`、`metrics.md`
-- `dataset_manifest.json`
-- `training_state.pt` 与可选的分 epoch 状态
-- `summary.json`、`experiment.md`、`training_curves.png`
+Resume restores the model, optimizer, schedule, Python/NumPy/PyTorch RNGs, and sampling/order generators. Keep the same variant, data identity, total epoch budget and training settings. Paths may move; the restored data must have the same content. The training state is a trusted local artifact.
 
-详细结构见 [docs/architecture.md](docs/architecture.md)。历史实验记录保存在本地，不属于当前模型的运行代码。
+For a pipeline check, use `--device cpu --epochs 1 --max-train-files 2 --max-val-files 2 --num-threads 1` with a fresh output directory. This does not reproduce paper accuracy.
+
+## Evaluation and inference
+
+```bash
+traceformer-evaluate --data-root /path/to/ev-uav --split val --device cuda --output-dir outputs/s1_val
+traceformer-evaluate --data-root /path/to/ev-uav --split test --device cuda --output-dir outputs/s1_test
+traceformer-predict --input-dir /path/to/unlabeled_npz --device cuda --output-dir outputs/prediction
+```
+
+Defaults are `--config configs/s1.yaml` and `--checkpoint weights/s1_best.pt`. To evaluate trained/ablation weights, supply the saved `--config` and `--checkpoint`. The variant and threshold come from that checkpoint. Validation evaluation verifies the original validation-data identity; test evaluation needs only the test split. Prediction needs neither annotations nor a validation directory. Labels and object identities are never passed into the model.
+
+Each `predictions/<source-name>.npz` contains aligned `event_probabilities` (float32), `prediction` (boolean), `source_sha256`, and `threshold`. `metrics.json` records identities, settings and, during evaluation, per-file and global metrics. Output directories must not exist.
+
+Evaluation uses the checkpoint threshold without reselection. It aggregates integer counts globally before computing:
+
+```text
+Score = 0.2 IoU + 0.1 SegAcc + 0.4 Pd + 0.3 exp(-10000 Fa)
+```
+
+SegAcc is positive-event recall in this benchmark. Pd counts detected annotated object-frame instances. Fa is the number of false connected components per pixel-frame, not the event-level false-positive rate. The original strict frame boundaries and reference pixel-count semantics are retained. An independent NumPy/SciPy counter cross-checks the official counts. AP uses all event probabilities.
+
+Rescore saved predictions without another forward pass:
+
+```bash
+traceformer-evaluate --data-root /path/to/ev-uav --split test --device cpu --predictions-dir outputs/s1_test/predictions --output-dir outputs/s1_test_rescore
+```
+
+## Paper ablations
+
+All nine variants share `configs/s1.yaml`; `configs/ablations.yaml` supplies the selected checkpoint contract. Train each variant from scratch by changing `--variant`; only S1 pretrained weights are included. Do not use S1 weights as a replacement for retraining ablations.
+
+| ID | Change relative to S1 | Parameters | Val Score | Test Score |
+|---|---|---:|---:|---:|
+| S1 | Full model | 143350 | 0.913654915 | 0.921787678 |
+| S0 | Event-embedding mean pooling | 142774 | 0.903369256 | 0.915294960 |
+| A1 | Remove encoder cross-token interaction | 79603 | 0.900421183 | 0.889125897 |
+| A2 | Remove refinement and its auxiliary loss | 135172 | 0.901181351 | 0.902915097 |
+| P1 | 1 × 1 depthwise kernel, retaining GELU/readout | 142838 | 0.906050406 | 0.915515149 |
+| G1 | Approximately volume-matched fixed windows | 143350 | 0.911572960 | 0.918347501 |
+| G2 | Middle cone only | 142966 | 0.907179309 | 0.913712190 |
+| F1 | Summary mean + 64–128–64 MLP | 143158 | 0.908325546 | 0.916658736 |
+| T1 | Gated direct attention over the deduplicated cone union | 130102 | 0.910520349 | 0.913340651 |
+
+```bash
+for variant in S1 S0 A1 A2 P1 G1 G2 F1 T1; do
+  traceformer-train --variant "$variant" --data-root /path/to/ev-uav --device cuda --output-dir "outputs/$variant"
+done
+```
+
+Structure comparisons use S1/S0/A1/A2; mechanism comparisons use S1/S0/P1/G1/G2/F1/T1. G1 is not exactly volume/occupancy matched. G2 changes both scales and summary slots. T1 has no neighbor cap and does not isolate coordinate anchoring. These are single-seed results, not evidence of statistical significance or improvements on every sequence/metric.
+
+Execution chunking preserves complete supports. Spatial pooling uses `TRACEFORMER_SPATIAL_TOKEN_CHUNK=4096`; T1 uses `TRACEFORMER_S1_DIRECT_QUERY_CHUNK=256`. The original prefix-sum implementation uses 1024-query chunks during training and CPU execution, and 16384 in CUDA inference. Keep settings unchanged for exact resume. S1's published 41.499 ms mean is the complete neural forward on GPU-resident input on the paper RTX 4090; it excludes data loading, transfer and scoring. It is not a newly measured release benchmark.
+
+## Release verification
+
+The release was checked on CPU with PyTorch 2.11.0+cpu. All nine variants matched the original implementation bit for bit in initialized weights, RNG state, outputs and gradients. All nine completed miniature training, interrupted-state recovery and independent evaluation; resumed model/optimizer/RNG states matched uninterrupted training. Isolated installation and unlabeled inference also passed.
+
+Full CPU reevaluation covered all 24 validation and 24 test sequences: event probabilities matched the original CPU implementation bit for bit; every binary mask and official integer count matched the paper artifacts, reproducing the Scores above. CPU AP was 0.9419454783655674 (val) and 0.9602258519858334 (test), identical to the original CPU code. The historical GPU AP was 0.9419454870573791 and 0.9602258511768741; CPU/CUDA floating-point ranking differences leave the masks and official Score unchanged.
+
+CUDA execution of this reorganized release has not been rerun on the CPU-only release host; the historical paper GPU measurements retain their original scope. Test tools, evidence and generated predictions are kept outside this publication repository.

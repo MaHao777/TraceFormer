@@ -1,11 +1,9 @@
-"""CPU/GPU training, validation and artifacts for the sparse cone model."""
-
+"""S1 与论文消融共用的原始联合训练循环、损失和选模逻辑。"""
 from __future__ import annotations
 
 import json
 import math
 import random
-import sys
 import time
 from dataclasses import asdict
 from hashlib import sha256
@@ -18,87 +16,21 @@ import torch
 import yaml
 from torch.nn.utils import clip_grad_norm_
 
-from traceformer.artifacts import (
-    create_run_directory,
-    rebuild_output_index,
-    record_run_finished,
-    record_run_started,
-)
 from traceformer.config import TraceFormerConfig, normalize_model_config
-from traceformer.data import (
-    EventSequence,
-    LoadedEventSequence,
-    NPZEventDataset,
-)
-from traceformer.experiments.ablation import AblationSpec, apply_ablation
-from traceformer.inference import (
-    generate_submission_rows,
-    pack_submission_zip,
-    write_prediction_txt,
-)
+from traceformer.data import LoadedEventSequence, NPZEventDataset
 from traceformer.models import TraceFormer
-from traceformer.visualization import render_training_curves
+from traceformer.variants import PaperSpec as AblationSpec
+from traceformer.variants import build_model, execution_contract
 
-from .losses import (
-    EventFocalDiceLoss,
-    frame_cell_objectness_loss,
-)
+from .losses import EventFocalDiceLoss, frame_cell_objectness_loss
 from .lr_schedules import LearningRateController
-from .metrics import (
-    EventMetricAccumulator,
-    EVUAVMetricAccumulator,
-    competition_metrics,
-)
+from .metrics import EventMetricAccumulator, EVUAVMetricAccumulator, competition_metrics
 from .runtime import prepare_device
 from .sampling import sample_event_indices
 
 CHECKPOINT_SCHEMA_VERSION = 8
-REFINEMENT_SOURCE_SCHEMA_VERSION = CHECKPOINT_SCHEMA_VERSION
 TRAINING_STATE_SCHEMA_VERSION = 4
-
 REFINEMENT_MODEL_FIELDS = ("context_dim", "scales")
-
-
-def _update_training_curves(
-    run_dir: Path, history: list[dict[str, Any]]
-) -> None:
-    try:
-        render_training_curves(
-            history,
-            run_dir / "training_curves.png",
-            run_name=run_dir.name,
-        )
-    except Exception as error:
-        print(
-            f"warning: training curves were not updated: {error}",
-            file=sys.stderr,
-            flush=True,
-        )
-
-
-def build_model(
-    config: TraceFormerConfig, *, ablation: AblationSpec | None = None
-) -> TraceFormer:
-    model = TraceFormer(
-        cone_windows=tuple(config.model.cone_windows),
-        width=config.resolution.width,
-        height=config.resolution.height,
-        spatial_block_size_x=config.model.spatial_block_size_x,
-        spatial_block_size_y=config.model.spatial_block_size_y,
-        num_time_blocks=config.model.num_time_blocks,
-        token_dim=config.model.token_dim,
-        event_embed_dim=config.model.event_embed_dim,
-        num_pool_queries=config.model.num_pool_queries,
-        num_layers=config.model.num_layers,
-        num_heads=config.model.num_heads,
-        mlp_ratio=config.model.mlp_ratio,
-        dropout=config.model.dropout,
-        frame_refinement_context_dim=config.frame_refinement.context_dim,
-        frame_refinement_scales=tuple(config.frame_refinement.scales),
-        duration_ms=config.dataset.duration_ms,
-    )
-    return apply_ablation(model, config, ablation) if ablation is not None else model
-
 
 def _file_sha256(path: Path) -> str:
     """分块计算检查点哈希，避免一次性读入大文件。"""
@@ -126,60 +58,6 @@ def _fixed_model_config(value: Any) -> dict[str, Any] | None:
     return normalize_model_config(value)
 
 
-def _initialize_refinement_head(
-    model: TraceFormer,
-    config: TraceFormerConfig,
-    checkpoint_path: str | Path,
-    *,
-    device: torch.device,
-) -> dict[str, Any]:
-    """严格加载当前三锥主干，只保留事件精修头为可训练。"""
-
-    path = Path(checkpoint_path).resolve()
-    checkpoint = torch.load(path, map_location=device, weights_only=True)
-    if checkpoint.get("schema_version") != REFINEMENT_SOURCE_SCHEMA_VERSION:
-        raise ValueError("refinement initialization requires a current-schema checkpoint")
-    if _fixed_model_config(checkpoint.get("model_config")) != _serializable(
-        asdict(config.model)
-    ):
-        raise ValueError("refinement source model configuration does not match")
-    if checkpoint.get("resolution") != _serializable(asdict(config.resolution)):
-        raise ValueError("refinement source resolution does not match")
-    source_state = checkpoint.get("model_state")
-    if not isinstance(source_state, dict):
-        raise ValueError("refinement source checkpoint has no model state")
-    expected_base = {
-        name
-        for name in model.state_dict()
-        if not name.startswith("event_refinement_head.")
-    }
-    # 当前权重可带精修头；初始化时只加载需要冻结的主干参数。
-    source_state = {name: value for name, value in source_state.items()
-                    if not name.startswith("event_refinement_head.")}
-    if set(source_state) != expected_base:
-        missing = sorted(expected_base - set(source_state))
-        extra = sorted(set(source_state) - expected_base)
-        raise ValueError(
-            f"refinement source state mismatch: missing={missing}, extra={extra}"
-        )
-    incompatible = model.load_state_dict(source_state, strict=False)
-    expected_missing = {
-        name
-        for name in model.state_dict()
-        if name.startswith("event_refinement_head.")
-    }
-    if set(incompatible.missing_keys) != expected_missing or incompatible.unexpected_keys:
-        raise ValueError("refinement source checkpoint could not be loaded strictly")
-    model.configure_training_stage("refinement")
-    return {
-        "kind": "event_refinement",
-        "path": str(path),
-        "sha256": _file_sha256(path),
-        "schema_version": checkpoint.get("schema_version"),
-        "epoch": checkpoint.get("epoch"),
-    }
-
-
 def _trainable_parameters(model: torch.nn.Module) -> list[torch.nn.Parameter]:
     """优化器只接收真正允许更新的参数。"""
 
@@ -187,61 +65,6 @@ def _trainable_parameters(model: torch.nn.Module) -> list[torch.nn.Parameter]:
     if not parameters:
         raise ValueError("model has no trainable parameters")
     return parameters
-
-
-def _initialize_ablation_stage(
-    model: TraceFormer,
-    config: TraceFormerConfig,
-    ablation: AblationSpec,
-    checkpoint_path: str | Path | None,
-    *,
-    manifest_digest: str,
-    device: torch.device,
-) -> dict[str, Any] | None:
-    """消融阶段只接受同种子、同数据、同结构的直接上游权重。"""
-    stage = config.training.stage
-    if stage == "full":
-        if checkpoint_path is not None:
-            raise ValueError("ablation base must start from random initialization")
-        return None
-    if checkpoint_path is None:
-        raise ValueError("ablation stage requires its upstream checkpoint")
-    path = Path(checkpoint_path).resolve()
-    source = torch.load(path, map_location=device, weights_only=True)
-    expected_source = AblationSpec(
-        backbone=ablation.backbone,
-        sparse=False,
-        refinement="none",
-    )
-    if source.get("schema_version") != CHECKPOINT_SCHEMA_VERSION:
-        raise ValueError("unsupported ablation source schema")
-    if source.get("ablation") != expected_source.to_dict():
-        raise ValueError("ablation upstream structure mismatch")
-    expected_stage = "full"
-    if source.get("training_stage") != expected_stage:
-        raise ValueError("ablation upstream training stage mismatch")
-    if source.get("training_seed") != config.training.seed:
-        raise ValueError("ablation upstream seed mismatch")
-    if source.get("dataset_manifest_sha256") != manifest_digest:
-        raise ValueError("ablation upstream dataset mismatch")
-    if _fixed_model_config(source.get("model_config")) != _serializable(asdict(config.model)):
-        raise ValueError("ablation upstream model configuration mismatch")
-    if source.get("resolution") != _serializable(asdict(config.resolution)):
-        raise ValueError("ablation upstream resolution mismatch")
-    if source.get("duration_ms") != config.dataset.duration_ms:
-        raise ValueError("ablation upstream duration mismatch")
-    prefix = "event_refinement_head."
-    expected = {name for name in model.state_dict() if not name.startswith(prefix)}
-    if set(source["model_state"]) != expected:
-        raise ValueError("ablation upstream state keys mismatch")
-    incompatible = model.load_state_dict(source["model_state"], strict=False)
-    missing = {name for name in model.state_dict() if name.startswith(prefix)}
-    if set(incompatible.missing_keys) != missing or incompatible.unexpected_keys:
-        raise ValueError("ablation upstream could not be loaded strictly")
-    return {
-        "kind": "ablation_upstream", "path": str(path), "sha256": _file_sha256(path),
-        "epoch": source["epoch"], "ablation": source["ablation"],
-    }
 
 
 def _dataset(config: TraceFormerConfig, split: str) -> NPZEventDataset:
@@ -292,6 +115,8 @@ def _validate_checkpoint_contract(
     if checkpoint.get("resolution") != _serializable(asdict(config.resolution)):
         raise ValueError("checkpoint resolution does not match the supplied config")
 
+    if checkpoint.get("duration_ms") != config.dataset.duration_ms:
+        raise ValueError("checkpoint time normalization differs")
     checkpoint_refinement = checkpoint.get("frame_refinement_config")
     expected_refinement = _serializable(asdict(config.frame_refinement))
     if not isinstance(checkpoint_refinement, dict) or _config_subset(
@@ -440,26 +265,6 @@ def _dense_sequence_loss_weight(
     if lower <= background_polarity <= upper:
         return float(training.dense_sequence_weight)
     return 1.0
-
-
-def load_inference_model(
-    config: TraceFormerConfig,
-    checkpoint_path: str | Path,
-    *,
-    device: torch.device,
-) -> tuple[TraceFormer, dict[str, Any]]:
-    """严格校验检查点契约并构建只读推理模型。"""
-
-    config.validate()
-    checkpoint = torch.load(
-        checkpoint_path, map_location=device, weights_only=True
-    )
-    _validate_checkpoint_contract(checkpoint, config)
-    model = build_model(config).to(device)
-    model.load_state_dict(checkpoint["model_state"], strict=True)
-    model.eval()
-
-    return model, checkpoint
 
 
 def _event_refinement_loss(
@@ -649,16 +454,6 @@ def _metrics_markdown(metrics: dict[str, Any]) -> str:
     )
 
 
-def _run_directory(
-    config: TraceFormerConfig, output_dir: str | Path | None, *, device_name: str
-) -> Path:
-    return create_run_directory(
-        config.training.output_root,
-        device_name,
-        output_dir=output_dir,
-    )
-
-
 def _dataset_manifest(*datasets: NPZEventDataset) -> dict[str, Any]:
     files = []
     for dataset in datasets:
@@ -705,20 +500,9 @@ def _branch_contract(configuration: dict[str, Any]) -> dict[str, Any]:
     contract = json.loads(json.dumps(configuration))
     contract["model"] = normalize_model_config(contract["model"])
     training = contract["training"]
-    for name in (
-        "device",
-        "epochs",
-        "output_root",
-        "lr_schedule",
-        "fast_learning_epochs",
-        "fixed_learning_rate_ratio",
-        "min_learning_rate_ratio",
-        "plateau_factor",
-        "plateau_patience",
-        "plateau_min_delta",
-        "save_training_state_interval",
-    ):
+    for name in ("device", "output_root"):
         training.pop(name, None)
+    contract["dataset"].pop("root", None)
     return contract
 
 
@@ -764,6 +548,7 @@ def _training_state_payload(
     torch_device: torch.device,
 ) -> dict[str, Any]:
     return {
+        "execution_chunks": execution_contract(),
         "training_state_schema_version": TRAINING_STATE_SCHEMA_VERSION,
         "checkpoint_schema_version": CHECKPOINT_SCHEMA_VERSION,
         "branch_contract": _branch_contract(config),
@@ -812,7 +597,6 @@ def _run_training_impl(
     device: str | None = None,
     progress: bool = False,
     resume_state_path: str | Path | None = None,
-    initial_refinement_checkpoint_path: str | Path | None = None,
     ablation: AblationSpec | None = None,
 ) -> dict[str, Any]:
     config.validate()
@@ -849,37 +633,7 @@ def _run_training_impl(
         _write_json(run_dir / "ablation.json", ablation.to_dict())
     model = build_model(config, ablation=ablation).to(torch_device)
     initialization: dict[str, Any] | None = None
-    initialization_paths = (
-        initial_refinement_checkpoint_path,
-    )
-    if resume_state_path is not None and any(
-        path is not None for path in initialization_paths
-    ):
-        raise ValueError("initial checkpoints and resume state are mutually exclusive")
-    stage = config.training.stage
-    model.configure_training_stage(stage)
-    if resume_state_path is None:
-        if ablation is not None:
-            initialization = _initialize_ablation_stage(
-                model, config, ablation,
-                initial_refinement_checkpoint_path,
-                manifest_digest=manifest_digest, device=torch_device,
-            )
-        elif stage == "refinement":
-            if initial_refinement_checkpoint_path is None:
-                raise ValueError(
-                    "refinement training requires --initialize-refinement"
-                )
-            initialization = _initialize_refinement_head(
-                model,
-                config,
-                initial_refinement_checkpoint_path,
-                device=torch_device,
-            )
-        elif any(path is not None for path in initialization_paths):
-            raise ValueError("full training does not accept initialization checkpoints")
-        if stage != "refinement" and initial_refinement_checkpoint_path is not None:
-            raise ValueError("--initialize-refinement requires training.stage=refinement")
+    model.configure_training_stage("full")
     criterion = EventFocalDiceLoss(
         focal_alpha=config.loss.focal_alpha,
         focal_gamma=config.loss.focal_gamma,
@@ -913,6 +667,8 @@ def _run_training_impl(
         state = torch.load(
             Path(resume_state_path), map_location=torch_device, weights_only=False
         )
+        if state.get("execution_chunks") != execution_contract():
+            raise ValueError("training execution chunk settings changed")
         if state.get("training_state_schema_version") != TRAINING_STATE_SCHEMA_VERSION:
             raise ValueError("unsupported training state schema version")
         if _branch_contract(state["branch_contract"]) != _branch_contract(configuration):
@@ -1118,7 +874,6 @@ def _run_training_impl(
         }
         history.append(epoch_record)
         _write_json(run_dir / "history.json", history)
-        _update_training_curves(run_dir, history)
         competition = metrics["competition"]
         score = float(competition["score"])
         print(
@@ -1214,210 +969,3 @@ def _run_training_impl(
     }
     _write_json(run_dir / "summary.json", summary)
     return summary
-
-
-def run_training(
-    config: TraceFormerConfig,
-    *,
-    output_dir: str | Path | None = None,
-    device: str | None = None,
-    progress: bool = False,
-    note: str | None = None,
-    config_source: str | Path | None = None,
-    resume_state_path: str | Path | None = None,
-    initial_refinement_checkpoint_path: str | Path | None = None,
-    ablation: AblationSpec | None = None,
-) -> dict[str, Any]:
-    """Train while maintaining the run experiment record and output index."""
-    config.validate()
-    device_name = device or config.training.device
-    if device_name not in {"cpu", "cuda"}:
-        raise ValueError("device must be exactly 'cpu' or 'cuda'")
-    stage = (
-        "smoke"
-        if config.training.max_train_files is not None
-        or config.training.max_val_files is not None
-        else "full"
-    )
-    run_dir = _run_directory(config, output_dir, device_name=device_name)
-    if resume_state_path is not None and any(
-        path is not None
-        for path in (
-                initial_refinement_checkpoint_path,
-        )
-    ):
-        raise ValueError("initial checkpoints and resume state are mutually exclusive")
-    record_run_started(
-        run_dir,
-        device=device_name,
-        mode="resume" if resume_state_path is not None else "fresh",
-        stage=stage,
-        note=note,
-        config_source=config_source,
-        resumed_from=resume_state_path,
-        source_epoch=(
-            int(
-                torch.load(
-                    Path(resume_state_path), map_location="cpu", weights_only=False
-                )["epoch"]
-            )
-            if resume_state_path is not None
-            else None
-        ),
-    )
-    try:
-        summary = _run_training_impl(
-            config,
-            output_dir=run_dir,
-            device=device,
-            progress=progress,
-            resume_state_path=resume_state_path,
-            initial_refinement_checkpoint_path=(
-                initial_refinement_checkpoint_path
-            ),
-            ablation=ablation,
-        )
-    except BaseException as error:
-        try:
-            record_run_finished(run_dir, status="失败", failure=str(error))
-            rebuild_output_index(run_dir.parent)
-        except Exception as bookkeeping_error:
-            if hasattr(error, "add_note"):
-                error.add_note(f"artifact update also failed: {bookkeeping_error}")
-        raise
-    try:
-        record_run_finished(run_dir, status="成功")
-        rebuild_output_index(run_dir.parent)
-    except Exception as bookkeeping_error:
-        raise RuntimeError(
-            "training core operation succeeded but artifact update failed"
-        ) from bookkeeping_error
-    return summary
-
-
-def evaluate_checkpoint(
-    config: TraceFormerConfig,
-    checkpoint_path: str | Path,
-    *,
-    device: str = "cpu",
-    progress: bool = False,
-    ablation: AblationSpec | None = None,
-) -> dict[str, Any]:
-    config.validate()
-    runtime = prepare_device(device, num_threads=config.training.num_threads)
-    torch_device = runtime.device
-    checkpoint = torch.load(
-        checkpoint_path, map_location=torch_device, weights_only=True
-    )
-    _validate_checkpoint_contract(checkpoint, config, ablation=ablation)
-    validation_dataset = _dataset(config, "val")
-    actual_validation_digest = _manifest_identity_digest(
-        _dataset_manifest(validation_dataset)
-    )
-    if checkpoint.get("validation_manifest_sha256") != actual_validation_digest:
-        raise ValueError("checkpoint validation dataset manifest does not match current data")
-    model = build_model(config, ablation=ablation).to(torch_device)
-
-    model.load_state_dict(checkpoint["model_state"])
-    threshold = checkpoint.get("decision_threshold")
-    return evaluate_model(
-        model,
-        validation_dataset,
-        config,
-        device=torch_device,
-        progress=progress,
-        threshold_override=threshold,
-    )
-
-
-def _loaded_to_event_sequence(
-    loaded: LoadedEventSequence,
-    config: TraceFormerConfig,
-) -> EventSequence:
-    """Bridge from the pipeline's *LoadedEventSequence* to *EventSequence* for submission."""
-    return EventSequence(
-        x=loaded.events[:, 0].round().to(torch.int64).numpy(),
-        y=loaded.events[:, 1].round().to(torch.int64).numpy(),
-        t=loaded.timestamps_ms.numpy(),
-        p=loaded.events[:, 3].round().to(torch.int64).numpy(),
-        width=config.resolution.width,
-        height=config.resolution.height,
-        source_path=loaded.source_path,
-    )
-
-
-def generate_submission_package(
-    config: TraceFormerConfig,
-    checkpoint_path: str | Path,
-    output_dir: str | Path,
-    *,
-    device: str = "cpu",
-    progress: bool = False,
-) -> Path:
-    """Load a trained checkpoint and produce a competition-ready submission ZIP.
-
-    Steps
-    -----
-    1. Validate *config* and the checkpoint metadata.
-    2. Run inference on every file in the validation set.
-    3. For each sequence write a ``val_XXX.txt`` with the five-column format
-       ``x y t p predicted_label``.
-    4. Bundle all TXT files into ``submission.zip``.
-
-    Returns the path of the created ZIP archive.
-    """
-    config.validate()
-    runtime = prepare_device(device, num_threads=config.training.num_threads)
-    torch_device = runtime.device
-    checkpoint = torch.load(
-        checkpoint_path, map_location=torch_device, weights_only=True
-    )
-    _validate_checkpoint_contract(checkpoint, config)
-    validation_dataset = _dataset(config, "val")
-    actual_validation_digest = _manifest_identity_digest(
-        _dataset_manifest(validation_dataset)
-    )
-    if checkpoint.get("validation_manifest_sha256") != actual_validation_digest:
-        raise ValueError("checkpoint validation dataset manifest does not match current data")
-    model = build_model(config).to(torch_device)
-    model.load_state_dict(checkpoint["model_state"])
-
-    threshold = float(checkpoint.get("decision_threshold", config.inference.sigmoid_threshold))
-    model.eval()
-
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    for index in range(len(validation_dataset)):
-        sequence = validation_dataset[index]
-        events = sequence.events.to(torch_device)
-        with torch.no_grad():
-            batch_indices = torch.zeros(
-                len(events), dtype=torch.long, device=torch_device
-            )
-            output = model(events, batch_indices)
-        logits = output["event_logits"].detach().cpu()
-        event_sequence = _loaded_to_event_sequence(sequence, config)
-        rows = generate_submission_rows(event_sequence, logits, threshold)
-        txt_name = f"{event_sequence.source_stem}.txt"
-        write_prediction_txt(rows, output_dir, txt_name)
-        if progress:
-            print(
-                f"  {index + 1:03d}/{len(validation_dataset):03d} "
-                f"{txt_name}: {sequence.length:,} events",
-                flush=True,
-            )
-
-    zip_path = output_dir / "submission.zip"
-    pack_submission_zip(output_dir, zip_path)
-    return zip_path
-
-
-__all__ = [
-    "_amp_is_enabled",
-    "build_model",
-    "evaluate_checkpoint",
-    "evaluate_model",
-    "load_inference_model",
-    "run_training",
-]

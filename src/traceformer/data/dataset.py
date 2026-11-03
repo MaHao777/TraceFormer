@@ -42,8 +42,10 @@ class NPZEventDataset(Dataset[LoadedEventSequence]):
         height: int = 260,
         duration_ms: float = 8000.0,
         limit_files: int | None = None,
+        require_annotations: bool = True,
     ) -> None:
         self.root = Path(root)
+        self.require_annotations = require_annotations
         self.width = int(width)
         self.height = int(height)
         self.duration_ms = float(duration_ms)
@@ -67,15 +69,17 @@ class NPZEventDataset(Dataset[LoadedEventSequence]):
                 raise ValueError(f"{path.name}: missing structured 'ev' array")
             source = archive["ev"]
         fields = source.dtype.names
-        if fields is None or any(name not in fields for name in REQUIRED_EVENT_FIELDS):
-            raise ValueError(f"{path.name}: ev must contain fields {REQUIRED_EVENT_FIELDS}")
+        required = REQUIRED_EVENT_FIELDS if self.require_annotations else ("x", "y", "t", "p")
+        if fields is None or any(name not in fields for name in required):
+            raise ValueError(f"{path.name}: ev must contain fields {required}")
 
         x = source["x"]
         y = source["y"]
         timestamp = source["t"].astype(np.float64, copy=False)
         polarity = source["p"]
-        label = source["label"]
-        object_id = source["name"]
+        # 无标注推理不读取标签；占位数组只满足共享序列容器。
+        label = source["label"] if self.require_annotations else np.zeros(len(source), dtype=np.int64)
+        object_id = source["name"] if self.require_annotations else np.zeros(len(source), dtype=np.int64)
 
         if len(source) == 0:
             raise ValueError(f"{path.name}: empty event sequence")

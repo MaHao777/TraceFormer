@@ -59,6 +59,7 @@ class EventTokenizer(nn.Module):
             nn.GELU(),
             nn.Linear(self.event_embed_dim, self.event_embed_dim),
         )
+        # 临时查询参数仅保持论文初始化随机流，工厂随后删除，前向不使用。
         self.pool_queries = nn.Parameter(
             torch.empty(self.num_pool_queries, self.event_embed_dim)
         )
@@ -96,51 +97,6 @@ class EventTokenizer(nn.Module):
             nn.LayerNorm(self.token_dim),
         )
 
-    def _attention_pool(
-        self,
-        encoded_events: torch.Tensor,
-        inverse: torch.Tensor,
-        *,
-        token_count: int,
-    ) -> torch.Tensor:
-        """Pool variable-length event groups without padding."""
-        keys = self.key_projection(encoded_events)
-        values = self.value_projection(encoded_events)
-        value_indices = inverse[:, None].expand(-1, self.event_embed_dim)
-        scale = 1.0 / math.sqrt(self.event_embed_dim)
-        pooled_queries = []
-        for query in self.pool_queries:
-            logits = torch.sum(keys * query, dim=1) * scale
-            group_maximum = torch.full(
-                (token_count,),
-                -torch.inf,
-                dtype=logits.dtype,
-                device=logits.device,
-            )
-            group_maximum.scatter_reduce_(
-                0,
-                inverse,
-                logits,
-                reduce="amax",
-                include_self=True,
-            )
-            unnormalized_weights = torch.exp(logits - group_maximum[inverse])
-            normalizers = torch.zeros(
-                token_count,
-                dtype=logits.dtype,
-                device=logits.device,
-            )
-            normalizers.scatter_add_(0, inverse, unnormalized_weights)
-            weights = unnormalized_weights / normalizers[inverse].clamp_min(
-                torch.finfo(logits.dtype).tiny
-            )
-            weighted_values = values * weights[:, None]
-            pooled = weighted_values.new_zeros(
-                (token_count, self.event_embed_dim)
-            )
-            pooled.scatter_add_(0, value_indices, weighted_values)
-            pooled_queries.append(pooled)
-        return torch.stack(pooled_queries, dim=1)
 
     def _split_input(
         self,
@@ -162,17 +118,6 @@ class EventTokenizer(nn.Module):
             raise ValueError("batch indices must be non-negative")
         return events, parsed_batches
 
-    def _encode_block_features(
-        self,
-        local_features: torch.Tensor,
-        inverse: torch.Tensor,
-        counts: torch.Tensor,
-        statistics: torch.Tensor,
-    ) -> torch.Tensor:
-        # 独立聚合入口供编码消融使用；正式模型保留原 attention 运算。
-        encoded = self.event_encoder(local_features)
-        pooled = self._attention_pool(encoded, inverse, token_count=len(counts))
-        return self.query_fusion(pooled.flatten(start_dim=1))
 
     def _empty(self, events: torch.Tensor) -> TokenizedEvents:
         device = events.device

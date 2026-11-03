@@ -1,0 +1,38 @@
+# 九组共用 s1.yaml；命令行 --variant 选择对应的结构契约。
+variants:
+  S1:
+    contract: {variant: S1, version: 4}
+    parameters: 143350
+    modification: Full paper model
+  S0:
+    contract: {variant: S0, version: 4}
+    parameters: 142774
+    modification: Event-embedding mean instead of spatial pooling
+  A1:
+    contract: {variant: A1, version: 6}
+    parameters: 79603
+    modification: Remove encoder cross-token interaction, retaining FFN/LN/residuals
+  A2:
+    contract: {variant: A2, version: 6}
+    parameters: 135172
+    modification: Remove neural refinement and its auxiliary cell loss
+  P1:
+    contract: {variant: P1, version: 6}
+    parameters: 142838
+    modification: 1x1 depthwise kernel, retaining GELU and count-weighted readout
+  G1:
+    contract: {variant: G1, version: 6}
+    parameters: 143350
+    modification: Approximately volume-matched fixed windows (6,2)/(3,4)/(1,8)
+  G2:
+    contract: {variant: G2, version: 6}
+    parameters: 142966
+    modification: Middle (4,4) cone only
+  F1:
+    contract: {variant: F1, version: 6}
+    parameters: 143158
+    modification: Valid-summary mean and 64-128-64 MLP instead of center-query attention
+  T1:
+    contract: {variant: T1, version: 6}
+    parameters: 130102
+    modification: Gated direct-token attention on the deduplicated three-cone union
