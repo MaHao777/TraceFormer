@@ -203,6 +203,7 @@ class MultiScaleEventRefinementHead(nn.Module):
         normalized_time: torch.Tensor,
         event_batch_indices: torch.Tensor,
         base_event_logits: torch.Tensor,
+        parent_tokens: torch.Tensor | None = None,
     ) -> EventRefinementOutput:
         event_count = len(event_token_indices)
         if event_count == 0:
@@ -214,10 +215,12 @@ class MultiScaleEventRefinementHead(nn.Module):
                 ),
                 event_logits=empty_logits,
             )
-        parent_features = token_features[event_token_indices]
+        # 共享展开保持事件顺序和精修输入的拼接方式。
+        if parent_tokens is None:
+            parent_tokens = token_features[event_token_indices]
         event_features = self.event_projection(
             torch.cat(
-                (parent_features, event_local_features, base_event_logits[:, None]),
+                (parent_tokens, event_local_features, base_event_logits[:, None]),
                 dim=1,
             )
         )

@@ -128,7 +128,7 @@ done
 
 Structure comparisons use S1/S0/A1/A2; mechanism comparisons use S1/S0/P1/G1/G2/F1/T1. G1 is not exactly volume/occupancy matched. G2 changes both scales and summary slots. T1 has no neighbor cap and does not isolate coordinate anchoring. These are single-seed results, not evidence of statistical significance or improvements on every sequence/metric.
 
-Execution chunking preserves complete supports. Spatial pooling uses `TRACEFORMER_SPATIAL_TOKEN_CHUNK=4096`; T1 uses `TRACEFORMER_S1_DIRECT_QUERY_CHUNK=256`. The original prefix-sum implementation uses 1024-query chunks during training and CPU execution, and 16384 in CUDA inference. Keep settings unchanged for exact resume. S1's published 41.499 ms mean is the complete neural forward on GPU-resident input on the paper RTX 4090; it excludes data loading, transfer and scoring. It is not a newly measured release benchmark.
+Execution chunking preserves complete supports. Spatial pooling uses `TRACEFORMER_SPATIAL_TOKEN_CHUNK=4096`; T1 uses `TRACEFORMER_S1_DIRECT_QUERY_CHUNK=256`. The original prefix-sum implementation uses 1024-query chunks during training and CPU execution, and 16384 in CUDA inference. Keep settings unchanged for exact resume.
 
 ## Release verification
 
@@ -138,4 +138,4 @@ Full CPU reevaluation covered all 24 validation and 24 test sequences: event pro
 
 CUDA execution of this reorganized release has not been rerun on the CPU-only release host; the historical paper GPU measurements retain their original scope. Test tools, evidence and generated predictions are kept outside this publication repository.
 
-CUDA inference reuses the cone membership counts across encoder layers within each forward pass. On 24 EV-UAV test sequences, a paired RTX 4090 FP32 benchmark with one warm-up and one timed pass per sequence reduced mean latency from 37.60 to 35.56 ms (5.42%) and P95 from 102.54 to 100.96 ms. All 2,074,586 event decisions matched the uncached baseline. This measurement uses a separate timing protocol from the original ablation.
+The released CUDA path reuses cone membership counts across encoder layers and shares the expanded parent-token features between the decoder and refinement head. On an RTX 4090 in FP32, S1 averages 35.47 ms per sequence across all 24 EV-UAV test sequences, with one warm-up and one timed forward per sequence. Inputs are GPU-resident and timing excludes loading, transfer and scoring.

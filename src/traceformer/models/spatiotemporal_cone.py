@@ -127,13 +127,24 @@ class TraceFormer(nn.Module):
             tokenized.token_coords,
             tokenized.token_batch_indices,
         )
+        token_features = encoded.token_features
+        # 仅在两条分支均使用父 Token 的 CUDA 推理中提前展开一次。
+        share_parent_tokens = (
+            token_features.is_cuda
+            and not torch.is_grad_enabled()
+            and isinstance(self.event_refinement_head, MultiScaleEventRefinementHead)
+        )
+        parent_options = (
+            {"parent_tokens": token_features[tokenized.event_token_indices]}
+            if share_parent_tokens else {}
+        )
         base_event_logits = self.decoder(
-            encoded.token_features,
+            token_features,
             tokenized.event_token_indices,
             tokenized.event_local_features,
+            **parent_options,
         )
         # 单视图直接解码全部原始事件，精修仍读取完整 Token。
-        token_features = encoded.token_features
         refinement = self.event_refinement_head(
             token_features=token_features,
             event_token_indices=tokenized.event_token_indices,
@@ -142,6 +153,7 @@ class TraceFormer(nn.Module):
             normalized_time=tokenized.normalized_time,
             event_batch_indices=tokenized.event_batch_indices,
             base_event_logits=base_event_logits,
+            **parent_options,
         )
         refinement_cell_logits = refinement.cell_logits
         refinement_event_cell_indices = refinement.event_cell_indices

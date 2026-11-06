@@ -31,10 +31,14 @@ class EventDecoder(nn.Module):
         token_features: torch.Tensor,
         event_token_indices: torch.Tensor,
         event_local_features: torch.Tensor,
+        *,
+        parent_tokens: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if len(event_token_indices) == 0:
             return token_features.new_empty((0,))
-        parent_tokens = token_features[event_token_indices]
+        # CUDA 推理可以传入与精修头共享的父 Token。
+        if parent_tokens is None:
+            parent_tokens = token_features[event_token_indices]
         decoder_input = torch.cat(
             (
                 parent_tokens,
