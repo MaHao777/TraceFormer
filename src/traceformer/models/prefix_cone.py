@@ -21,6 +21,7 @@ class PrefixSample:
     flat_indices: torch.Tensor
     shape: tuple[int, int, int]
     corner_cache: dict[tuple, torch.Tensor] | None = field(default=None, compare=False, repr=False)
+    count_cache: dict[tuple, torch.Tensor] | None = field(default=None, compare=False, repr=False)
 
 
 def _rectangle_indices(
@@ -99,14 +100,20 @@ class _ConeSums(torch.autograd.Function):
         integral = F.pad(
             grid.reshape(times, height, width, -1).cumsum(1).cumsum(2), (0, 0, 1, 0, 1, 0)
         ).flatten(0, 2)
-        occupied = torch.zeros(times * height * width, device=features.device, dtype=torch.int64)
-        occupied.index_add_(0, sample.flat_indices, torch.ones_like(sample.flat_indices))
-        occupied = F.pad(
-            occupied.reshape(times, height, width).cumsum(1).cumsum(2), (1, 0, 1, 0)
-        ).flatten()
+        # 成员数只依赖本次前向的坐标与窗口，特征前缀和仍逐层计算。
+        count_key = (windows, directions, fixed_radius, metric)
+        counts = None if sample.count_cache is None else sample.count_cache.get(count_key)
+        occupied = None
+        if counts is None:
+            occupied = torch.zeros(times * height * width, device=features.device, dtype=torch.int64)
+            occupied.index_add_(0, sample.flat_indices, torch.ones_like(sample.flat_indices))
+            occupied = F.pad(
+                occupied.reshape(times, height, width).cumsum(1).cumsum(2), (1, 0, 1, 0)
+            ).flatten()
         total = features.new_zeros((len(features), len(directions) * len(windows), features.shape[-1]))
-        counts = torch.zeros(total.shape[:2], dtype=torch.int64, device=features.device)
-        signs = features.new_tensor([1, -1, -1, 1])
+        if occupied is not None:
+            counts = torch.zeros(total.shape[:2], dtype=torch.int64, device=features.device)
+            signs = features.new_tensor([1, -1, -1, 1])
         for start in range(0, len(features), chunk_size):
             end = min(start + chunk_size, len(features))
             for index, window in enumerate(windows):
@@ -124,7 +131,10 @@ class _ConeSums(torch.autograd.Function):
                         + integral[corners[..., 3]]
                     )
                     total[start:end, slot] = rectangle.sum(1)
-                    counts[start:end, slot] = (occupied[corners] * signs.long()).sum((1, 2))
+                    if occupied is not None:
+                        counts[start:end, slot] = (occupied[corners] * signs.long()).sum((1, 2))
+        if occupied is not None and sample.count_cache is not None:
+            sample.count_cache[count_key] = counts
         ctx.sample, ctx.windows, ctx.chunk_size = sample, windows, chunk_size
         ctx.fixed_radius = fixed_radius
         ctx.directions = directions
@@ -173,7 +183,9 @@ def prepare_prefix_geometry(coords: torch.Tensor, batches: torch.Tensor) -> list
         flat = (xyz[:, 2] * height + xyz[:, 1]) * width + xyz[:, 0]
         # 整数几何仅在本次无梯度前向内复用；训练不保留索引缓存。
         cache = {} if not torch.is_grad_enabled() else None
-        samples.append(PrefixSample(indices, xyz, flat, (times, height, width), cache))
+        # CUDA 推理跨层复用锥计数，样本结束后随几何一起释放。
+        count_cache = {} if cache is not None and coords.is_cuda else None
+        samples.append(PrefixSample(indices, xyz, flat, (times, height, width), cache, count_cache))
     return samples
 
 
